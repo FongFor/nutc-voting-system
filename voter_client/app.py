@@ -10,7 +10,7 @@ app = Flask(__name__)
 
 def home():
 
-    return "測試"
+    return "測試 TESTTESTTESTTESTTESTTESTTESTTESTTEST"
 
 
 
