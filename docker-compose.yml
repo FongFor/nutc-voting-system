@@ -1,0 +1,74 @@
+version: '3.8'
+
+services:
+  # 1. 憑證授權中心 (CA)
+  ca:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: voting_ca
+    command: python ca_server/app.py
+    volumes:
+      - .:/app  # 同步目前檔案目錄
+    ports:
+      - "5000:5000"
+
+  # 2. 第三方機構 (TPA)
+  tpa:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: voting_tpa
+    command: python tpa_server/app.py
+    volumes:
+      - .:/app
+    ports:
+      - "5001:5000"
+
+  # 3. 時間授權中心 (TA)
+  ta:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: voting_ta
+    command: python ta_server/app.py
+    volumes:
+      - .:/app
+    ports:
+      - "5002:5000"
+
+  # 4. 計票中心 (CC)
+  cc:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: voting_cc
+    command: python cc_server/app.py
+    volumes:
+      - .:/app
+    ports:
+      - "5003:5000"
+
+  # 5. 公告板 (BB)
+  bb:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: voting_bb
+    command: python bb_server/app.py
+    volumes:
+      - .:/app
+    ports:
+      - "5004:5000"
+
+  # 6. 選民端 (Voter)
+  voter:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: voting_voter
+    command: python voter_client/app.py
+    volumes:
+      - .:/app
+    ports:
+      - "5005:5000"
