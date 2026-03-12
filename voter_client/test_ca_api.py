@@ -16,7 +16,7 @@ public_key_pem = voter_public_key.public_bytes(
 ).decode('utf-8')
 
 # 3. 準備發送 API 請求給 CA 伺服器
-ca_url = "http://127.0.0.1:5000/api/issue_cert"
+ca_url = "http://127.0.0.1:5001/api/issue_cert"
 payload = {
     "entity_id": "Voter_001",
     "public_key": public_key_pem

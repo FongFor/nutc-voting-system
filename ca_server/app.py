@@ -123,6 +123,6 @@ def handle_issue_cert():
         return jsonify({"status": "error", "message": str(e)}), 500
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    app.run(host='0.0.0.0', port=5001, debug=True)
     # host='0.0.0.0' 非常重要！這樣 Docker 容器外的電腦才連得進去
-    app.run(host='0.0.0.0', port=5000)
+    app.run(host='0.0.0.0', port=5001)
