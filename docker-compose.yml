@@ -1,4 +1,4 @@
-version: '3.8'
+#version: '3.8'
 
 services:
   # 1. 憑證授權中心 (CA)
@@ -11,7 +11,7 @@ services:
     volumes:
       - .:/app  # 同步目前檔案目錄
     ports:
-      - "5000:5000"
+      - "5001:5001"
 
   # 2. 第三方機構 (TPA)
   tpa:
@@ -23,7 +23,7 @@ services:
     volumes:
       - .:/app
     ports:
-      - "5001:5000"
+      - "5000:5000"
 
   # 3. 時間授權中心 (TA)
   ta:
@@ -71,4 +71,4 @@ services:
     volumes:
       - .:/app
     ports:
-      - "5005:5000"
+      - "5005:5001"
