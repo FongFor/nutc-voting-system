@@ -206,6 +206,7 @@ if __name__ == '__main__':
     SN = "20260324001" 
     Vote = "Candidate_A"
     
+    
     # 第一層內部雜湊: H(ID || SN || Vote)
     inner_content = f"{ID_Voter}{SN}{Vote}".encode('utf-8')
     print(inner_content)
