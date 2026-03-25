@@ -1,7 +1,9 @@
 import sys
 import os
 from cryptography.hazmat.primitives.asymmetric import rsa
-
+import time
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric import padding
 # 1. 取得目前 test.py 所在的絕對路徑
 current_dir = os.path.dirname(os.path.abspath(__file__))
 
@@ -21,6 +23,7 @@ from shared.crypto_utils_test import (
     unblind_signature, 
     verify_blind_signature
 )
+from shared.crypto_generate_key_pair import (generate_rsa_keypair)
 
 class CA:
     """憑證授權中心：負責核發與驗證數位憑證"""
@@ -32,31 +35,73 @@ class CA:
 
 class TPA:
     """第三方機構：負責身分驗證與盲簽章"""
-    def __init__(self, e,d,n):
-        self.e = e
-        self.d = d
-        self.n = n
-    def verify_voter_auth(self, auth_packet):
+    def __init__(self, tpa_id: str):
+        self.id = tpa_id
+        self.private_key, self.public_key, self.e, self.n, self.d = generate_rsa_keypair()
+    def verify_voter_auth(self, auth_packet: dict, voter_public_key) -> bool:
         """階段二：驗證選民身分與時間戳記"""
-        pass
-        
-    def blind_sign(self, blinded_message):
-        """階段三：使用私鑰對盲化選票進行簽署 S = (m')^d mod n"""
-        pass
+        print(f"[{self.id}] 收到來自 {auth_packet['voter_id']} 的認證封包，開始驗證...")
+
+        # 1. 檢查接收者是不是自己
+        if auth_packet['tpa_id'] != self.id:
+            print(f"[{self.id}] 驗證失敗：這個封包不是發給我的 ")
+            return False
+
+        # 2. 檢查時間戳記 (例如限制 5 分鐘 / 300 秒內有效)
+        current_time = int(time.time())
+        if current_time - auth_packet['timestamp'] > 300:
+            print(f"[{self.id}] 驗證失敗：封包已過期")
+            return False
+
+        # 3. 驗證數位簽章
+        try:
+            # 使用 Voter 的公鑰來解開並驗證簽章
+            voter_public_key.verify(
+                auth_packet['signature'],
+                auth_packet['payload_bytes'],
+                padding.PSS(
+                    mgf=padding.MGF1(hashes.SHA256()),
+                    salt_length=padding.PSS.MAX_LENGTH
+                ),
+                hashes.SHA256()
+            )
+            print(f"[{self.id}] 驗證成功：確認為 {auth_packet['voter_id']} 本人，且訊息未遭竄改。")
+            return True
+            
+        except Exception as e:
+            # 如果簽章不符，套件會直接拋出 Exception
+            print(f"[{self.id}] 驗證失敗：數位簽章無效！")
+            return False
     def sign_vote(self, m_prime: int) -> int:
         # TPA 只需要呼叫 blind_sign 函式，並帶入自己的私鑰 d
         print("[TPA] 收到盲化選票，執行盲簽署...")
         return blind_sign(m_prime, self.d, self.n)
 class Voter:
-    """選民：系統的主要使用者"""
-    def __init__(self, tpa_e, tpa_n):
-        # Voter 已經從憑證中心或公告板拿到了 TPA 的公鑰參數
-        self.tpa_e = tpa_e
-        self.tpa_n = tpa_n
-        self.r = None # 準備存放盲化因子
-    def generate_auth_packet(self, tpa_id):
-        """階段二：產生雙向身分認證封包"""
-        pass
+    def __init__(self, voter_id: str): #voter 系統初始化
+        self.id = voter_id
+        self.private_key, self.public_key, self.e, self.n, self.d = generate_rsa_keypair()
+    def generate_auth_packet(self, tpa_id: str) -> dict: #生成認證封包
+        timestamp = int(time.time())
+        inner_payload = f"{self.id}|{tpa_id}|{timestamp}"
+        auth_signature = self.private_key.sign(
+            inner_payload.encode('utf-8'),
+            padding.PSS(
+                mgf=padding.MGF1(hashes.SHA256()),
+                salt_length=padding.PSS.MAX_LENGTH
+            ),
+            hashes.SHA256()
+            )
+
+        print(f"[{self.id}] 已產生身分認證封包 (含時間戳記與數位簽章)。")
+        
+        # 回傳一個字典給 TPA
+        return {
+            "voter_id": self.id,
+            "tpa_id": tpa_id,
+            "CertVoter": self.certificate,
+            "timestamp": timestamp,
+            "signature": auth_signature
+        }
         
     def create_blinded_vote(self, vote_content, tpa_public_key):
         """階段三：計算雜湊值 m，選定亂數 r，並盲化 m' = r^e * m mod n"""
@@ -69,17 +114,15 @@ class Voter:
     def encapsulate_vote(self, signature, vote_content, cc_public_key, ta_public_key):
         """階段三：建立數位信封 (結合對稱與非對稱加密)"""
         pass
-    def prepare_blinded_vote(self, m: int) -> int:
-        # 1. 產生盲化因子
-        self.r = generate_blinding_factor(self.tpa_n)
-        # 2. 呼叫 blind_message 函式進行盲化
-        print("[Voter] 正在盲化選票...")
-        return blind_message(m, self.r, self.tpa_e, self.tpa_n)
+    def prepare_blinded_vote(self, m: int, tpa_e: int, tpa_n: int) -> int:
+        # 動態接收 TPA 的 e 與 n
+        self.r = generate_blinding_factor(tpa_n)
+        print(f"[{self.id}] 正在盲化選票...")
+        return blind_message(m, self.r, tpa_e, tpa_n)
 
-    def process_returned_signature(self, S: int) -> int:
-        # 3. 呼叫 unblind_signature 函式去盲化
-        print("[Voter] 收到 TPA 簽章，正在去盲化...")
-        return unblind_signature(S, self.r, self.tpa_n)
+    def process_returned_signature(self, S: int, tpa_n: int) -> int:
+        print(f"[{self.id}] 收到 TPA 簽章，正在去盲化...")
+        return unblind_signature(S, self.r, tpa_n)
 class TA:
     """時間授權中心：管理開票時間"""
     def __init__(self):
@@ -127,23 +170,40 @@ if __name__ == '__main__':
     # 步驟 0：系統初始化 (模擬 TPA 產生金鑰)
     # ---------------------------------------------------------
     print("\n[初始化] 正在生成 TPA 的 RSA 金鑰 (2048 bits)...")
-    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-    public_key = private_key.public_key()
+    tpa_server = TPA(tpa_id="TPA")
+    voter_client = Voter(voter_id="VOTER")
     
-    tpa_e = public_key.public_numbers().e
-    tpa_n = public_key.public_numbers().n
-    tpa_d = private_key.private_numbers().d
+    # ---------------------------------------------------------
+    # 步驟 1：測試雙向身分驗證與盲簽章流程
+    # ---------------------------------------------------------
+    print("\n--- 開始身分驗證流程 ---")
     
-    # 實例化 TPA 與 Voter
-    tpa_server = TPA(e=tpa_e, d=tpa_d, n=tpa_n)
-    voter_client = Voter(tpa_e=tpa_e, tpa_n=tpa_n)
+    # 1. Voter 盲化選票
+    m_prime = voter_client.prepare_blinded_vote(m, tpa_server.e, tpa_server.n)
+    
+    # 2. Voter 產生認證封包
+    auth_packet = voter_client.generate_auth_packet(tpa_server.id, m_prime)
+    
+    # 3. TPA 驗證封包 (在真實系統中，TPA 會從 CA 取得 Voter 的公鑰，這裡我們先直接拿來用)
+    is_authorized = tpa_server.verify_voter_auth(auth_packet, voter_client.public_key)
+    
+    if is_authorized:
+        # 4. 只有驗證通過，TPA 才願意進行盲簽署！
+        S = tpa_server.sign_vote(m_prime)
+        print(f"[TPA 端] 回傳給選民的盲簽章 S: {S}")
+        
+        # 5. Voter 去盲化
+        S_prime = voter_client.process_returned_signature(S, tpa_server.n)
+        print(f"[選民端] 最終取得的合法簽章 S': {S_prime}")
+    else:
+        print("[系統] TPA 拒絕簽署，中斷流程。")
     
     # ---------------------------------------------------------
     # 步驟 1：自訂 m 裡面的訊息 (選票內容)
     # ---------------------------------------------------------
     # 根據計畫書：m = H(H(ID || SN || Vote) || Vote)
-    ID_Voter = "Weilun_001"
-    SN = "20260312001" 
+    ID_Voter = "VOTER"
+    SN = "20260324001" 
     Vote = "Candidate_A"
     
     # 第一層內部雜湊: H(ID || SN || Vote)
@@ -169,7 +229,7 @@ if __name__ == '__main__':
     print("\n--- 開始盲簽章流程 ---")
     
     # 1. Voter 盲化選票
-    m_prime = voter_client.prepare_blinded_vote(m)
+    m_prime = voter_client.prepare_blinded_vote(m, tpa_server.e, tpa_server.n)
     print(f"[選民端] 傳送給 TPA 的盲化訊息 m': {m_prime}")
     
     # 2. TPA 簽署
@@ -177,14 +237,14 @@ if __name__ == '__main__':
     print(f"[TPA 端] 回傳給選民的盲簽章 S: {S}")
     
     # 3. Voter 去盲化
-    S_prime = voter_client.process_returned_signature(S)
+    S_prime = voter_client.process_returned_signature(S, tpa_server.n)
     print(f"[選民端] 最終取得的合法簽章 S': {S_prime}")
     
     # ---------------------------------------------------------
     # 步驟 3：數學驗證
     # ---------------------------------------------------------
     print("\n--- 驗證中心 ---")
-    is_valid = verify_blind_signature(S_prime, tpa_e, tpa_n, m)
+    is_valid = verify_blind_signature(S_prime, tpa_server.e, tpa_server.n, m)
     
     if is_valid:
         print("測試通過")
