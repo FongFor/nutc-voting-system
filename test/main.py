@@ -306,11 +306,11 @@ class TPA:
     def verify_voter_auth(self, auth_packet_json: str, voter_public_key_pem: str) -> bool:
         """
         Phase 2：驗證 Voter 的認證封包。
-        輸入均為 JSON 字串 / PEM 字串（模擬網路傳輸格式）。
+        輸入均為 JSON 字串 / PEM 字串。
         """
-        # 反序列化封包
+        # 拆包
         auth_packet = json.loads(auth_packet_json)
-        # 載入 Voter 公鑰物件
+        # 載入 Voter 公鑰
         voter_pub_key = serialization.load_pem_public_key(voter_public_key_pem.encode('utf-8'))
 
         print(f"[{self.id}] 正在驗證來自 {auth_packet['payload']['sender_id']} 的認證封包...")
@@ -378,7 +378,7 @@ class Voter:
     def generate_auth_packet_json(self, tpa_id: str) -> str:
         """
         Phase 2：產生認證封包。
-        回傳 JSON 字串（模擬網路傳輸格式）。
+        回傳 JSON 字串。
         """
         packet = create_auth_packet(self.id, tpa_id, self._private_key, self.cert_pem)
         return json.dumps(packet)
@@ -413,7 +413,7 @@ class Voter:
         tpa_e = hex_to_int(tpa_nums["e"])
         tpa_n = hex_to_int(tpa_nums["n"])
 
-        # 生成盲化因子並儲存（去盲化時需要）
+        # 生成盲化因子並儲存
         self._r = generate_blinding_factor(tpa_n)
         m_prime = blind_message(m, self._r, tpa_e, tpa_n)
         print(f"[{self.id}] 選票已盲化，m' 已計算。")
@@ -480,7 +480,7 @@ class Voter:
             ),
         )
 
-        # 所有 bytes 轉為 Base64，確保 JSON 可序列化
+        # 所有 bytes 轉為 Base64
         envelope = {
             "ciphertext": bytes_to_b64(ciphertext),
             "iv":         bytes_to_b64(iv),
@@ -745,7 +745,7 @@ class BB:
 
 
 # ============================================================
-# 主程式：端對端整合測試（Phase 1 → 6）
+# 主程式：測試（Phase 1 → 6）
 # ============================================================
 
 if __name__ == '__main__':
@@ -755,7 +755,7 @@ if __name__ == '__main__':
 
     # --------------------------------------------------------
     # Phase 1：系統初始化
-    # 各實體生成金鑰與憑證，僅執行一次（邏輯審計修正點）
+    # 各實體生成金鑰與憑證，僅執行一次
     # --------------------------------------------------------
     print("\n" + "─" * 65)
     print("  Phase 1：系統初始化（金鑰生成 + CA 憑證核發）")
@@ -969,17 +969,11 @@ if __name__ == '__main__':
     print("\n>>> Phase 6 完成：選民已驗證選票存在於合法計票結果中 <<<")
 
     # --------------------------------------------------------
-    # 總結
+    # 結果
     # --------------------------------------------------------
-    print("\n" + "=" * 65)
-    print("  端對端測試總結")
-    print("=" * 65)
-    print(f"  Phase 1 (Init)      : [OK] 金鑰生成 + CA 憑證核發")
-    print(f"  Phase 2 (Auth)      : [OK] 雙向身分認證（Delta T 通過）")
-    print(f"  Phase 3 (Blind Vote): [OK] 盲簽章 + 數位信封封裝")
-    print(f"  Phase 4 (Time Lock) : [OK] TA 截止後釋放 SK_TA")
-    print(f"  Phase 5 (Tally)     : [OK] CC 解密驗證 + Merkle Tree")
-    print(f"  Phase 6 (Verify)    : [OK] BB Merkle Proof 驗證")
+    print("")
+    print("")
+    print("")
     print("=" * 65)
     print(f"  合法選票數：{len(cc.valid_votes)}")
     print(f"  計票結果  ：{json.dumps(tally, ensure_ascii=False)}")
