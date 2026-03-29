@@ -1,22 +1,11 @@
 import sys
 import os
-from cryptography.hazmat.primitives.asymmetric import rsa
 import time
-from cryptography.hazmat.primitives import hashes
-from cryptography.hazmat.primitives.asymmetric import padding
-from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-# 1. 取得目前 test.py 所在的絕對路徑
-current_dir = os.path.dirname(os.path.abspath(__file__))
-
-# 2. 往上一層找到專案根目錄 (nutc-voting-system)
-project_root = os.path.dirname(current_dir)
-
-# 3. 把專案根目錄加進 Python 的搜尋路徑中
-sys.path.append(project_root)
 import hashlib
-import random
-# 先假設我們有一個自訂的 RSA 工具庫來處理大數運算
-# from shared.crypto_utils import rsa_generate_keys, rsa_encrypt, rsa_decrypt
+import os
+from cryptography.hazmat.primitives.asymmetric import padding
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from shared.crypto_utils_test import (
     generate_blinding_factor,
     blind_message,
@@ -24,7 +13,7 @@ from shared.crypto_utils_test import (
     unblind_signature,
     verify_blind_signature
 )
-from shared.crypto_generate_key_pair import (generate_rsa_keypair)
+from shared.crypto_generate_key_pair import generate_rsa_keypair
 
 # -----------------------------
 # 類別定義
@@ -69,7 +58,7 @@ class Voter:
         self.private_key, self.public_key, self.e, self.n, self.d = generate_rsa_keypair()
         self.r = None
 
-    # generate_auth_packet 修正，保留 timestamp
+    # 修改 generate_auth_packet 支援 m_prime
     def generate_auth_packet(self, tpa_id: str, m_prime: int) -> dict:
         timestamp = int(time.time())
         inner_payload = f"{self.id}|{tpa_id}|{timestamp}|{m_prime}"
@@ -85,7 +74,6 @@ class Voter:
         return {
             "voter_id": self.id,
             "tpa_id": tpa_id,
-            "timestamp": timestamp,             # 必須保留 timestamp
             "payload_bytes": inner_payload.encode('utf-8'),
             "signature": auth_signature
         }
@@ -133,7 +121,7 @@ class TA:
     def __init__(self):
         self.private_key, self.public_key, _, _, _ = generate_rsa_keypair()
 
-    def release_private_key(self, current_time, deadline):
+    def release_private_key(self, current_time, deadline):  # 給私鑰
         if current_time >= deadline:
             print("[TA] 時間到，釋放私鑰")
             return self.private_key
@@ -147,14 +135,15 @@ class CC:
 
     def receive_envelope(self, digital_envelope):
         k = self.private_key.decrypt(
-            digital_envelope['k_enc_cc'],
+            digital_envelope['k_enc_cc'],       # 拿加密過的 k_enc_cc
             padding.OAEP(
                 mgf=padding.MGF1(hashes.SHA256()),
                 algorithm=hashes.SHA256(),
                 label=None
             )
         )
-        self.pending_votes.append({            # 儲存資料 等TA私鑰
+        # 儲存未解密過的選票資料
+        self.pending_votes.append({
             "ciphertext": digital_envelope['ciphertext'],
             "iv": digital_envelope['iv'],
             "k": k,
@@ -164,7 +153,7 @@ class CC:
 
     def decrypt_and_verify_votes(self, ta_private_key, tpa_e, tpa_n):
         for vote in self.pending_votes:
-            k_ta = ta_private_key.decrypt(          # 用TA私鑰解選票
+            k_ta = ta_private_key.decrypt(      # 使用 ta_private_key 解密
                 vote['k_enc_ta'],
                 padding.OAEP(
                     mgf=padding.MGF1(hashes.SHA256()),
@@ -175,11 +164,10 @@ class CC:
             if k_ta != vote['k']:
                 print("[CC] 金鑰不一致，信封被篡改")
                 continue
-
-            # AES 解密
+            
             cipher = Cipher(algorithms.AES(vote['k']), modes.CFB(vote['iv']))
-            decryptor = cipher.decryptor()      # 解碼器
-            plaintext = decryptor.update(vote['ciphertext']) + decryptor.finalize()     # 解密
+            decryptor = cipher.decryptor()        # 解密器
+            plaintext = decryptor.update(vote['ciphertext']) + decryptor.finalize()     # 解密文
             vote_content, s_prime_str, m_str = plaintext.decode('utf-8').split("|")     # 解碼及分割字串
             # 轉整數
             s_prime = int(s_prime_str)
@@ -214,6 +202,7 @@ if __name__ == '__main__':
     inner_hash = hashlib.sha256(f"{ID_Voter}{SN}{Vote}".encode('utf-8')).hexdigest()
     outer_hash = hashlib.sha256(f"{inner_hash}{Vote}".encode('utf-8')).hexdigest()
     m = int(outer_hash, 16)
+    
     print(f"[選民端] 原始選票明文: {Vote}")
     print(f"[選民端] 轉換後的大整數 m: {m}")
 
