@@ -4,11 +4,11 @@ auth_component.py
 
  Voter、TPA 等實體在雙向認證（Phase 2）時用。
 
-【修復說明】
+【說明】
 issue：verify_auth_component 在重建 payload 時，
           欄位順序或格式跟 create_auth_packet 簽名時不一致，
 
-修復方式：統一用 JSON （json.dumps + sort_keys=True）
+方式：統一用 JSON （json.dumps + sort_keys=True）
           作為簽名的標準 payload，確保建立與驗證兩端一致。
 """
 
@@ -196,8 +196,8 @@ def verify_auth_component_temp(
     signature_bytes = base64.b64decode(signature_b64)
 
     # 步驟 4：重建 payload bytes 並驗證簽章
-    # 【關鍵修復】：直接對 payload dict 使用 _serialize_payload，
-    #              與 create_auth_packet 建立時完全一致，不再手動拼接字串
+    # 直接對 payload dict 使用 _serialize_payload，
+    #   與 create_auth_packet 建立時完全一致，不再手動拼接字串
     payload_bytes = _serialize_payload(payload)
 
     sender_public_key.verify(
