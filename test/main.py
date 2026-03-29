@@ -97,7 +97,7 @@ def b64_to_bytes(s: str) -> bytes:
 
 class MerkleTree:
     """
-    簡易 Merkle Tree 實作。
+    簡易 Merkle Tree。
     葉節點為各合法選票的 SHA-256 雜湊值。
     """
 
@@ -746,12 +746,24 @@ class BB:
 
 # ============================================================
 # 主程式：測試（Phase 1 → 6）
+# 模擬 3 位選民投票：投票依序 A, B, A
 # ============================================================
 
 if __name__ == '__main__':
     print("=" * 65)
-    print("nutc-voting-system")
+    print("nutc-voting-system  ─  （3 票：A, B, A）")
     print("=" * 65)
+
+    # --------------------------------------------------------
+    # 選民設定：(voter_id, 投票內容)
+    # SN ：20260324001 / 002 / 003
+    # --------------------------------------------------------
+    VOTER_CONFIGS = [
+        ("VOTER_001", "Candidate_A"),
+        ("VOTER_002", "Candidate_B"),
+        ("VOTER_003", "Candidate_A"),
+    ]
+    SN_BASE = "2026032400"   # SN = SN_BASE + str(idx+1)
 
     # --------------------------------------------------------
     # Phase 1：系統初始化
@@ -761,126 +773,124 @@ if __name__ == '__main__':
     print("  Phase 1：系統初始化（金鑰生成 + CA 憑證核發）")
     print("─" * 65)
 
-    # 實例化所有實體（各僅一次）
+    # 實例化系統實體（各僅一次）
     ca  = CA()
     tpa = TPA(tpa_id="TPA")
     ta  = TA(ta_id="TA", deadline=int(time.time()) + 5)   # 5 秒後截止（測試用）
     cc  = CC(cc_id="CC")
     bb  = BB()
-    voter = Voter(voter_id="VOTER_001")
 
-    # CA 核發憑證給各實體（輸入/輸出為 PEM 字串）
-    tpa.cert_pem   = ca.issue_certificate("TPA",      tpa.get_public_key_pem())
-    ta.cert_pem    = ca.issue_certificate("TA",       ta.get_public_key_pem())
-    cc.cert_pem    = ca.issue_certificate("CC",       cc.get_public_key_pem())
-    voter.cert_pem = ca.issue_certificate("VOTER_001", voter.get_public_key_pem())
+    # CA 核發憑證給系統實體
+    tpa.cert_pem = ca.issue_certificate("TPA", tpa.get_public_key_pem())
+    ta.cert_pem  = ca.issue_certificate("TA",  ta.get_public_key_pem())
+    cc.cert_pem  = ca.issue_certificate("CC",  cc.get_public_key_pem())
 
-    print("\n[Phase 1] 憑證核發完成，show JSON 公鑰資訊：")
-    tpa_numbers_json = tpa.get_public_numbers_json()
-    print(f"  TPA 公鑰大整數（Hex）：{json.dumps(tpa_numbers_json)[:80]}...")
+    # 建立 3 位選民實體，並各自向 CA 申請憑證
+    voters = []
+    for voter_id, _ in VOTER_CONFIGS:
+        v = Voter(voter_id=voter_id)
+        v.cert_pem = ca.issue_certificate(voter_id, v.get_public_key_pem())
+        voters.append(v)
 
-    # --------------------------------------------------------
-    # Phase 2：雙向身分認證（Voter ↔ TPA）
-    # --------------------------------------------------------
-    print("\n" + "─" * 65)
-    print("  Phase 2：雙向身分認證（含 Delta T 時間戳記檢查）")
-    print("─" * 65)
-
-    # Step 2-1：Voter 產生認證封包（JSON 字串）
-    auth_packet_json = voter.generate_auth_packet_json(tpa.id)
-    print(f"\n[Voter → TPA] 認證封包（JSON 片段）：")
-    auth_packet_preview = json.loads(auth_packet_json)
-    print(f"  sender_id  : {auth_packet_preview['payload']['sender_id']}")
-    print(f"  receiver_id: {auth_packet_preview['payload']['receiver_id']}")
-    print(f"  timestamp  : {auth_packet_preview['payload']['timestamp']}")
-    print(f"  si         : {auth_packet_preview['payload']['si']}")
-    print(f"  signature  : {auth_packet_preview['signature'][:40]}... (Base64)")
-
-    # Step 2-2：TPA 驗證 Voter（傳入 JSON 字串 + PEM 字串）
-    voter_pub_pem = voter.get_public_key_pem()
-    auth_ok = tpa.verify_voter_auth(auth_packet_json, voter_pub_pem)
-    if not auth_ok:
-        raise SystemExit("[錯誤] TPA 驗證 Voter 失敗，中斷測試。")
-
-    # Step 2-3：TPA 產生回傳封包（雙向認證）
-    response_packet_json = tpa.generate_response_packet_json(voter.id)
-    print(f"\n[TPA → Voter] 回傳認證封包（JSON 片段）：")
-    resp_preview = json.loads(response_packet_json)
-    print(f"  sender_id  : {resp_preview['payload']['sender_id']}")
-    print(f"  receiver_id: {resp_preview['payload']['receiver_id']}")
-    print(f"  signature  : {resp_preview['signature'][:40]}... (Base64)")
-
-    # Step 2-4：Voter 驗證 TPA（雙向認證完成）
-    tpa_pub_pem = tpa.get_public_key_pem()
-    resp_ok = voter.verify_tpa_response_json(response_packet_json, tpa_pub_pem)
-    if not resp_ok:
-        raise SystemExit("[錯誤] Voter 驗證 TPA 失敗，中斷測試。")
-
-    print("\n>>> Phase 2 完成：雙向身分認證成功 <<<")
-
-    # --------------------------------------------------------
-    # Phase 3：盲簽章 + 數位信封封裝
-    # --------------------------------------------------------
-    print("\n" + "─" * 65)
-    print("  Phase 3：盲簽章 + 數位信封封裝")
-    print("─" * 65)
-
-    # Step 3-1：計算選票雜湊值 m
-    # 根據計畫書：m = H(H(ID || SN || Vote) || Vote)
-    ID_Voter = voter.id
-    SN       = "20260324001"
-    Vote     = "Candidate_A"
-
-    inner_hash = hashlib.sha256(f"{ID_Voter}{SN}{Vote}".encode('utf-8')).hexdigest()
-    outer_hash = hashlib.sha256(f"{inner_hash}{Vote}".encode('utf-8')).hexdigest()
-    m_hex = hex(int(outer_hash, 16))   # 轉為 Hex 字串
-
-    print(f"\n[Voter] 選票內容：{Vote}")
-    print(f"[Voter] m（Hex）：{m_hex[:40]}...")
-
-    # Step 3-2：Voter 盲化選票（輸入/輸出均為 Hex 字串）
+    print("\n[Phase 1] 憑證核發完成，TPA 公鑰大整數（Hex）：")
     tpa_numbers_json_str = json.dumps(tpa.get_public_numbers_json())
-    m_prime_hex = voter.prepare_blinded_vote(m_hex, tpa_numbers_json_str)
-    print(f"[Voter → TPA] 盲化選票 m'（Hex）：{m_prime_hex[:40]}...")
+    print(f"  {tpa_numbers_json_str[:80]}...")
 
-    # Step 3-3：TPA 執行盲簽章（輸入/輸出均為 Hex 字串）
-    S_hex = tpa.sign_blinded_vote(m_prime_hex)
-    print(f"[TPA → Voter] 盲簽章 S（Hex）：{S_hex[:40]}...")
+    # --------------------------------------------------------
+    # Phase 2 + 3：迴圈對每位選民執行
+    #   - Phase 2：雙向身分認證（Voter ↔ TPA）
+    #   - Phase 3：盲簽章 + 數位信封封裝
+    # --------------------------------------------------------
+    tpa_pub_pem = tpa.get_public_key_pem()
+    cc_pub_pem  = cc.get_public_key_pem()
+    ta_pub_pem  = ta.get_public_key_pem()
+    tpa_n_hex   = int_to_hex(tpa.n)
 
-    # Step 3-4：Voter 去盲化，取得合法簽章 S'
-    tpa_n_hex = int_to_hex(tpa.n)
-    S_prime_hex = voter.unblind_signature(S_hex, tpa_n_hex)
-    print(f"[Voter] 去盲化後簽章 S'（Hex）：{S_prime_hex[:40]}...")
+    for idx, (voter, (voter_id, vote_content)) in enumerate(zip(voters, VOTER_CONFIGS)):
+        sn = f"{SN_BASE}{idx + 1}"   # 唯一 SN：20260324001 / 002 / 003
 
-    # Step 3-5：數學驗證 S'^e ≡ m (mod n)
-    s_prime_int = hex_to_int(S_prime_hex)
-    m_int       = hex_to_int(m_hex)
-    blind_sig_valid = verify_blind_signature(s_prime_int, tpa.e, tpa.n, m_int)
-    print(f"[驗證] 盲簽章數學驗證：{'通過 [OK]' if blind_sig_valid else '失敗 [FAIL]'}")
-    if not blind_sig_valid:
-        raise SystemExit("[錯誤] 盲簽章驗證失敗，中斷測試。")
+        print("\n" + "═" * 65)
+        print(f"  選民 {idx + 1}/{len(VOTER_CONFIGS)}：{voter_id}  投票：{vote_content}  SN：{sn}")
+        print("═" * 65)
 
-    # Step 3-6：Voter 封裝數位信封（輸出 JSON 字串）
-    cc_pub_pem = cc.get_public_key_pem()
-    ta_pub_pem = ta.get_public_key_pem()
-    envelope_json = voter.encapsulate_vote(
-        vote_content=Vote,
-        s_prime_hex=S_prime_hex,
-        m_hex=m_hex,
-        cc_public_key_pem=cc_pub_pem,
-        ta_public_key_pem=ta_pub_pem,
-    )
-    envelope_preview = json.loads(envelope_json)
-    print(f"\n[Voter → CC] 數位信封（JSON 格式）：")
-    print(f"  ciphertext : {envelope_preview['ciphertext'][:40]}... (Base64)")
-    print(f"  iv         : {envelope_preview['iv']} (Base64)")
-    print(f"  k_enc_cc   : {envelope_preview['k_enc_cc'][:40]}... (Base64)")
-    print(f"  k_enc_ta   : {envelope_preview['k_enc_ta'][:40]}... (Base64)")
+        # ── Phase 2：雙向身分認證 ──────────────────────────────
+        print(f"\n  -- Phase 2：{voter_id} <-> TPA 雙向認證 --")
 
-    # Step 3-7：CC 接收數位信封
-    cc.receive_envelope(envelope_json)
+        # Step 2-1：Voter → TPA 認證封包
+        auth_packet_json = voter.generate_auth_packet_json(tpa.id)
+        auth_preview = json.loads(auth_packet_json)
+        print(f"  [Voter → TPA] sender_id={auth_preview['payload']['sender_id']}"
+              f"  timestamp={auth_preview['payload']['timestamp']}"
+              f"  si={auth_preview['payload']['si']}")
+        print(f"  [Voter → TPA] signature={auth_preview['signature'][:40]}... (Base64)")
 
-    print("\n>>> Phase 3 完成：數位信封已封裝並送達 CC <<<")
+        # Step 2-2：TPA 驗證 Voter
+        auth_ok = tpa.verify_voter_auth(auth_packet_json, voter.get_public_key_pem())
+        if not auth_ok:
+            raise SystemExit(f"[錯誤] TPA 驗證 {voter_id} 失敗，中斷測試。")
+
+        # Step 2-3：TPA → Voter 回傳封包（雙向認證）
+        response_packet_json = tpa.generate_response_packet_json(voter.id)
+        resp_preview = json.loads(response_packet_json)
+        print(f"  [TPA → Voter] sender_id={resp_preview['payload']['sender_id']}"
+              f"  receiver_id={resp_preview['payload']['receiver_id']}")
+        print(f"  [TPA → Voter] signature={resp_preview['signature'][:40]}... (Base64)")
+
+        # Step 2-4：Voter 驗證 TPA
+        resp_ok = voter.verify_tpa_response_json(response_packet_json, tpa_pub_pem)
+        if not resp_ok:
+            raise SystemExit(f"[錯誤] {voter_id} 驗證 TPA 失敗，中斷測試。")
+
+        print(f"  >>> Phase 2 完成：{voter_id} 雙向認證成功 <<<")
+
+        # ── Phase 3：盲簽章 + 數位信封 ────────────────────────
+        print(f"\n  ── Phase 3：{voter_id} 盲簽章 + 數位信封 ──")
+
+        # Step 3-1：計算選票雜湊值 m = H(H(ID || SN || Vote) || Vote)
+        inner_hash = hashlib.sha256(f"{voter_id}{sn}{vote_content}".encode('utf-8')).hexdigest()
+        outer_hash = hashlib.sha256(f"{inner_hash}{vote_content}".encode('utf-8')).hexdigest()
+        m_hex = hex(int(outer_hash, 16))
+        print(f"  [Voter] vote={vote_content}  SN={sn}  m={m_hex[:40]}...")
+
+        # Step 3-2：Voter 盲化選票
+        m_prime_hex = voter.prepare_blinded_vote(m_hex, tpa_numbers_json_str)
+        print(f"  [Voter → TPA] m'={m_prime_hex[:40]}... (Hex)")
+
+        # Step 3-3：TPA 盲簽章
+        S_hex = tpa.sign_blinded_vote(m_prime_hex)
+        print(f"  [TPA → Voter] S={S_hex[:40]}... (Hex)")
+
+        # Step 3-4：Voter 去盲化，取得合法簽章 S'
+        S_prime_hex = voter.unblind_signature(S_hex, tpa_n_hex)
+        print(f"  [Voter] S'={S_prime_hex[:40]}... (Hex)")
+
+        # Step 3-5：數學驗證 S'^e ≡ m (mod n)
+        s_prime_int = hex_to_int(S_prime_hex)
+        m_int       = hex_to_int(m_hex)
+        blind_sig_valid = verify_blind_signature(s_prime_int, tpa.e, tpa.n, m_int)
+        print(f"  [驗證] 盲簽章數學驗證：{'通過 [OK]' if blind_sig_valid else '失敗 [FAIL]'}")
+        if not blind_sig_valid:
+            raise SystemExit(f"[錯誤] {voter_id} 盲簽章驗證失敗，中斷測試。")
+
+        # Step 3-6：Voter 封裝數位信封
+        envelope_json = voter.encapsulate_vote(
+            vote_content=vote_content,
+            s_prime_hex=S_prime_hex,
+            m_hex=m_hex,
+            cc_public_key_pem=cc_pub_pem,
+            ta_public_key_pem=ta_pub_pem,
+        )
+        env_preview = json.loads(envelope_json)
+        print(f"  [Voter → CC] 數位信封（JSON）：")
+        print(f"    ciphertext={env_preview['ciphertext'][:40]}... (Base64)")
+        print(f"    iv        ={env_preview['iv']} (Base64)")
+        print(f"    k_enc_cc  ={env_preview['k_enc_cc'][:40]}... (Base64)")
+        print(f"    k_enc_ta  ={env_preview['k_enc_ta'][:40]}... (Base64)")
+
+        # Step 3-7：CC 接收數位信封
+        cc.receive_envelope(envelope_json)
+
+        print(f"  >>> Phase 3 完成：{voter_id} 數位信封已送達 CC <<<")
 
     # --------------------------------------------------------
     # Phase 4：時間鎖定 — TA 在截止後釋放 SK_TA
@@ -906,9 +916,8 @@ if __name__ == '__main__':
     sk_ta_json = ta.release_private_key()
     sk_ta_data = json.loads(sk_ta_json)
     print(f"[TA → CC] SK_TA 釋放結果：{sk_ta_data['status']}")
-    print(f"[TA → CC] SK_TA JSON 格式（片段）：")
     print(f"  status         : {sk_ta_data['status']}")
-    print(f"  d_hex          : {sk_ta_data['d_hex'][:40]}...")
+    print(f"  d_hex          : {sk_ta_data['d_hex'][:40]}... (Hex)")
     print(f"  private_key_pem: {sk_ta_data['private_key_pem'][:40]}... (PEM)")
 
     print("\n>>> Phase 4 完成：SK_TA 已釋放給 CC <<<")
@@ -921,17 +930,18 @@ if __name__ == '__main__':
     print("─" * 65)
 
     # CC 解密並驗證所有選票
-    tpa_numbers_json_str = json.dumps(tpa.get_public_numbers_json())
     cc.decrypt_and_verify_votes(sk_ta_json, tpa_numbers_json_str)
 
     # 建構 Merkle Tree
     root_official = cc.build_merkle_tree()
-    tally = cc.get_tally_results()
-    print(f"\n[CC] 計票結果：{json.dumps(tally, ensure_ascii=False)}")
 
-    # 取得第一張選票的 Merkle Proof
-    proof_json = cc.get_merkle_proof_json(0)
-    print(f"[CC] 第一張選票的 Merkle Proof（JSON）：{proof_json[:80]}...")
+    # 計票結果（Tally）
+    tally = cc.get_tally_results()
+    print(f"\n[Phase 5] ── Tally 計票結果 ──")
+    for candidate, count in sorted(tally.items()):
+        print(f"  {candidate} : {count} 票")
+    print(f"  合計合法選票：{len(cc.valid_votes)} 張")
+    print(f"  Root_official：{root_official}")
 
     # CC 公告結果至 BB
     bb.publish_results(
@@ -943,39 +953,57 @@ if __name__ == '__main__':
     print("\n>>> Phase 5 完成：Merkle Tree 建構完成，結果已公告至 BB <<<")
 
     # --------------------------------------------------------
-    # Phase 6：選民驗證 — BB 提供 Merkle Proof
+    # Phase 6：選民驗證 — BB 提供 Merkle Proof（每張選票）
     # --------------------------------------------------------
     print("\n" + "─" * 65)
-    print("  Phase 6：選民驗證（Merkle Proof 驗證）")
+    print("  Phase 6：選民驗證（每張合法選票的 Merkle Proof）")
     print("─" * 65)
 
-    # BB 提供 Merkle Proof
-    bb_proof_json = bb.provide_merkle_proof(Vote, proof_json)
-    bb_proof_data = json.loads(bb_proof_json)
-    print(f"\n[BB → Voter] Merkle Proof 封包（JSON）：")
-    print(f"  vote_content  : {bb_proof_data['vote_content']}")
-    print(f"  root_official : {bb_proof_data['root_official'][:40]}...")
-    print(f"  merkle_proof  : {json.dumps(bb_proof_data['merkle_proof'])[:60]}...")
-
-    # Voter 本地驗證：
-    # 1. 從 BB 取得 Root_official
-    # 2. 用 Merkle Proof 驗證自己的選票是否在樹中
     root_from_bb = bb.get_official_root()
-    proof_steps  = bb_proof_data["merkle_proof"]
-    is_in_tree   = MerkleTree.verify_proof(Vote, proof_steps, root_from_bb)
-    print(f"\n[Voter] 從 BB 取得 Root_official：{root_from_bb[:40]}...")
-    print(f"[Voter] Merkle Proof 驗證結果：{'通過 [OK]' if is_in_tree else '失敗 [FAIL]'}")
+    all_pass = True
 
-    print("\n>>> Phase 6 完成：選民已驗證選票存在於合法計票結果中 <<<")
+    for leaf_idx, vote_content in enumerate(cc.valid_votes):
+        # CC 取得該葉節點的 Merkle Proof（JSON 字串）
+        proof_json = cc.get_merkle_proof_json(leaf_idx)
+        proof_steps = json.loads(proof_json)
+
+        # BB 封裝 Merkle Proof 封包（JSON 字串）
+        bb_proof_json = bb.provide_merkle_proof(vote_content, proof_json)
+        bb_proof_data = json.loads(bb_proof_json)
+
+        # 驗證 Merkle Proof
+        is_in_tree = MerkleTree.verify_proof(vote_content, proof_steps, root_from_bb)
+
+        print(f"\n  [葉節點 {leaf_idx}] vote_content = {vote_content}")
+        print(f"    root_official : {bb_proof_data['root_official'][:40]}...")
+
+        # 印出 Merkle Proof 路徑
+        if proof_steps:
+            print(f"    Merkle Proof 路徑（共 {len(proof_steps)} 步）：")
+            for step_i, step in enumerate(proof_steps):
+                print(f"      step {step_i}: position={step['position']}"
+                      f"  sibling={step['sibling'][:20]}... (SHA-256)")
+        else:
+            print(f"    Merkle Proof 路徑：（單一葉節點，無需兄弟節點）")
+
+        print(f"    驗證結果：{'通過 [OK]' if is_in_tree else '失敗 [FAIL]'}")
+
+        if not is_in_tree:
+            all_pass = False
+
+    print(f"\n[Phase 6] 所有葉節點驗證：{'全部通過 [OK]' if all_pass else '有驗證失敗 [FAIL]'}")
+    print("\n>>> Phase 6 完成：所有選票已驗證存在於合法計票結果中 <<<")
 
     # --------------------------------------------------------
-    # 結果
+    # 最終結果
     # --------------------------------------------------------
-    print("")
     print("")
     print("")
     print("=" * 65)
-    print(f"  合法選票數：{len(cc.valid_votes)}")
-    print(f"  計票結果  ：{json.dumps(tally, ensure_ascii=False)}")
+    print("結果")
+    print("─" * 65)
+    print(f"  合法選票數  ：{len(cc.valid_votes)}")
+    print(f"  計票結果    ：{json.dumps(tally, ensure_ascii=False)}")
     print(f"  Root_official：{root_official}")
+    print(f"  Merkle Proof 驗證：{'全部通過 [OK]' if all_pass else '有驗證失敗 [FAIL]'}")
     print("=" * 65)
