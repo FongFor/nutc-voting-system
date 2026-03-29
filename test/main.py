@@ -529,7 +529,7 @@ class TA:
             print(f"[{self.id}] 拒絕釋放私鑰，投票尚未截止（還有 {remaining} 秒）。")
             return json.dumps({"status": "rejected", "remaining_seconds": remaining})
 
-        # 將私鑰序列化為 PEM 字串（微服務傳輸格式）
+        # 將私鑰序列化為 PEM 字串
         private_key_pem = self._private_key.private_bytes(
             serialization.Encoding.PEM,
             serialization.PrivateFormat.TraditionalOpenSSL,
@@ -833,7 +833,7 @@ if __name__ == '__main__':
 
     inner_hash = hashlib.sha256(f"{ID_Voter}{SN}{Vote}".encode('utf-8')).hexdigest()
     outer_hash = hashlib.sha256(f"{inner_hash}{Vote}".encode('utf-8')).hexdigest()
-    m_hex = hex(int(outer_hash, 16))   # 轉為 Hex 字串（微服務傳輸格式）
+    m_hex = hex(int(outer_hash, 16))   # 轉為 Hex 字串
 
     print(f"\n[Voter] 選票內容：{Vote}")
     print(f"[Voter] m（Hex）：{m_hex[:40]}...")
