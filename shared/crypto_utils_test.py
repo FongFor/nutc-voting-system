@@ -1,4 +1,4 @@
-import random
+import secrets
 import math
 
 # ==========================================
@@ -10,7 +10,7 @@ def generate_blinding_factor(n: int) -> int:
     選民 (Voter) 使用：生成一個與模數 n 互質的隨機盲化因子 r
     """
     while True:
-        r = random.randrange(2, n - 1)
+        r = secrets.randbelow(n - 2) + 2
         if math.gcd(r, n) == 1:
             return r
 

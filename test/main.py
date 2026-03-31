@@ -20,7 +20,7 @@ A.py -> 陳,B.py -> 謝,C.py -> 嚴
         計算雜湊與外層 m 比對。
   Merkle Tree 葉節點：Leaf_i = H(m_j)（選票包雜湊值的再雜湊）
 - Phase 6 (Verify)：BB 提供 Merkle Proof，voter 執行端到端驗證。
-  驗證起點：H(m)（絕對不能用選票明文）
+  驗證起點：H(m)（不用選票明文）
 
 2. 傳輸
 - 全改為 JSON 傳。
@@ -35,6 +35,8 @@ A.py -> 陳,B.py -> 謝,C.py -> 嚴
 - Voter 與 TPA 的雙向認證，現在是調用 verify_auth_component_temp。
 - 在 main.py 補了 Merkle Tree -> class MerkleTree:
 - 測試防錯：流程中若fail，會直接跑 raise SystemExit 中斷。
+- crypto_utils_test.py：改 secrets 替換 random
+- Hash 碰撞問題：所有字串拼接一律用 | 分隔
 """
 
 import sys
@@ -423,7 +425,7 @@ class Voter:
         ta_pub_key = serialization.load_pem_public_key(ta_public_key_pem.encode('utf-8'))
 
         # 步驟 1：計算內層雜湊 H(ID || SN || Vote)
-        hash_inner = sha256_hex(f"{voter_id}{sn}{vote_content}".encode('utf-8'))
+        hash_inner = sha256_hex(f"{voter_id}|{sn}|{vote_content}".encode('utf-8'))
 
         # 步驟 2：用 TA 公鑰加密 (hash_inner || Vote)
         #   明文格式：hash_inner(hex) | vote_content
@@ -634,7 +636,7 @@ class CC:
 
                 # 步驟 3：重新計算 m_check = H(hash_inner || vote_content)
                 #   對應 Voter 端的 outer_hash = H(inner_hash || vote_content)
-                m_check_hex = sha256_hex(f"{hash_inner_from_env}{vote_content}".encode('utf-8'))
+                m_check_hex = sha256_hex(f"{hash_inner_from_env}|{vote_content}".encode('utf-8'))
                 m_check_int = int(m_check_hex, 16)
                 m_int       = hex_to_int(m_hex)
 
@@ -833,8 +835,8 @@ if __name__ == '__main__':
         # Step 3-1：計算選票雜湊值 m
         #   inner_hash = H(ID || SN || Vote)
         #   m = H(inner_hash || Vote)  （outer_hash）
-        inner_hash = sha256_hex(f"{voter_id}{sn}{vote_content}".encode('utf-8'))
-        outer_hash = sha256_hex(f"{inner_hash}{vote_content}".encode('utf-8'))
+        inner_hash = sha256_hex(f"{voter_id}|{sn}|{vote_content}".encode('utf-8'))
+        outer_hash = sha256_hex(f"{inner_hash}|{vote_content}".encode('utf-8'))
         m_hex = hex(int(outer_hash, 16))
         print(f"  [Voter] vote={vote_content}  SN={sn}  m={m_hex[:40]}...")
 
