@@ -55,7 +55,7 @@ Phase 6  BB 公告結果，選民可用 m_hex 驗證選票是否被計入
 docker compose up --build
 ```
 
-等待所有服務健康檢查通過（約 30-60 秒）就OK。
+等待所有服務檢查通過（約 30-60 秒）就OK。
 
 ### 執行測試
 
@@ -84,7 +84,7 @@ docker compose up --build
 
 ## 設定檔
 
-所有業務參數都在 `config.json`，修改後不需要重啟容器。
+所有參數都在 `config.json`，修改後不需重啟容器。
 
 ```json
 {
@@ -117,12 +117,12 @@ docker compose up --build
 
 ## Merkle Proof 驗證
 
-投票完成後，頁面會顯示你的 `m_hex`（選票識別碼）。
+投票完成後，頁面會顯示 `m_hex`。
 
 1. 開票後前往 BB 公告板：http://localhost:5004/verify
 2. 輸入你的 `m_hex`
 3. 頁面會顯示互動式 Merkle Tree，標示從你的選票到根節點的完整路徑
-4. 可以看到 `m_hex`、`sibling` 陣列、`Root_official` 等資訊
+4. 展開後可看到 `m_hex`、`sibling` 陣列、`Root_official` 等資訊
 
 也可以直接呼叫 API：
 
