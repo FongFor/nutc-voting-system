@@ -1,74 +1,257 @@
-#version: '3.8'
+# ============================================================
+# NUTC Voting System — docker-compose.yml
+#
+# 所有可調整的參數（候選人、Port、時間）均由 config.json 統管。
+# 此檔案僅負責容器編排；業務參數透過環境變數注入，
+# 環境變數的預設值與 config.json 保持一致。
+#
+# Config Hot-Reload：
+#   config.json 以唯讀方式掛載進所有容器（/app/config.json）。
+#   各服務透過 shared/config_loader.py 的 _HotReloadConfig 機制，
+#   每次存取時自動偵測 mtime 變更並重新載入，無需重啟容器。
+#   強制重載：POST /api/config/reload
+#
+# 時區設定：
+#   TZ=Asia/Taipei 確保容器內 Python 時區正確（UTC+8）。
+#   DISPLAY_TIMEZONE_OFFSET=8 作為備援，供 ts_to_human() 使用。
+#
+# 快速指令：
+#   啟動：  docker compose up --build
+#   重置：  python reset.py
+#   E2E：   python e2e_test.py
+# ============================================================
+
+# ── 共用環境變數（YAML Anchor）────────────────────────────────
+x-common-env: &common-env
+  PYTHONPATH: /app
+  # 時區設定（雙重保險）
+  TZ: "Asia/Taipei"
+  DISPLAY_TIMEZONE_OFFSET: "8"
+  # 注意：CANDIDATES 已移除，改由 config.json 動態讀取（hot-reload）
+  # 若需覆蓋，可在各服務的 environment 區塊加入：
+  #   CANDIDATES: "Candidate_A,Candidate_B,Candidate_C"
+
+x-service-urls: &service-urls
+  CA_URL:  http://ca:5001
+  TPA_URL: http://tpa:5000
+  TA_URL:  http://ta:5002
+  CC_URL:  http://cc:5003
+  BB_URL:  http://bb:5004
 
 services:
-  # 1. 憑證授權中心 (CA)
+
+  # ── 1. 憑證授權中心 (CA) ─────────────────────────────────
   ca:
     build:
       context: .
       dockerfile: Dockerfile
     container_name: voting_ca
     command: python ca_server/app.py
+    environment:
+      <<: *common-env
     volumes:
-      - .:/app  # 同步目前檔案目錄
+      - ca_keys:/app/ca_server/keys
+      - ./config.json:/app/config.json:ro
     ports:
       - "5001:5001"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request; urllib.request.urlopen('http://localhost:5001/api/ca_cert')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
 
-  # 2. 第三方機構 (TPA)
+  # ── 2. 第三方機構 (TPA) ──────────────────────────────────
   tpa:
     build:
       context: .
       dockerfile: Dockerfile
     container_name: voting_tpa
     command: python tpa_server/app.py
+    environment:
+      <<: [*common-env, *service-urls]
+      # 認證時間容差（秒）— 對應 config.json timing.delta_t_seconds
+      DELTA_T: "300"
     volumes:
-      - .:/app
+      - tpa_keys:/app/tpa_server/keys
+      - ./config.json:/app/config.json:ro
     ports:
       - "5000:5000"
+    depends_on:
+      ca:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request; urllib.request.urlopen('http://localhost:5000/api/public_key')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
 
-  # 3. 時間授權中心 (TA)
+  # ── 3. 時間授權中心 (TA) ─────────────────────────────────
   ta:
     build:
       context: .
       dockerfile: Dockerfile
     container_name: voting_ta
     command: python ta_server/app.py
+    environment:
+      <<: [*common-env, *service-urls]
+      # 投票開放時長（秒）— 對應 config.json timing.vote_duration_seconds
+      VOTE_DURATION_SECONDS: "120"
     volumes:
-      - .:/app
+      - ta_keys:/app/ta_server/keys
+      - ./config.json:/app/config.json:ro
     ports:
-      - "5002:5000"
+      - "5002:5002"
+    depends_on:
+      ca:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request; urllib.request.urlopen('http://localhost:5002/api/deadline')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
 
-  # 4. 計票中心 (CC)
+  # ── 4. 計票中心 (CC) ─────────────────────────────────────
   cc:
     build:
       context: .
       dockerfile: Dockerfile
     container_name: voting_cc
     command: python cc_server/app.py
+    environment:
+      <<: [*common-env, *service-urls]
     volumes:
-      - .:/app
+      - cc_keys:/app/cc_server/keys
+      - ./config.json:/app/config.json:ro
     ports:
-      - "5003:5000"
+      - "5003:5003"
+    depends_on:
+      ca:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request; urllib.request.urlopen('http://localhost:5003/api/public_key')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
 
-  # 5. 公告板 (BB)
+  # ── 5. 公告板 (BB) ───────────────────────────────────────
   bb:
     build:
       context: .
       dockerfile: Dockerfile
     container_name: voting_bb
     command: python bb_server/app.py
+    environment:
+      <<: *common-env
+      CC_URL: http://cc:5003
     volumes:
-      - .:/app
+      - ./config.json:/app/config.json:ro
     ports:
-      - "5004:5000"
+      - "5004:5004"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request; urllib.request.urlopen('http://localhost:5004/api/results')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
 
-  # 6. 選民端 (Voter)
-  voter:
+  # ── 6. 選民端 (Voter 001) ────────────────────────────────
+  voter1:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: voting_voter
+    container_name: voting_voter1
     command: python voter_client/app.py
+    environment:
+      <<: [*common-env, *service-urls]
+      VOTER_ID: "VOTER_001"
     volumes:
-      - .:/app
+      - voter1_keys:/app/voter_client/keys
+      - ./config.json:/app/config.json:ro
     ports:
-      - "5005:5001"
+      - "5005:5005"
+    depends_on:
+      ca:
+        condition: service_healthy
+      tpa:
+        condition: service_healthy
+      ta:
+        condition: service_healthy
+      cc:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ── 7. 選民端 (Voter 002) ────────────────────────────────
+  voter2:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: voting_voter2
+    command: python voter_client/app.py
+    environment:
+      <<: [*common-env, *service-urls]
+      VOTER_ID: "VOTER_002"
+    volumes:
+      - voter2_keys:/app/voter_client/keys
+      - ./config.json:/app/config.json:ro
+    ports:
+      - "5006:5005"
+    depends_on:
+      ca:
+        condition: service_healthy
+      tpa:
+        condition: service_healthy
+      ta:
+        condition: service_healthy
+      cc:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ── 8. 選民端 (Voter 003) ────────────────────────────────
+  voter3:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: voting_voter3
+    command: python voter_client/app.py
+    environment:
+      <<: [*common-env, *service-urls]
+      VOTER_ID: "VOTER_003"
+    volumes:
+      - voter3_keys:/app/voter_client/keys
+      - ./config.json:/app/config.json:ro
+    ports:
+      - "5007:5005"
+    depends_on:
+      ca:
+        condition: service_healthy
+      tpa:
+        condition: service_healthy
+      ta:
+        condition: service_healthy
+      cc:
+        condition: service_healthy
+    restart: unless-stopped
+
+# ── Named Volumes（金鑰持久化）────────────────────────────
+volumes:
+  ca_keys:
+  tpa_keys:
+  ta_keys:
+  cc_keys:
+  voter1_keys:
+  voter2_keys:
+  voter3_keys:

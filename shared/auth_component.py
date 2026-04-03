@@ -1,15 +1,9 @@
 """
-auth_component.py
------------------
+shared/auth_component.py  —  認證封包工具
 
- Voter、TPA 等實體在雙向認證（Phase 2）時用。
-
-【說明】
-issue：verify_auth_component 在重建 payload 時，
-          欄位順序或格式跟 create_auth_packet 簽名時不一致，
-
-方式：統一用 JSON （json.dumps + sort_keys=True）
-          作為簽名的標準 payload，確保建立與驗證兩端一致。
+建立和驗證認證封包的函式。
+封包裡包含發送方 ID、接收方 ID、時間戳、憑證和簽章，
+用來做雙向身分認證，同時防止重放攻擊。
 """
 
 import json

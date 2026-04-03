@@ -1,0 +1,38 @@
+{
+  "_comment": "NUTC Voting System — 中心設定檔",
+
+  "candidates": [
+    "ado",
+    "billi ellish",
+    "wanna sleep",
+    "蛋堡"
+  ],
+
+  "voters": [
+    { "id": "VOTER_001", "port": 5005 },
+    { "id": "VOTER_002", "port": 5006 },
+    { "id": "VOTER_003", "port": 5007 }
+  ],
+
+  "services": {
+    "ca":  { "host": "ca",  "port": 5001, "local_port": 5001 },
+    "tpa": { "host": "tpa", "port": 5000, "local_port": 5000 },
+    "ta":  { "host": "ta",  "port": 5002, "local_port": 5002 },
+    "cc":  { "host": "cc",  "port": 5003, "local_port": 5003 },
+    "bb":  { "host": "bb",  "port": 5004, "local_port": 5004 }
+  },
+
+  "timing": {
+    "vote_duration_seconds": 120,
+    "delta_t_seconds": 300,
+    "service_startup_wait": 5,
+    "health_check_retries": 15,
+    "health_check_interval": 3
+  },
+
+  "e2e": {
+    "base_url": "http://localhost",
+    "clock_skew_tolerance_seconds": 10,
+    "use_server_time": true
+  }
+}
