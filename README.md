@@ -37,7 +37,9 @@ Phase 6  BB 公告結果，選民可用 m_hex 驗證選票是否被計入
 
 ## 開始
 
-每次測試都要reset一遍比較好
+
+
+每次測試或提交都要reset一遍比較好
 
 ### 環境需求
 
@@ -225,7 +227,6 @@ nutc-voting-system/
 ├── shared/
 │   ├── config_loader.py     # 設定檔載入器
 │   ├── auth_component.py    # 認證封包工具
-│   ├── blind_signature.py   # 盲簽章（原crypto_utils_test.py）
 │   ├── crypto_utils.py      # 數位信封加解密
 │   ├── format_utils.py      # 格式轉換（含時區處理）
 │   ├── key_manager.py       # 金鑰管理
