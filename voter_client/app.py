@@ -40,7 +40,7 @@ from shared.key_manager import (
 )
 from shared.auth_component import create_auth_packet, verify_auth_component
 from shared.crypto_utils import encapsulate_vote
-from shared.crypto_utils_test import (
+from shared.blind_signature import (
     generate_blinding_factor,
     blind_message,
     unblind_signature,

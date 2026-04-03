@@ -119,7 +119,7 @@ def open_envelope_layer2(pending: dict, ta_private_key, tpa_e: int, tpa_n: int) 
 
     回傳：{"vote": str, "m_hex": str} 或拋出 Exception
     """
-    from shared.crypto_utils_test import verify_blind_signature
+    from shared.blind_signature import verify_blind_signature
     from shared.format_utils import hex_to_int
 
     # 步驟 1：用 k 解密 C_Data

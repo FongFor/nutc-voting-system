@@ -211,7 +211,6 @@ python e2e_test.py --verbose           # 顯示詳細 HTTP 回應
 
 ## 專案結構
 
-```
 nutc-voting-system/
 ├── config.json              # 中心化設定檔（候選人、時間、服務位址）
 ├── docker-compose.yml       # 容器編排
@@ -224,8 +223,9 @@ nutc-voting-system/
 ├── bb_server/app.py         # 公告板
 ├── voter_client/app.py      # 選民端
 ├── shared/
-│   ├── config_loader.py     # 設定檔載入器（熱重載）
+│   ├── config_loader.py     # 設定檔載入器
 │   ├── auth_component.py    # 認證封包工具
+│   ├── blind_signature.py   # 盲簽章（原crypto_utils_test.py）
 │   ├── crypto_utils.py      # 數位信封加解密
 │   ├── format_utils.py      # 格式轉換（含時區處理）
 │   ├── key_manager.py       # 金鑰管理
@@ -234,7 +234,6 @@ nutc-voting-system/
 ├── e2e_test.py              # 端到端測試
 ├── simulate_voters.py       # 多人投票模擬
 └── reset.py                 # 重置腳本
-```
 
 ## 疑難雜症
 

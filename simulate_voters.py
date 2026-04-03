@@ -36,7 +36,7 @@ sys.path.insert(0, str(ROOT))
 from shared.config_loader import local_url, candidates as cfg_candidates, timing
 from shared.auth_component import verify_auth_component
 from shared.crypto_utils import encapsulate_vote
-from shared.crypto_utils_test import (
+from shared.blind_signature import (
     generate_blinding_factor,
     blind_message,
     verify_blind_signature,

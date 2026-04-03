@@ -37,7 +37,7 @@ from shared.key_manager import (
     get_public_key_from_cert,
 )
 from shared.auth_component import create_auth_packet, verify_auth_component
-from shared.crypto_utils_test import blind_sign
+from shared.blind_signature import blind_sign
 from shared.format_utils import int_to_hex, hex_to_int, ts_to_human
 from shared.db_utils import Database
 from shared.config_loader import make_reload_endpoint, get_delta_t
