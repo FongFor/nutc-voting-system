@@ -242,23 +242,21 @@ nutc-voting-system/
 
 ## 疑難雜症
 
-**Q：啟動後投票頁面顯示「服務尚未就緒」？**
 
-各服務需要時間初始化金鑰和憑證，通常等 30-60 秒後重新整理即可。也可以觀察 `docker compose logs` 確認各服務是否正常啟動。
 
 **Q：投票失敗，顯示「認證封包已過期」？**
 
-這是時鐘偏差問題。`e2e_test.py` 和 `simulate_voters.py` 都有內建時鐘同步機制，會自動補償。如果手動呼叫 API，確認本機時間與容器時間差距在 `delta_t_seconds`（預設 300 秒）以內。
+時間偏差問題。`e2e_test.py` 和 `simulate_voters.py` 都有內建時鐘同步機制，會自動補償。如果手動呼叫 API，確認本機時間與容器時間差距在 `delta_t_seconds`（預設 300 秒）以內。
 
-**Q：想修改候選人？**
+**Q：改候選人？**
 
 直接編輯 `config.json` 的 `candidates` 陣列，存檔後即生效，不需要重啟容器。
 
-**Q：想延長投票時間？**
+**Q：延長投票時間？**
 
 修改 `config.json` 的 `timing.vote_duration_seconds`，然後執行 `python reset.py` 重置後重新啟動。
 
-**Q：如何強制重新載入設定？**
+**Q：強制重新載入設定？**
 
 ```bash
 curl -X POST http://localhost:5000/api/config/reload
@@ -270,6 +268,6 @@ curl -X POST http://localhost:5003/api/config/reload
 
 **時間處理**：後端和 API 一律用 Unix timestamp（整數秒），顯示給前端的時間用 `ts_to_human()` 轉換，預設 UTC+8。時區由 `DISPLAY_TIMEZONE_OFFSET` 環境變數控制，不依賴容器系統時區。
 
-**Config **：`shared/config_loader.py` 的 `_HotReloadConfig` 每次存取時會檢查 `config.json` 的 mtime，有變化就自動重新載入，整個過程 thread-safe。
+**Config**：`shared/config_loader.py` 的 `_HotReloadConfig` 每次存取時會檢查 `config.json` 的 mtime，有變化就自動重新載入，整個過程 thread-safe。
 
 **截止時間強制執行**：TPA 和 CC 都有 Deadline Middleware，截止後的 `/api/auth`、`/api/blind_sign`、`/api/receive_envelope` 請求會直接回傳 HTTP 403，`code: DEADLINE_EXCEEDED`。voter前端也有倒數計時，截止後送出按鈕會被禁用。
