@@ -217,27 +217,28 @@ python e2e_test.py --verbose           # 顯示詳細 HTTP 回應
 
 ```
 nutc-voting-system/
-├── config.json              # 中心化設定檔（候選人、時間、服務位址）
-├── docker-compose.yml       # 容器編排
-├── Dockerfile               # 共用映像檔
-├── requirements.txt         # Python 套件
-├── ca_server/app.py         # 憑證授權中心
-├── tpa_server/app.py        # 第三方認證機構
-├── ta_server/app.py         # 時間授權中心
-├── cc_server/app.py         # 計票中心
-├── bb_server/app.py         # 公告板
-├── voter_client/app.py      # 選民端
+├── config.json                # 中心化設定檔（候選人、時間、位址）
+├── docker-compose.yml         # 容器編排
+├── Dockerfile                 # 共用映像檔
+├── requirements.txt           # Python 套件
+├── ca_server/app.py           # 憑證授權中心
+├── tpa_server/app.py          # 第三方認證機構
+├── ta_server/app.py           # 時間授權中心
+├── cc_server/app.py           # 計票中心
+├── bb_server/app.py           # 公告板
+├── voter_client/app.py        # 選民端
 ├── shared/
-│   ├── config_loader.py     # 設定檔載入器
-│   ├── auth_component.py    # 認證封包工具
-│   ├── crypto_utils.py      # 數位信封加解密
-│   ├── format_utils.py      # 格式轉換（含時區處理）
-│   ├── key_manager.py       # 金鑰管理
-│   ├── merkle_tree.py       # Merkle Tree
-│   └── db_utils.py          # SQLite 工具
-├── e2e_test.py              # 端到端測試
-├── simulate_voters.py       # 多人投票模擬
-└── reset.py                 # 重置腳本
+│   ├── config_loader.py       # 設定檔載入器
+│   ├── auth_component.py      # 認證封包工具
+│   ├── blind_signature.py     # 盲簽章（原crypto_utils_test.py）
+│   ├── crypto_utils.py        # 數位信封加解密
+│   ├── format_utils.py        # 格式轉換（含時區處理）
+│   ├── key_manager.py         # 金鑰管理
+│   ├── merkle_tree.py         # Merkle Tree
+│   └── db_utils.py            # SQLite 工具
+├── e2e_test.py                # 端到端測試
+├── simulate_voters.py         # 多人投票模擬
+└── reset.py                   # 重置腳本
 ```
 
 ## 疑難雜症
