@@ -213,6 +213,7 @@ python e2e_test.py --verbose           # 顯示詳細 HTTP 回應
 
 ## 專案結構
 
+```
 nutc-voting-system/
 ├── config.json              # 中心化設定檔（候選人、時間、服務位址）
 ├── docker-compose.yml       # 容器編排
@@ -235,6 +236,7 @@ nutc-voting-system/
 ├── e2e_test.py              # 端到端測試
 ├── simulate_voters.py       # 多人投票模擬
 └── reset.py                 # 重置腳本
+```
 
 ## 疑難雜症
 
