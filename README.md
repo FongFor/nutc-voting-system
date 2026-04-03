@@ -1,5 +1,7 @@
 # NUTC Voting System
 
+這是一個中科大專題實作的Page, 關於隱私保護電子投票系統
+
 ## 系統架構
 
 各服務以 Docker 容器方式運行，透過 Docker 內部網路互相溝通：
