@@ -103,6 +103,14 @@ db.execute("""
         processed_at INTEGER NOT NULL
     )
 """)
+db.execute("""
+    CREATE TABLE IF NOT EXISTS blind_sign_log (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        blinded_m_hex   TEXT NOT NULL,
+        signed_b_m_hex  TEXT NOT NULL,
+        created_at      INTEGER NOT NULL
+    )
+""")
 
 # ============================================================
 # 金鑰初始化（啟動時執行）
@@ -180,139 +188,171 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>TPA 第三方機構</title>
+  <title>TPA 盲簽章授權中心</title>
   <script src="https://cdn.tailwindcss.com"></script>
-  <meta http-equiv="refresh" content="10">
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            msblue: '#0078D4',
+            msblueHover: '#0060A8',
+            deepblack: '#050505',
+            cardblack: '#111111'
+          }
+        }
+      }
+    }
+  </script>
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    body { font-family: 'Noto Sans', sans-serif; }
+    /* 隱藏捲軸但保留功能 */
+    pre::-webkit-scrollbar { height: 8px; }
+    pre::-webkit-scrollbar-track { background: transparent; }
+    pre::-webkit-scrollbar-thumb { background: rgba(156, 163, 175, 0.5); border-radius: 4px; }
+  </style>
+  <script>
+    if (localStorage.getItem('theme') === 'dark' || (!('theme' in localStorage) && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
+      document.documentElement.classList.add('dark');
+    } else {
+      document.documentElement.classList.remove('dark');
+    }
+    function toggleTheme() {
+      if (document.documentElement.classList.contains('dark')) {
+        document.documentElement.classList.remove('dark');
+        localStorage.setItem('theme', 'light');
+      } else {
+        document.documentElement.classList.add('dark');
+        localStorage.setItem('theme', 'dark');
+      }
+    }
+  </script>
+  <meta http-equiv="refresh" content="15">
 </head>
-<body class="bg-gray-950 text-gray-100 min-h-screen">
+<body class="bg-gray-50 dark:bg-deepblack text-gray-800 dark:text-gray-100 min-h-screen transition-colors duration-300">
   <div class="max-w-5xl mx-auto px-4 py-10">
 
-    <!-- Header -->
     <div class="flex items-center gap-4 mb-8">
-      <div class="w-12 h-12 rounded-xl bg-blue-600 flex items-center justify-center text-2xl">🏛️</div>
+      <div class="w-12 h-12 rounded-xl bg-white/70 dark:bg-cardblack/80 backdrop-blur-md shadow-sm flex items-center justify-center border border-gray-200 dark:border-gray-800">
+        <svg class="w-6 h-6 text-msblue" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"></path></svg>
+      </div>
       <div>
-        <h1 class="text-2xl font-bold text-white">第三方機構 (TPA)</h1>
-        <p class="text-gray-400 text-sm">NUTC Voting System · Trusted Third Party Authority</p>
+        <h1 class="text-2xl font-semibold text-gray-900 dark:text-white">第三方授權中心 (TPA)</h1>
+        <p class="text-gray-500 dark:text-gray-400 text-sm">NUTC Voting System · Third-Party Authenticator</p>
       </div>
-      <div class="ml-auto flex flex-col items-end gap-1">
-        <span class="px-3 py-1 rounded-full bg-green-900 text-green-300 text-xs font-semibold">● 運作中</span>
-        {% if deadline_ts %}
-        <span class="px-3 py-1 rounded-full text-xs font-semibold
-          {% if is_expired %}bg-red-900 text-red-300{% else %}bg-amber-900 text-amber-300{% endif %}">
-          {% if is_expired %}🔒 投票已截止{% else %}截止：{{ deadline_str }}{% endif %}
+      
+      <div class="ml-auto flex items-center gap-3">
+        <span class="px-3 py-1.5 rounded-full text-xs font-medium border bg-green-50 dark:bg-green-900/20 text-green-700 dark:text-green-400 border-green-200 dark:border-green-800/50 backdrop-blur-sm flex items-center shadow-sm">
+          <span class="inline-block w-1.5 h-1.5 rounded-full bg-green-500 mr-1.5 shadow-[0_0_4px_#22c55e]"></span> 運作中
         </span>
-        {% endif %}
+        
+        <button onclick="toggleTheme()" class="p-2 rounded-lg bg-white/70 dark:bg-cardblack/80 border border-gray-200 dark:border-gray-800 shadow-sm hover:bg-gray-100 dark:hover:bg-gray-900 transition-colors text-gray-600 dark:text-gray-300 focus:outline-none focus:ring-2 focus:ring-msblue/50">
+          <svg class="w-4 h-4 hidden dark:block" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z"></path></svg>
+          <svg class="w-4 h-4 block dark:hidden" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z"></path></svg>
+        </button>
       </div>
     </div>
 
-    <!-- Stats -->
-    <div class="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-8">
-      <div class="bg-gray-900 rounded-xl p-5 border border-gray-800">
-        <p class="text-gray-400 text-xs mb-1">已處理認證</p>
-        <p class="text-3xl font-bold text-blue-400">{{ total_auth }}</p>
+    <div class="grid grid-cols-1 sm:grid-cols-3 gap-5 mb-8">
+      <div class="bg-white/70 dark:bg-cardblack/80 backdrop-blur-lg rounded-xl border border-gray-200 dark:border-gray-800 shadow-md p-5 flex flex-col justify-center transition-all hover:shadow-lg">
+        <p class="text-gray-500 dark:text-gray-400 text-xs font-medium uppercase tracking-wider mb-2 flex items-center gap-1.5">
+          <svg class="w-3.5 h-3.5 text-msblue" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z"></path></svg>
+          已核發盲簽章
+        </p>
+        <p class="text-3xl font-semibold text-gray-900 dark:text-white">{{ sign_count }}</p>
       </div>
-      <div class="bg-gray-900 rounded-xl p-5 border border-gray-800">
-        <p class="text-gray-400 text-xs mb-1">認證成功</p>
-        <p class="text-3xl font-bold text-green-400">{{ success_auth }}</p>
+      <div class="bg-white/70 dark:bg-cardblack/80 backdrop-blur-lg rounded-xl border border-gray-200 dark:border-gray-800 shadow-md p-5 flex flex-col justify-center transition-all hover:shadow-lg">
+        <p class="text-gray-500 dark:text-gray-400 text-xs font-medium uppercase tracking-wider mb-2 flex items-center gap-1.5">
+          <svg class="w-3.5 h-3.5 text-msblue" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"></path></svg>
+          金鑰演算法
+        </p>
+        <p class="text-lg font-medium text-gray-800 dark:text-gray-200">RSA-FDH <span class="text-gray-400 dark:text-gray-600 font-light mx-1">/</span> 2048-bit</p>
       </div>
-      <div class="bg-gray-900 rounded-xl p-5 border border-gray-800">
-        <p class="text-gray-400 text-xs mb-1">已投票選民</p>
-        <p class="text-3xl font-bold text-yellow-400">{{ voted_count }}</p>
-      </div>
-      <div class="bg-gray-900 rounded-xl p-5 border border-gray-800">
-        <p class="text-gray-400 text-xs mb-1">拒絕請求</p>
-        <p class="text-3xl font-bold text-red-400">{{ rejected_auth }}</p>
+      <div class="bg-white/70 dark:bg-cardblack/80 backdrop-blur-lg rounded-xl border border-gray-200 dark:border-gray-800 shadow-md p-5 flex flex-col justify-center transition-all hover:shadow-lg">
+        <p class="text-gray-500 dark:text-gray-400 text-xs font-medium uppercase tracking-wider mb-2 flex items-center gap-1.5">
+          <svg class="w-3.5 h-3.5 text-msblue" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+          簽章狀態
+        </p>
+        <p class="text-lg font-medium text-green-600 dark:text-green-500 flex items-center gap-1">
+          開放請求中
+        </p>
       </div>
     </div>
 
-    <!-- Auth Log Table -->
-    <div class="bg-gray-900 rounded-xl border border-gray-800 overflow-hidden mb-6">
-      <div class="px-6 py-4 border-b border-gray-800 flex items-center justify-between">
-        <h2 class="font-semibold text-gray-200">認證記錄（最新 20 筆）</h2>
-        <span class="text-xs text-gray-500">每 10 秒自動更新</span>
+    <div class="bg-white/70 dark:bg-cardblack/80 backdrop-blur-lg rounded-xl border border-gray-200 dark:border-gray-800 shadow-md overflow-hidden">
+      <div class="px-6 py-4 border-b border-gray-100 dark:border-gray-800/60 bg-gray-50/50 dark:bg-[#0a0a0a]/50 flex items-center justify-between">
+        <h2 class="font-medium text-gray-800 dark:text-gray-200 text-sm">盲簽章核發記錄</h2>
+        <span class="text-[10px] text-gray-500 dark:text-gray-500 flex items-center gap-1.5">
+          <span class="relative flex h-1.5 w-1.5">
+            <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-msblue opacity-40"></span>
+            <span class="relative inline-flex rounded-full h-1.5 w-1.5 bg-msblue"></span>
+          </span>
+          自動更新
+        </span>
       </div>
       {% if logs %}
-      <table class="w-full text-sm">
-        <thead class="bg-gray-800 text-gray-400 text-xs uppercase">
-          <tr>
-            <th class="px-6 py-3 text-left">#</th>
-            <th class="px-6 py-3 text-left">選民 ID</th>
-            <th class="px-6 py-3 text-left">Nonce (si)</th>
-            <th class="px-6 py-3 text-left">狀態</th>
-            <th class="px-6 py-3 text-left">原因</th>
-            <th class="px-6 py-3 text-left">時間（人類可讀）</th>
-            <th class="px-6 py-3 text-left">Unix ts</th>
-          </tr>
-        </thead>
-        <tbody class="divide-y divide-gray-800">
-          {% for log in logs %}
-          <tr class="hover:bg-gray-800/50 transition">
-            <td class="px-6 py-3 text-gray-500">{{ log.id }}</td>
-            <td class="px-6 py-3 font-mono text-blue-300">{{ log.sender_id }}</td>
-            <td class="px-6 py-3 font-mono text-gray-400 text-xs">{{ log.si[:16] }}...</td>
-            <td class="px-6 py-3">
-              {% if log.status == 'success' %}
-              <span class="px-2 py-0.5 rounded-full bg-green-900 text-green-300 text-xs">成功</span>
-              {% else %}
-              <span class="px-2 py-0.5 rounded-full bg-red-900 text-red-300 text-xs">✗ 拒絕</span>
-              {% endif %}
-            </td>
-            <td class="px-6 py-3 text-gray-400 text-xs">{{ log.reason or '—' }}</td>
-            <!-- UI 顯示：人類可讀格式 -->
-            <td class="px-6 py-3 text-gray-300 text-xs font-mono">{{ log.processed_at | ts_to_str }}</td>
-            <td class="px-6 py-3 text-gray-500 text-xs">{{ log.processed_at }}</td>
-          </tr>
-          {% endfor %}
-        </tbody>
-      </table>
+      <div class="overflow-x-auto">
+        <table class="w-full text-sm">
+          <thead class="bg-gray-50 dark:bg-[#0a0a0a] text-gray-500 dark:text-gray-400 text-xs uppercase tracking-wider">
+            <tr>
+              <th class="px-6 py-3.5 text-left font-medium">#</th>
+              <th class="px-6 py-3.5 text-left font-medium">盲化訊息 (前 20)</th>
+              <th class="px-6 py-3.5 text-left font-medium">盲簽章結果 (前 20)</th>
+              <th class="px-6 py-3.5 text-left font-medium">核發時間</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-gray-100 dark:divide-gray-800">
+            {% for log in logs %}
+            <tr class="hover:bg-gray-50 dark:hover:bg-[#1a1a1a] transition-colors">
+              <td class="px-6 py-4 text-gray-400 dark:text-gray-600 text-xs">{{ log.id }}</td>
+              <td class="px-6 py-4 font-mono font-medium text-gray-600 dark:text-gray-400 text-[11px]">{{ log.blinded_m_hex[:20] }}...</td>
+              <td class="px-6 py-4 font-mono font-medium text-msblue dark:text-[#3399FF] text-[11px]">{{ log.signed_b_m_hex[:20] }}...</td>
+              <td class="px-6 py-4">
+                <p class="text-gray-600 dark:text-gray-400 text-[11px] font-mono">{{ log.created_at | ts_to_str }}</p>
+                <p class="text-gray-400 dark:text-gray-600 text-[10px]">{{ log.created_at }}</p>
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
       {% else %}
-      <div class="px-6 py-10 text-center text-gray-500">尚無認證記錄</div>
+      <div class="px-6 py-12 text-center text-gray-500 dark:text-gray-500">
+        <svg class="w-10 h-10 mx-auto text-gray-300 dark:text-gray-700 mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path></svg>
+        <p class="text-sm">尚未核發任何盲簽章</p>
+      </div>
       {% endif %}
     </div>
 
-    <!-- Voted Users -->
-    <div class="bg-gray-900 rounded-xl border border-gray-800 overflow-hidden">
-      <div class="px-6 py-4 border-b border-gray-800">
-        <h2 class="font-semibold text-gray-200">已投票選民</h2>
+    <div class="mt-6 bg-white/70 dark:bg-cardblack/80 backdrop-blur-lg rounded-xl border border-gray-200 dark:border-gray-800 shadow-md p-6">
+      <div class="flex justify-between items-center mb-4">
+        <h2 class="font-medium text-gray-800 dark:text-gray-200 flex items-center gap-2 text-sm">
+          <svg class="w-4 h-4 text-msblue" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z"></path></svg>
+          公鑰（PEM 格式預覽）
+        </h2>
+        <span class="text-[11px] text-gray-400 dark:text-gray-500 border border-gray-200 dark:border-gray-700 px-2 py-0.5 rounded-md">公開資訊</span>
       </div>
-      {% if voted_users %}
-      <table class="w-full text-sm">
-        <thead class="bg-gray-800 text-gray-400 text-xs uppercase">
-          <tr>
-            <th class="px-6 py-3 text-left">選民 ID</th>
-            <th class="px-6 py-3 text-left">投票時間（人類可讀）</th>
-            <th class="px-6 py-3 text-left">Unix ts</th>
-          </tr>
-        </thead>
-        <tbody class="divide-y divide-gray-800">
-          {% for v in voted_users %}
-          <tr class="hover:bg-gray-800/50 transition">
-            <td class="px-6 py-3 font-mono text-yellow-300">{{ v.sender_id }}</td>
-            <!-- UI 顯示：人類可讀格式 -->
-            <td class="px-6 py-3 text-gray-300 font-mono text-xs">{{ v.voted_at | ts_to_str }}</td>
-            <td class="px-6 py-3 text-gray-500 text-xs">{{ v.voted_at }}</td>
-          </tr>
-          {% endfor %}
-        </tbody>
-      </table>
-      {% else %}
-      <div class="px-6 py-10 text-center text-gray-500">尚無已投票選民</div>
-      {% endif %}
+      <div class="bg-gray-50 dark:bg-[#050505] rounded-lg p-5 border border-gray-100 dark:border-gray-800/80 shadow-inner">
+        <pre class="text-[11px] leading-relaxed text-gray-600 dark:text-gray-400 font-mono overflow-x-auto whitespace-pre-wrap break-all">{{ pk_pem }}</pre>
+      </div>
     </div>
 
   </div>
 </body>
 </html>"""
-
-
 # ── 路由 ──────────────────────────────────────────────────
 
 @app.route('/')
 def dashboard():
+    # 盲簽章記錄（供儀表板表格顯示）
     logs = db.fetchall(
-        "SELECT id, sender_id, si, status, reason, processed_at FROM auth_log ORDER BY id DESC LIMIT 20"
+        "SELECT id, blinded_m_hex, signed_b_m_hex, created_at FROM blind_sign_log ORDER BY id DESC LIMIT 20"
     )
-    voted_users = db.fetchall("SELECT sender_id, voted_at FROM voted_users ORDER BY voted_at DESC")
+    sign_count    = db.count("blind_sign_log")
+
+    voted_users   = db.fetchall("SELECT sender_id, voted_at FROM voted_users ORDER BY voted_at DESC")
     total_auth    = db.count("auth_log")
     success_auth  = db.count("auth_log", "status = 'success'")
     rejected_auth = db.count("auth_log", "status = 'rejected'")
@@ -329,6 +369,8 @@ def dashboard():
     return render_template_string(
         _DASHBOARD_HTML,
         logs=logs,
+        sign_count=sign_count,
+        pk_pem=_public_key_pem,
         voted_users=voted_users,
         total_auth=total_auth,
         success_auth=success_auth,
@@ -470,7 +512,13 @@ def api_blind_sign():
     try:
         m_prime = hex_to_int(data['m_prime_hex'])
         S = blind_sign(m_prime, _d, _n)
-        return jsonify({"status": "success", "S_hex": int_to_hex(S)}), 200
+        S_hex = int_to_hex(S)
+        # ── 記錄盲簽章到資料庫 ──────────────────────────────
+        db.execute(
+            "INSERT INTO blind_sign_log (blinded_m_hex, signed_b_m_hex, created_at) VALUES (?, ?, ?)",
+            (data['m_prime_hex'], S_hex, int(time.time())),
+        )
+        return jsonify({"status": "success", "S_hex": S_hex}), 200
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 

@@ -202,17 +202,6 @@ python simulate_voters.py -n 50 --skip-wait   # 跳過等待截止
 python simulate_voters.py -n 50 --verbose     # 顯示詳細步驟
 ```
 
-輸出包含各候選人得票長條圖、模擬端預期分佈 vs CC 實際計票結果對比、Merkle Proof 驗證統計。
-
-### e2e_test.py
-
-```bash
-python e2e_test.py                     # 測試所有選民
-python e2e_test.py --voter VOTER_001   # 只測試指定選民
-python e2e_test.py --skip-wait         # 跳過等待截止
-python e2e_test.py --verbose           # 顯示詳細 HTTP 回應
-```
-
 ## 專案結構
 
 ```

@@ -145,124 +145,233 @@ _VOTE_HTML = """<!DOCTYPE html>
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>投票系統 - {{ voter_id }}</title>
   <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            msblue: '#0078D4',
+            msblueHover: '#0060A8',
+            deepblack: '#050505',
+            cardblack: '#111111'
+          }
+        }
+      }
+    }
+  </script>
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    body { font-family: 'Noto Sans', sans-serif; }
+    
+    /* 自訂單選框樣式 */
+    .candidate-radio:checked + div {
+      border-color: #0078D4;
+      background-color: rgba(0, 120, 212, 0.05);
+    }
+    .dark .candidate-radio:checked + div {
+      background-color: rgba(51, 153, 255, 0.1);
+      border-color: #3399FF;
+    }
+    .candidate-radio:checked + div .radio-inner-circle {
+      background-color: #0078D4;
+      transform: scale(1);
+    }
+    .dark .candidate-radio:checked + div .radio-inner-circle {
+      background-color: #3399FF;
+    }
+    .candidate-radio:checked + div .candidate-name {
+      color: #0078D4;
+      font-weight: 600;
+    }
+    .dark .candidate-radio:checked + div .candidate-name {
+      color: #3399FF;
+    }
+  </style>
+  <script>
+    if (localStorage.getItem('theme') === 'dark' || (!('theme' in localStorage) && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
+      document.documentElement.classList.add('dark');
+    } else {
+      document.documentElement.classList.remove('dark');
+    }
+    function toggleTheme() {
+      if (document.documentElement.classList.contains('dark')) {
+        document.documentElement.classList.remove('dark');
+        localStorage.setItem('theme', 'light');
+      } else {
+        document.documentElement.classList.add('dark');
+        localStorage.setItem('theme', 'dark');
+      }
+    }
+  </script>
 </head>
-<body class="bg-gray-950 text-gray-100 min-h-screen">
+<body class="bg-gray-50 dark:bg-deepblack text-gray-800 dark:text-gray-100 min-h-screen transition-colors duration-300">
   <div class="max-w-2xl mx-auto px-4 py-10">
 
-    <!-- Header -->
     <div class="flex items-center gap-4 mb-8">
-      <div class="w-12 h-12 rounded-xl bg-rose-600 flex items-center justify-center text-2xl">🗳️</div>
-      <div>
-        <h1 class="text-2xl font-bold text-white">電子投票系統</h1>
-        <p class="text-gray-400 text-sm">NUTC Voting System · 選民：{{ voter_id }}</p>
+      <div class="w-12 h-12 rounded-xl bg-white/70 dark:bg-cardblack/80 backdrop-blur-md shadow-sm flex items-center justify-center border border-gray-200 dark:border-gray-800">
+        <svg class="w-6 h-6 text-msblue" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"></path></svg>
       </div>
-      {% if already_voted %}
-      <span class="ml-auto px-3 py-1 rounded-full bg-green-900 text-green-300 text-xs font-semibold">✓ 已投票</span>
-      {% else %}
-      <span class="ml-auto px-3 py-1 rounded-full bg-blue-900 text-blue-300 text-xs font-semibold">● 尚未投票</span>
-      {% endif %}
+      <div>
+        <h1 class="text-2xl font-semibold text-gray-900 dark:text-white">電子投票系統</h1>
+        <p class="text-gray-500 dark:text-gray-400 text-sm">NUTC Voting System · 選民：<span class="font-mono">{{ voter_id }}</span></p>
+      </div>
+      
+      <div class="ml-auto flex items-center gap-3">
+        {% if already_voted %}
+        <span class="px-3 py-1.5 rounded-full bg-green-50 dark:bg-green-900/20 text-green-700 dark:text-green-400 border border-green-200 dark:border-green-800/50 backdrop-blur-sm text-xs font-medium flex items-center shadow-sm">
+          <svg class="w-3.5 h-3.5 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path></svg> 已投票
+        </span>
+        {% else %}
+        <span class="px-3 py-1.5 rounded-full bg-msblue/10 dark:bg-msblue/20 text-msblue dark:text-[#3399FF] border border-msblue/20 dark:border-msblue/30 backdrop-blur-sm text-xs font-medium flex items-center shadow-sm">
+          <span class="inline-block w-1.5 h-1.5 rounded-full bg-msblue mr-1.5"></span> 尚未投票
+        </span>
+        {% endif %}
+        
+        <button onclick="toggleTheme()" class="p-2 rounded-lg bg-white/70 dark:bg-cardblack/80 border border-gray-200 dark:border-gray-800 shadow-sm hover:bg-gray-100 dark:hover:bg-gray-900 transition-colors text-gray-600 dark:text-gray-300 focus:outline-none focus:ring-2 focus:ring-msblue/50">
+          <svg class="w-4 h-4 hidden dark:block" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z"></path></svg>
+          <svg class="w-4 h-4 block dark:hidden" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z"></path></svg>
+        </button>
+      </div>
     </div>
 
-    <!-- Deadline Countdown Banner -->
-    <div id="deadline-banner" class="mb-6 hidden">
+    <div id="deadline-banner" class="mb-6 hidden transition-all duration-500">
       <div id="deadline-active"
-        class="bg-amber-900/30 border border-amber-700 rounded-xl p-4 flex items-center justify-between hidden">
-        <div>
-          <p class="text-amber-300 font-semibold text-sm">⏱ 投票截止倒數</p>
-          <!-- UI 顯示：人類可讀格式（由 JS 填入） -->
-          <p class="text-gray-400 text-xs mt-0.5">截止時間：<span id="deadline-str" class="font-mono text-amber-200"></span></p>
-          <p class="text-gray-600 text-xs">Unix timestamp：<span id="deadline-ts-display"></span></p>
+        class="bg-amber-50/80 dark:bg-amber-900/10 border border-amber-200 dark:border-amber-800/50 backdrop-blur-md rounded-xl p-5 flex flex-col sm:flex-row sm:items-center justify-between shadow-sm hidden">
+        <div class="mb-3 sm:mb-0">
+          <p class="text-amber-800 dark:text-amber-400 font-medium text-sm flex items-center gap-1.5">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+            投票截止倒數
+          </p>
+          <p class="text-gray-600 dark:text-gray-400 text-[11px] mt-1">截止時間：<span id="deadline-str" class="font-mono text-amber-700 dark:text-amber-300"></span></p>
+          <p class="text-gray-500 dark:text-gray-500 text-[10px]">Unix timestamp：<span id="deadline-ts-display" class="font-mono"></span></p>
         </div>
-        <div class="text-right">
-          <p id="countdown-display" class="text-2xl font-bold font-mono text-amber-400">--:--:--</p>
-          <p class="text-xs text-gray-500">剩餘時間</p>
+        <div class="text-left sm:text-right">
+          <p id="countdown-display" class="text-2xl font-bold font-mono text-amber-600 dark:text-amber-500 tracking-wider">--:--:--</p>
+          <p class="text-[10px] text-amber-700/70 dark:text-amber-500/70 uppercase tracking-widest mt-0.5">剩餘時間</p>
         </div>
       </div>
+      
       <div id="deadline-expired"
-        class="bg-red-900/40 border border-red-700 rounded-xl p-4 hidden">
-        <p class="text-red-300 font-bold">投票已截止</p>
-        <p class="text-gray-400 text-sm mt-1">截止時間已過，無法再提交選票。</p>
+        class="bg-red-50/80 dark:bg-red-900/10 border border-red-200 dark:border-red-900/50 backdrop-blur-md rounded-xl p-5 shadow-sm hidden">
+        <div class="flex items-start gap-3">
+          <svg class="w-5 h-5 text-red-600 dark:text-red-500 mt-0.5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"></path></svg>
+          <div>
+            <p class="text-red-800 dark:text-red-400 font-semibold text-sm">投票已截止</p>
+            <p class="text-red-600/80 dark:text-red-400/80 text-xs mt-1">截止時間已過，無法再提交選票。</p>
+          </div>
+        </div>
       </div>
     </div>
 
     {% if flash_msg %}
-    <div class="mb-6 p-4 rounded-xl {% if flash_type == 'error' %}bg-red-900/40 border border-red-700 text-red-300{% else %}bg-green-900/40 border border-green-700 text-green-300{% endif %}">
-      {{ flash_msg }}
+    <div class="mb-6 p-4 rounded-xl shadow-sm flex items-start gap-3 {% if flash_type == 'error' %}bg-red-50/80 dark:bg-red-900/10 border border-red-200 dark:border-red-900/50 text-red-800 dark:text-red-300{% else %}bg-green-50/80 dark:bg-green-900/10 border border-green-200 dark:border-green-900/50 text-green-800 dark:text-green-300{% endif %}">
+      {% if flash_type == 'error' %}
+      <svg class="w-5 h-5 shrink-0 text-red-600 dark:text-red-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2m7-2a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+      {% else %}
+      <svg class="w-5 h-5 shrink-0 text-green-600 dark:text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+      {% endif %}
+      <span class="text-sm pt-0.5">{{ flash_msg }}</span>
     </div>
     {% endif %}
 
     {% if already_voted %}
-    <!-- Already Voted -->
-    <div class="bg-gray-900 rounded-2xl border border-gray-800 p-8 text-center mb-6">
-      <div class="text-5xl mb-4">✅</div>
-      <h2 class="text-xl font-semibold text-green-400 mb-2">投票完成！</h2>
-      <p class="text-gray-400 text-sm mb-6">您的選票已成功提交並加密傳送至計票中心。</p>
-      <div class="bg-gray-800 rounded-xl p-4 text-left mb-4">
-        <p class="text-xs text-gray-400 mb-1">投票內容</p>
-        <p class="font-mono text-rose-300 font-semibold">{{ vote_record.vote }}</p>
+    <div class="bg-white/70 dark:bg-cardblack/80 backdrop-blur-lg rounded-2xl border border-gray-200 dark:border-gray-800 shadow-md p-8 mb-6 relative overflow-hidden">
+      <div class="absolute top-0 left-0 w-full h-1.5 bg-green-500"></div>
+      
+      <div class="flex flex-col items-center text-center mb-8 mt-2">
+        <div class="w-16 h-16 bg-green-50 dark:bg-green-900/20 rounded-full flex items-center justify-center mb-4 border border-green-100 dark:border-green-800/50 shadow-sm">
+          <svg class="w-8 h-8 text-green-500 dark:text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path></svg>
+        </div>
+        <h2 class="text-xl font-semibold text-gray-900 dark:text-white mb-2">投票完成！</h2>
+        <p class="text-gray-500 dark:text-gray-400 text-sm">您的選票已成功提交並加密傳送至計票中心。</p>
       </div>
-      <div class="bg-gray-800 rounded-xl p-4 text-left mb-2">
-        <p class="text-xs text-gray-400 mb-1">投票時間（人類可讀）</p>
-        <p class="font-mono text-xs text-gray-300">{{ vote_record.voted_at | ts_to_str }}</p>
+      
+      <div class="space-y-4 mb-8">
+        <div class="bg-gray-50/80 dark:bg-[#0a0a0a] rounded-xl p-4 border border-gray-100 dark:border-gray-800/80 shadow-inner">
+          <p class="text-[11px] text-gray-500 dark:text-gray-500 uppercase tracking-wider mb-1 font-medium">投票內容</p>
+          <p class="font-mono text-msblue dark:text-[#3399FF] font-semibold text-lg">{{ vote_record.vote }}</p>
+        </div>
+        
+        <div class="bg-gray-50/80 dark:bg-[#0a0a0a] rounded-xl p-4 border border-gray-100 dark:border-gray-800/80 shadow-inner">
+          <p class="text-[11px] text-gray-500 dark:text-gray-500 uppercase tracking-wider mb-1 font-medium">投票時間</p>
+          <p class="font-mono text-sm text-gray-800 dark:text-gray-200">{{ vote_record.voted_at | ts_to_str }}</p>
+        </div>
+        
+        <div class="bg-blue-50/50 dark:bg-blue-900/5 rounded-xl p-4 border border-blue-100 dark:border-blue-900/30 relative overflow-hidden">
+          <div class="absolute left-0 top-0 w-1 h-full bg-msblue"></div>
+          <p class="text-[11px] text-msblue dark:text-[#3399FF] uppercase tracking-wider mb-1.5 font-semibold">選票包雜湊值 m_hex (用於獨立驗證)</p>
+          <p class="font-mono text-[11px] text-gray-700 dark:text-gray-300 break-all">{{ vote_record.m_hex }}</p>
+        </div>
       </div>
-      <div class="bg-gray-800 rounded-xl p-4 text-left mb-6">
-        <p class="text-xs text-gray-400 mb-1">選票包雜湊值 m_hex（請妥善保存，用於驗證）</p>
-        <p class="font-mono text-xs text-indigo-300 break-all">{{ vote_record.m_hex }}</p>
-      </div>
-      <div class="flex gap-3">
-        <a href="/status" class="flex-1 py-2 bg-gray-700 hover:bg-gray-600 rounded-lg text-sm font-semibold text-center transition">
+      
+      <div class="flex flex-col sm:flex-row gap-3">
+        <a href="/status" class="flex-1 py-3 bg-white dark:bg-cardblack border border-gray-300 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-900 rounded-xl text-sm font-medium text-gray-700 dark:text-gray-200 text-center transition shadow-sm flex items-center justify-center gap-2">
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path></svg>
           查看詳細狀態
         </a>
         <a href="{{ bb_url }}/verify?m_hex={{ vote_record.m_hex }}" target="_blank"
-          class="flex-1 py-2 bg-indigo-600 hover:bg-indigo-500 rounded-lg text-sm font-semibold text-center transition">
-          前往 BB 驗證 →
+          class="flex-1 py-3 bg-msblue hover:bg-msblueHover rounded-xl text-sm font-medium text-white text-center transition shadow-md flex items-center justify-center gap-2">
+          前往 BB 驗證 <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"></path></svg>
         </a>
       </div>
     </div>
 
     {% else %}
-    <!-- Vote Form -->
-    <div class="bg-gray-900 rounded-2xl border border-gray-800 p-8 mb-6">
-      <h2 class="font-semibold text-gray-200 mb-6 text-lg">請選擇您支持的候選人</h2>
+    <div class="bg-white/70 dark:bg-cardblack/80 backdrop-blur-lg rounded-2xl border border-gray-200 dark:border-gray-800 shadow-md p-6 sm:p-8 mb-6">
+      <h2 class="font-medium text-gray-900 dark:text-white mb-6 text-base sm:text-lg flex items-center gap-2">
+        <svg class="w-5 h-5 text-msblue" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"></path></svg>
+        請選擇您支持的候選人
+      </h2>
+      
       <form method="POST" action="/vote" id="voteForm">
         <div class="space-y-3 mb-8">
           {% for candidate in candidates %}
-          <label class="flex items-center gap-4 p-4 rounded-xl border border-gray-700 hover:border-rose-500 hover:bg-gray-800/50 cursor-pointer transition group">
-            <input type="radio" name="candidate" value="{{ candidate }}" required
-              class="w-4 h-4 accent-rose-500">
-            <span class="font-mono text-gray-200 group-hover:text-white transition">{{ candidate }}</span>
+          <label class="block relative cursor-pointer group">
+            <input type="radio" name="candidate" value="{{ candidate }}" required class="candidate-radio peer sr-only">
+            <div class="flex items-center p-4 rounded-xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-[#1a1a1a] hover:bg-gray-50 dark:hover:bg-[#222] transition-all duration-200 shadow-sm">
+              <div class="w-5 h-5 rounded-full border-2 border-gray-300 dark:border-gray-600 mr-4 flex flex-shrink-0 items-center justify-center bg-white dark:bg-gray-800">
+                <div class="radio-inner-circle w-2.5 h-2.5 rounded-full bg-transparent transform scale-0 transition-transform duration-200"></div>
+              </div>
+              <span class="candidate-name font-mono text-gray-700 dark:text-gray-300 text-sm sm:text-base transition-colors duration-200">{{ candidate }}</span>
+            </div>
           </label>
           {% endfor %}
         </div>
+        
         <button type="submit" id="submitBtn"
-          class="w-full py-3 bg-rose-600 hover:bg-rose-500 rounded-xl text-white font-semibold transition text-sm disabled:opacity-50 disabled:cursor-not-allowed disabled:bg-gray-700">
-          提交選票
+          class="w-full py-3.5 bg-msblue hover:bg-msblueHover rounded-xl text-white font-medium transition shadow-md text-sm flex justify-center items-center gap-2 disabled:opacity-60 disabled:cursor-not-allowed disabled:hover:bg-msblue">
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8"></path></svg>
+          提交加密選票
         </button>
-        <p id="deadline-block-msg" class="mt-3 text-center text-red-400 text-sm hidden">
+        <p id="deadline-block-msg" class="mt-4 text-center text-red-600 dark:text-red-400 text-sm font-medium hidden flex justify-center items-center gap-1">
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
           投票已截止，無法提交選票。
         </p>
       </form>
     </div>
 
-    <!-- Flow Info -->
-    <div class="bg-gray-900 rounded-xl border border-gray-800 p-5">
-      <h3 class="font-semibold text-gray-300 mb-3 text-sm">投票流程說明</h3>
-      <div class="space-y-2 text-xs text-gray-400">
-        <div class="flex items-start gap-2">
-          <span class="text-blue-400 mt-0.5">①</span>
-          <span>雙向身分認證（Voter ↔ TPA），含 CA 憑證鏈驗證</span>
+    <div class="bg-white/50 dark:bg-cardblack/50 backdrop-blur-md rounded-xl border border-gray-200 dark:border-gray-800 p-5 shadow-sm">
+      <h3 class="font-medium text-gray-800 dark:text-gray-200 mb-4 text-sm flex items-center gap-2">
+        <svg class="w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+        零信任安全投票流程
+      </h3>
+      <div class="space-y-3 text-[13px] text-gray-600 dark:text-gray-400">
+        <div class="flex items-start gap-2.5">
+          <span class="flex items-center justify-center w-5 h-5 rounded-full bg-msblue/10 dark:bg-msblue/20 text-msblue dark:text-[#3399FF] text-[10px] font-bold shrink-0 mt-0.5">1</span>
+          <span>雙向身分認證（Voter ↔ TPA），包含 X.509 CA 憑證鏈驗證確保身分合法。</span>
         </div>
-        <div class="flex items-start gap-2">
-          <span class="text-blue-400 mt-0.5">②</span>
-          <span>盲簽章：選票雜湊值盲化後送 TPA 簽章，保護投票隱私</span>
+        <div class="flex items-start gap-2.5">
+          <span class="flex items-center justify-center w-5 h-5 rounded-full bg-msblue/10 dark:bg-msblue/20 text-msblue dark:text-[#3399FF] text-[10px] font-bold shrink-0 mt-0.5">2</span>
+          <span>盲簽章 (Blind Signature)：選票雜湊值盲化後送 TPA 簽章，發行方無法得知投票內容，保障絕對隱私。</span>
         </div>
-        <div class="flex items-start gap-2">
-          <span class="text-blue-400 mt-0.5">③</span>
-          <span>數位信封：C_Data = E_k(E_PK_TA(...), S', m)，C_Key = E_PK_CC(k)</span>
+        <div class="flex items-start gap-2.5">
+          <span class="flex items-center justify-center w-5 h-5 rounded-full bg-msblue/10 dark:bg-msblue/20 text-msblue dark:text-[#3399FF] text-[10px] font-bold shrink-0 mt-0.5">3</span>
+          <span class="break-all">封裝數位信封：C_Data = E_k(E_PK_TA(...), S', m)，C_Key = E_PK_CC(k)。</span>
         </div>
-        <div class="flex items-start gap-2">
-          <span class="text-blue-400 mt-0.5">④</span>
-          <span>信封傳送至計票中心（CC），等待截止後開票</span>
+        <div class="flex items-start gap-2.5">
+          <span class="flex items-center justify-center w-5 h-5 rounded-full bg-msblue/10 dark:bg-msblue/20 text-msblue dark:text-[#3399FF] text-[10px] font-bold shrink-0 mt-0.5">4</span>
+          <span>信封加密傳送至計票中心（CC），等待時間授權中心 (TA) 截止後釋放私鑰進行開票。</span>
         </div>
       </div>
     </div>
@@ -319,7 +428,7 @@ _VOTE_HTML = """<!DOCTYPE html>
           if (countdownEl) countdownEl.textContent = '00:00:00';
           if (submitBtn) {
             submitBtn.disabled = true;
-            submitBtn.textContent = '投票已截止';
+            submitBtn.innerHTML = '<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"></path></svg> 投票已截止';
           }
           if (blockMsg)   blockMsg.classList.remove('hidden');
           if (activeEl)   activeEl.classList.add('hidden');
@@ -336,8 +445,8 @@ _VOTE_HTML = """<!DOCTYPE html>
 
         // 剩餘 60 秒以內：倒數變紅色警示
         if (diff <= 60 && countdownEl) {
-          countdownEl.classList.remove('text-amber-400');
-          countdownEl.classList.add('text-red-400');
+          countdownEl.classList.remove('text-amber-600', 'dark:text-amber-500');
+          countdownEl.classList.add('text-red-600', 'dark:text-red-500');
         }
 
         setTimeout(update, 500);
@@ -357,7 +466,7 @@ _VOTE_HTML = """<!DOCTYPE html>
           const submitBtn = document.getElementById('submitBtn');
           if (submitBtn) {
             submitBtn.disabled = true;
-            submitBtn.textContent = '投票已截止';
+            submitBtn.innerHTML = '<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"></path></svg> 投票已截止';
           }
           console.warn('[Voter] fetch 攔截：截止時間已過，阻止提交（nowSec=' + nowSec + ' > deadlineTs=' + deadlineTs + '）');
           return;
@@ -366,7 +475,7 @@ _VOTE_HTML = """<!DOCTYPE html>
       // 正常提交：顯示處理中
       const btn = document.getElementById('submitBtn');
       if (btn) {
-        btn.textContent = '⏳ 處理中...';
+        btn.innerHTML = '<svg class="w-4 h-4 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg> 處理中...';
         btn.disabled = true;
       }
     });
@@ -384,92 +493,151 @@ _STATUS_HTML = """<!DOCTYPE html>
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>投票狀態 - {{ voter_id }}</title>
   <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            msblue: '#0078D4',
+            msblueHover: '#0060A8',
+            deepblack: '#050505',
+            cardblack: '#111111'
+          }
+        }
+      }
+    }
+  </script>
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    body { font-family: 'Noto Sans', sans-serif; }
+  </style>
+  <script>
+    if (localStorage.getItem('theme') === 'dark' || (!('theme' in localStorage) && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
+      document.documentElement.classList.add('dark');
+    } else {
+      document.documentElement.classList.remove('dark');
+    }
+    function toggleTheme() {
+      if (document.documentElement.classList.contains('dark')) {
+        document.documentElement.classList.remove('dark');
+        localStorage.setItem('theme', 'light');
+      } else {
+        document.documentElement.classList.add('dark');
+        localStorage.setItem('theme', 'dark');
+      }
+    }
+  </script>
 </head>
-<body class="bg-gray-950 text-gray-100 min-h-screen">
+<body class="bg-gray-50 dark:bg-deepblack text-gray-800 dark:text-gray-100 min-h-screen transition-colors duration-300">
   <div class="max-w-3xl mx-auto px-4 py-10">
 
-    <div class="flex items-center gap-3 mb-8">
-      <a href="/" class="text-gray-400 hover:text-white text-sm">← 返回投票頁</a>
-    </div>
-
-    <div class="flex items-center gap-4 mb-8">
-      <div class="w-12 h-12 rounded-xl bg-rose-600 flex items-center justify-center text-2xl">📊</div>
-      <div>
-        <h1 class="text-2xl font-bold text-white">投票狀態</h1>
-        <p class="text-gray-400 text-sm">選民：{{ voter_id }}</p>
+    <div class="flex items-center justify-between mb-8">
+      <div class="flex items-center gap-4">
+        <a href="/" class="p-2 -ml-2 rounded-lg text-gray-500 dark:text-gray-400 hover:text-msblue hover:bg-msblue/10 dark:hover:text-white transition-colors" title="返回投票頁">
+          <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18"></path></svg>
+        </a>
+        <div class="w-10 h-10 rounded-xl bg-white/70 dark:bg-cardblack/80 shadow-sm flex items-center justify-center border border-gray-200 dark:border-gray-800">
+          <svg class="w-5 h-5 text-msblue" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"></path></svg>
+        </div>
+        <div>
+          <h1 class="text-xl font-semibold text-gray-900 dark:text-white">投票狀態</h1>
+          <p class="text-gray-500 dark:text-gray-400 text-xs mt-0.5">選民：<span class="font-mono">{{ voter_id }}</span></p>
+        </div>
       </div>
+      
+      <button onclick="toggleTheme()" class="p-2 rounded-lg bg-white/70 dark:bg-cardblack/80 border border-gray-200 dark:border-gray-800 shadow-sm hover:bg-gray-100 dark:hover:bg-gray-900 transition-colors text-gray-600 dark:text-gray-300 focus:outline-none focus:ring-2 focus:ring-msblue/50">
+        <svg class="w-4 h-4 hidden dark:block" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z"></path></svg>
+        <svg class="w-4 h-4 block dark:hidden" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z"></path></svg>
+      </button>
     </div>
 
     {% if vote_record %}
-    <!-- Vote Record -->
-    <div class="bg-gray-900 rounded-xl border border-gray-800 p-6 mb-6">
-      <h2 class="font-semibold text-gray-200 mb-4">投票記錄</h2>
-      <div class="grid grid-cols-2 gap-4 text-sm">
-        <div>
-          <p class="text-gray-400 text-xs mb-1">選民 ID</p>
-          <p class="font-mono text-rose-300">{{ vote_record.voter_id }}</p>
+    <div class="bg-white/70 dark:bg-cardblack/80 backdrop-blur-lg rounded-2xl border border-gray-200 dark:border-gray-800 shadow-md p-6 sm:p-8 mb-6">
+      <h2 class="font-medium text-gray-800 dark:text-gray-200 mb-6 text-sm flex items-center gap-2 uppercase tracking-wider">
+        <svg class="w-4 h-4 text-msblue" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path></svg>
+        加密記錄檔案
+      </h2>
+      
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 text-sm mb-6">
+        <div class="bg-gray-50 dark:bg-[#0a0a0a] rounded-xl p-4 border border-gray-100 dark:border-gray-800/80 shadow-inner">
+          <p class="text-gray-500 dark:text-gray-500 text-[11px] uppercase tracking-wider mb-1 font-medium">選民 ID</p>
+          <p class="font-mono text-gray-800 dark:text-gray-200">{{ vote_record.voter_id }}</p>
         </div>
-        <div>
-          <p class="text-gray-400 text-xs mb-1">序號 (SN)</p>
-          <p class="font-mono text-gray-300">{{ vote_record.sn }}</p>
+        <div class="bg-gray-50 dark:bg-[#0a0a0a] rounded-xl p-4 border border-gray-100 dark:border-gray-800/80 shadow-inner">
+          <p class="text-gray-500 dark:text-gray-500 text-[11px] uppercase tracking-wider mb-1 font-medium">隨機序號 (SN)</p>
+          <p class="font-mono text-gray-800 dark:text-gray-300 text-xs">{{ vote_record.sn }}</p>
         </div>
-        <div>
-          <p class="text-gray-400 text-xs mb-1">投票內容</p>
-          <p class="font-mono text-rose-300 font-semibold">{{ vote_record.vote }}</p>
+        <div class="bg-gray-50 dark:bg-[#0a0a0a] rounded-xl p-4 border border-gray-100 dark:border-gray-800/80 shadow-inner">
+          <p class="text-gray-500 dark:text-gray-500 text-[11px] uppercase tracking-wider mb-1 font-medium">投票內容</p>
+          <p class="font-mono text-msblue dark:text-[#3399FF] font-semibold text-base">{{ vote_record.vote }}</p>
         </div>
-        <div>
-          <p class="text-gray-400 text-xs mb-1">投票時間（人類可讀）</p>
-          <!-- UI 顯示：人類可讀格式 -->
-          <p class="text-gray-300 font-mono text-xs">{{ vote_record.voted_at | ts_to_str }}</p>
-          <p class="text-gray-600 text-xs mt-0.5">Unix ts：{{ vote_record.voted_at }}</p>
+        <div class="bg-gray-50 dark:bg-[#0a0a0a] rounded-xl p-4 border border-gray-100 dark:border-gray-800/80 shadow-inner">
+          <p class="text-gray-500 dark:text-gray-500 text-[11px] uppercase tracking-wider mb-1 font-medium">投票時間</p>
+          <p class="text-gray-800 dark:text-gray-200 font-mono text-[13px]">{{ vote_record.voted_at | ts_to_str }}</p>
+          <p class="text-gray-400 dark:text-gray-600 text-[10px] mt-1 font-mono">ts: {{ vote_record.voted_at }}</p>
         </div>
       </div>
-      <div class="mt-4 pt-4 border-t border-gray-800">
-        <p class="text-gray-400 text-xs mb-1">m_hex（選票包雜湊值，用於 Merkle Proof 驗證）</p>
-        <p class="font-mono text-xs text-indigo-300 break-all">{{ vote_record.m_hex }}</p>
-      </div>
-      <div class="mt-3">
-        <p class="text-gray-400 text-xs mb-1">S'_hex（TPA 盲簽章，前 40 字元）</p>
-        <p class="font-mono text-xs text-gray-400 break-all">{{ vote_record.s_prime_hex[:40] }}...</p>
+      
+      <div class="space-y-4 pt-4 border-t border-gray-100 dark:border-gray-800">
+        <div>
+          <p class="text-gray-500 dark:text-gray-500 text-[11px] uppercase tracking-wider mb-1 font-medium flex items-center gap-1.5">
+            <span class="w-1.5 h-1.5 rounded-full bg-msblue"></span> m_hex（選票包雜湊值，用於 Merkle Proof 驗證）
+          </p>
+          <p class="font-mono text-[11px] sm:text-xs text-gray-700 dark:text-gray-400 break-all bg-gray-50 dark:bg-[#0a0a0a] p-3 rounded-lg border border-gray-100 dark:border-gray-800/80 shadow-inner">{{ vote_record.m_hex }}</p>
+        </div>
+        <div>
+          <p class="text-gray-500 dark:text-gray-500 text-[11px] uppercase tracking-wider mb-1 font-medium flex items-center gap-1.5">
+            <span class="w-1.5 h-1.5 rounded-full bg-purple-500"></span> S'_hex（TPA 盲簽章截斷預覽）
+          </p>
+          <p class="font-mono text-[11px] text-gray-500 dark:text-gray-500 break-all bg-gray-50 dark:bg-[#0a0a0a] p-3 rounded-lg border border-gray-100 dark:border-gray-800/80 shadow-inner">{{ vote_record.s_prime_hex[:80] }}...</p>
+        </div>
       </div>
     </div>
 
-    <!-- Verify Button -->
-    <div class="flex gap-3">
+    <div class="flex gap-3 mb-8">
       <a href="{{ bb_url }}/verify?m_hex={{ vote_record.m_hex }}" target="_blank"
-        class="flex-1 py-3 bg-indigo-600 hover:bg-indigo-500 rounded-xl text-sm font-semibold text-center transition">
-        前往 BB 驗證 Merkle Proof →
+        class="w-full py-3.5 bg-msblue hover:bg-msblueHover rounded-xl text-white font-medium transition shadow-md text-sm flex justify-center items-center gap-2">
+        前往公告板 (BB) 驗證 Merkle Proof <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"></path></svg>
       </a>
     </div>
     {% else %}
-    <div class="bg-gray-900 rounded-xl border border-gray-800 p-10 text-center">
-      <p class="text-gray-500">尚未投票</p>
-      <a href="/" class="mt-4 inline-block px-6 py-2 bg-rose-600 hover:bg-rose-500 rounded-lg text-sm font-semibold transition">
-        前往投票
+    <div class="bg-white/70 dark:bg-cardblack/80 backdrop-blur-lg rounded-2xl border border-gray-200 dark:border-gray-800 shadow-md p-16 text-center">
+      <div class="w-16 h-16 bg-gray-50 dark:bg-[#1a1a1a] rounded-full flex items-center justify-center mx-auto mb-4 border border-gray-100 dark:border-gray-800">
+        <svg class="w-8 h-8 text-gray-400 dark:text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+      </div>
+      <p class="text-gray-600 dark:text-gray-400 font-medium mb-4">您尚未完成投票。</p>
+      <a href="/" class="inline-flex px-6 py-2.5 bg-msblue hover:bg-msblueHover rounded-lg text-sm font-medium text-white transition shadow-sm">
+        前往投票頁面
       </a>
     </div>
     {% endif %}
 
-    <!-- Vote Log -->
     {% if logs %}
-    <div class="mt-6 bg-gray-900 rounded-xl border border-gray-800 overflow-hidden">
-      <div class="px-6 py-4 border-b border-gray-800">
-        <h2 class="font-semibold text-gray-200">投票流程記錄</h2>
+    <div class="bg-white/70 dark:bg-cardblack/80 backdrop-blur-lg rounded-xl border border-gray-200 dark:border-gray-800 shadow-md overflow-hidden">
+      <div class="px-6 py-4 border-b border-gray-100 dark:border-gray-800/60 bg-gray-50/50 dark:bg-[#0a0a0a]/50 flex items-center justify-between">
+        <h2 class="font-medium text-gray-800 dark:text-gray-200 text-sm flex items-center gap-2">
+          <svg class="w-4 h-4 text-msblue" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 10h16M4 14h16M4 18h16"></path></svg>
+          底層加密流程記錄
+        </h2>
       </div>
-      <div class="divide-y divide-gray-800">
+      <div class="divide-y divide-gray-100 dark:divide-gray-800/60">
         {% for log in logs %}
-        <div class="px-6 py-3 flex items-start gap-3">
-          <span class="{% if log.status == 'ok' %}text-green-400{% else %}text-red-400{% endif %} text-sm mt-0.5">
-            {% if log.status == 'ok' %}✓{% else %}✗{% endif %}
+        <div class="px-6 py-4 flex items-start gap-4 hover:bg-gray-50 dark:hover:bg-[#1a1a1a] transition-colors">
+          <span class="mt-0.5 shrink-0">
+            {% if log.status == 'ok' %}
+            <svg class="w-5 h-5 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+            {% else %}
+            <svg class="w-5 h-5 text-red-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2m7-2a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+            {% endif %}
           </span>
           <div class="flex-1 min-w-0">
-            <p class="text-xs text-gray-400">{{ log.step }}</p>
-            <p class="text-sm text-gray-200 truncate">{{ log.message }}</p>
+            <p class="text-[11px] text-gray-500 dark:text-gray-400 font-medium mb-0.5">{{ log.step }}</p>
+            <p class="text-sm text-gray-800 dark:text-gray-300 font-mono leading-relaxed truncate">{{ log.message }}</p>
           </div>
-          <!-- UI 顯示：人類可讀格式 -->
           <div class="text-right shrink-0">
-            <p class="text-xs text-gray-300 font-mono">{{ log.logged_at | ts_to_str }}</p>
-            <p class="text-xs text-gray-600">{{ log.logged_at }}</p>
+            <p class="text-[11px] text-gray-600 dark:text-gray-400 font-mono">{{ log.logged_at | ts_to_str }}</p>
+            <p class="text-[10px] text-gray-400 dark:text-gray-600 font-mono mt-0.5">ts: {{ log.logged_at }}</p>
           </div>
         </div>
         {% endfor %}
@@ -480,8 +648,6 @@ _STATUS_HTML = """<!DOCTYPE html>
   </div>
 </body>
 </html>"""
-
-
 # ── 路由 ──────────────────────────────────────────────────
 
 @app.route('/')

@@ -182,173 +182,269 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>CC 計票中心</title>
   <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            msblue: '#0078D4',
+            msblueHover: '#0060A8',
+            deepblack: '#050505',
+            cardblack: '#111111'
+          }
+        }
+      }
+    }
+  </script>
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    body { font-family: 'Noto Sans', sans-serif; }
+  </style>
+  <script>
+    if (localStorage.getItem('theme') === 'dark' || (!('theme' in localStorage) && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
+      document.documentElement.classList.add('dark');
+    } else {
+      document.documentElement.classList.remove('dark');
+    }
+    function toggleTheme() {
+      if (document.documentElement.classList.contains('dark')) {
+        document.documentElement.classList.remove('dark');
+        localStorage.setItem('theme', 'light');
+      } else {
+        document.documentElement.classList.add('dark');
+        localStorage.setItem('theme', 'dark');
+      }
+    }
+  </script>
   <meta http-equiv="refresh" content="15">
 </head>
-<body class="bg-gray-950 text-gray-100 min-h-screen">
+<body class="bg-gray-50 dark:bg-deepblack text-gray-800 dark:text-gray-100 min-h-screen transition-colors duration-300">
   <div class="max-w-5xl mx-auto px-4 py-10">
 
-    <!-- Header -->
     <div class="flex items-center gap-4 mb-8">
-      <div class="w-12 h-12 rounded-xl bg-emerald-600 flex items-center justify-center text-2xl">🗳️</div>
+      <div class="w-12 h-12 rounded-xl bg-white/70 dark:bg-cardblack/80 backdrop-blur-md shadow-sm flex items-center justify-center border border-gray-200 dark:border-gray-800">
+        <svg class="w-6 h-6 text-msblue" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20 13V6a2 2 0 00-2-2H6a2 2 0 00-2 2v7m16 0v5a2 2 0 01-2 2H6a2 2 0 01-2-2v-5m16 0h-2.586a1 1 0 00-.707.293l-2.414 2.414a1 1 0 01-.707.293h-3.172a1 1 0 01-.707-.293l-2.414-2.414A1 1 0 006.586 13H4"></path></svg>
+      </div>
       <div>
-        <h1 class="text-2xl font-bold text-white">計票中心 (CC)</h1>
-        <p class="text-gray-400 text-sm">NUTC Voting System · Count Center</p>
+        <h1 class="text-2xl font-semibold text-gray-900 dark:text-white">計票中心 (CC)</h1>
+        <p class="text-gray-500 dark:text-gray-400 text-sm">NUTC Voting System · Count Center</p>
       </div>
-      <div class="ml-auto flex flex-col items-end gap-1">
-        <span class="px-3 py-1 rounded-full bg-green-900 text-green-300 text-xs font-semibold">● 運作中</span>
-        {% if deadline_ts %}
-        <span class="px-3 py-1 rounded-full text-xs font-semibold
-          {% if is_expired %}bg-red-900 text-red-300{% else %}bg-amber-900 text-amber-300{% endif %}">
-          {% if is_expired %}投票已截止{% else %} 截止：{{ deadline_str }}{% endif %}
-        </span>
-        {% endif %}
+      
+      <div class="ml-auto flex items-center gap-3">
+        <div class="flex flex-col items-end gap-1.5">
+          <span class="px-3 py-1 rounded-full text-[11px] font-medium border bg-green-50 dark:bg-green-900/20 text-green-700 dark:text-green-400 border-green-200 dark:border-green-800/50 backdrop-blur-sm flex items-center shadow-sm">
+            <span class="inline-block w-1.5 h-1.5 rounded-full bg-green-500 mr-1.5 shadow-[0_0_4px_#22c55e]"></span>運作中
+          </span>
+          {% if deadline_ts %}
+          <span class="px-3 py-1 rounded-full text-[11px] font-medium border backdrop-blur-sm shadow-sm flex items-center
+            {% if is_expired %}bg-red-50 dark:bg-red-900/20 text-red-700 dark:text-red-400 border-red-200 dark:border-red-800/50{% else %}bg-amber-50 dark:bg-amber-900/20 text-amber-700 dark:text-amber-400 border-amber-200 dark:border-amber-800/50{% endif %}">
+            {% if is_expired %}
+              <svg class="w-3 h-3 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"></path></svg>
+              投票已截止
+            {% else %}
+              <svg class="w-3 h-3 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+              截止：{{ deadline_str }}
+            {% endif %}
+          </span>
+          {% endif %}
+        </div>
+
+        <div class="h-8 w-px bg-gray-200 dark:bg-gray-700 mx-1"></div>
+
+        <button onclick="toggleTheme()" class="p-2 rounded-lg bg-white/70 dark:bg-cardblack/80 border border-gray-200 dark:border-gray-800 shadow-sm hover:bg-gray-100 dark:hover:bg-gray-900 transition-colors text-gray-600 dark:text-gray-300 focus:outline-none focus:ring-2 focus:ring-msblue/50">
+          <svg class="w-4 h-4 hidden dark:block" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z"></path></svg>
+          <svg class="w-4 h-4 block dark:hidden" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z"></path></svg>
+        </button>
       </div>
     </div>
 
-    <!-- Stats -->
     <div class="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-8">
-      <div class="bg-gray-900 rounded-xl p-5 border border-gray-800">
-        <p class="text-gray-400 text-xs mb-1">收到信封</p>
-        <p class="text-3xl font-bold text-emerald-400">{{ envelope_count }}</p>
+      <div class="bg-white/70 dark:bg-cardblack/80 backdrop-blur-lg rounded-xl border border-gray-200 dark:border-gray-800 shadow-sm p-5 flex flex-col justify-center">
+        <p class="text-gray-500 dark:text-gray-400 text-xs font-medium uppercase tracking-wider mb-2 flex items-center gap-1.5">
+          <svg class="w-3.5 h-3.5 text-msblue" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"></path></svg>
+          收到信封
+        </p>
+        <p class="text-3xl font-semibold text-gray-900 dark:text-white">{{ envelope_count }}</p>
       </div>
-      <div class="bg-gray-900 rounded-xl p-5 border border-gray-800">
-        <p class="text-gray-400 text-xs mb-1">合法選票</p>
-        <p class="text-3xl font-bold text-green-400">{{ valid_count }}</p>
+      <div class="bg-white/70 dark:bg-cardblack/80 backdrop-blur-lg rounded-xl border border-gray-200 dark:border-gray-800 shadow-sm p-5 flex flex-col justify-center">
+        <p class="text-gray-500 dark:text-gray-400 text-xs font-medium uppercase tracking-wider mb-2 flex items-center gap-1.5">
+          <svg class="w-3.5 h-3.5 text-msblue" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+          合法選票
+        </p>
+        <p class="text-3xl font-semibold text-gray-900 dark:text-white">{{ valid_count }}</p>
       </div>
-      <div class="bg-gray-900 rounded-xl p-5 border border-gray-800">
-        <p class="text-gray-400 text-xs mb-1">開票狀態</p>
-        <p class="text-sm font-bold {% if tally_done %}text-green-400{% else %}text-yellow-400{% endif %}">
-          {% if tally_done %}✓ 已完成{% else %} 待開票{% endif %}
+      <div class="bg-white/70 dark:bg-cardblack/80 backdrop-blur-lg rounded-xl border border-gray-200 dark:border-gray-800 shadow-sm p-5 flex flex-col justify-center">
+        <p class="text-gray-500 dark:text-gray-400 text-xs font-medium uppercase tracking-wider mb-2 flex items-center gap-1.5">
+          <svg class="w-3.5 h-3.5 text-msblue" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"></path></svg>
+          開票狀態
+        </p>
+        <p class="text-sm font-semibold flex items-center gap-1 {% if tally_done %}text-green-600 dark:text-green-400{% else %}text-amber-600 dark:text-amber-500{% endif %}">
+          {% if tally_done %}
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path></svg>
+            已完成
+          {% else %}
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+            待開票
+          {% endif %}
         </p>
       </div>
-      <div class="bg-gray-900 rounded-xl p-5 border border-gray-800">
-        <p class="text-gray-400 text-xs mb-1">Merkle Root</p>
-        <p class="text-xs font-mono text-emerald-300 break-all">
-          {% if merkle_root %}{{ merkle_root[:20] }}...{% else %}—{% endif %}
+      <div class="bg-white/70 dark:bg-cardblack/80 backdrop-blur-lg rounded-xl border border-gray-200 dark:border-gray-800 shadow-sm p-5 flex flex-col justify-center">
+        <p class="text-gray-500 dark:text-gray-400 text-xs font-medium uppercase tracking-wider mb-2 flex items-center gap-1.5">
+          <svg class="w-3.5 h-3.5 text-msblue" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16V4m0 0L3 8m4-4l4 4m6 0v12m0 0l4-4m-4 4l-4-4"></path></svg>
+          Merkle Root
+        </p>
+        <p class="text-xs font-mono text-gray-700 dark:text-gray-300 break-all bg-gray-50 dark:bg-[#0a0a0a] rounded px-2 py-1 border border-gray-100 dark:border-gray-800">
+          {% if merkle_root %}{{ merkle_root[:20] }}...{% else %}<span class="text-gray-400">尚未產生</span>{% endif %}
         </p>
       </div>
     </div>
 
-    <!-- Tally Button -->
     {% if not tally_done %}
     <div class="mb-6">
       <form method="POST" action="/ui/tally">
         <button type="submit"
-          class="w-full py-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-semibold transition text-sm">
+          class="w-full py-3.5 rounded-xl bg-msblue hover:bg-msblueHover text-white font-medium shadow-md transition-all text-sm flex items-center justify-center gap-2 focus:outline-none focus:ring-2 focus:ring-msblue/50 focus:ring-offset-2 dark:focus:ring-offset-[#050505]">
+          <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 15l-2 5L9 9l11 4-5 2zm0 0l5 5M7.188 2.239l.777 2.897M5.136 7.965l-2.898-.777M13.95 4.05l-2.122 2.122m-5.657 5.656l-2.12 2.122"></path></svg>
           觸發開票（向 TA 請求 SK_TA）
         </button>
       </form>
     </div>
     {% endif %}
 
-    <!-- Tally Results -->
     {% if tally_done and tally_results %}
-    <div class="bg-gray-900 rounded-xl border border-gray-800 p-6 mb-6">
-      <h2 class="font-semibold text-gray-200 mb-4">計票結果</h2>
-      <div class="space-y-3">
+    <div class="bg-white/70 dark:bg-cardblack/80 backdrop-blur-lg rounded-xl border border-msblue/30 dark:border-msblue/40 shadow-md p-6 mb-8">
+      <h2 class="font-medium text-gray-800 dark:text-gray-200 mb-5 text-sm uppercase tracking-wider flex items-center gap-2">
+        <svg class="w-4 h-4 text-msblue" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"></path></svg>
+        計票結果
+      </h2>
+      <div class="space-y-4">
         {% for candidate, count in tally_results.items() %}
         <div>
-          <div class="flex justify-between text-sm mb-1">
-            <span class="font-mono text-emerald-300">{{ candidate }}</span>
-            <span class="text-gray-300 font-bold">{{ count }} 票</span>
+          <div class="flex justify-between text-sm mb-1.5">
+            <span class="font-mono text-gray-700 dark:text-gray-300 font-medium">{{ candidate }}</span>
+            <span class="text-gray-900 dark:text-white font-semibold">{{ count }} 票</span>
           </div>
-          <div class="w-full bg-gray-800 rounded-full h-2">
-            <div class="bg-emerald-500 h-2 rounded-full" style="width: {{ (count / valid_count * 100) | int }}%"></div>
+          <div class="w-full bg-gray-100 dark:bg-[#1a1a1a] rounded-full h-2 overflow-hidden">
+            <div class="bg-msblue h-2 rounded-full transition-all duration-500" style="width: {{ (count / valid_count * 100) | int }}%"></div>
           </div>
         </div>
         {% endfor %}
       </div>
       {% if merkle_root %}
-      <div class="mt-4 pt-4 border-t border-gray-800">
-        <p class="text-xs text-gray-400">Root_official</p>
-        <p class="font-mono text-xs text-emerald-300 break-all mt-1">{{ merkle_root }}</p>
+      <div class="mt-6 pt-5 border-t border-gray-100 dark:border-gray-800">
+        <p class="text-[11px] text-gray-500 dark:text-gray-400 mb-1">Root_official</p>
+        <p class="font-mono text-[11px] sm:text-xs text-gray-800 dark:text-gray-300 break-all bg-gray-50 dark:bg-[#0a0a0a] p-3 rounded-lg border border-gray-200 dark:border-gray-800/80 shadow-inner">{{ merkle_root }}</p>
       </div>
       {% endif %}
     </div>
     {% endif %}
 
-    <!-- Valid Votes Table -->
-    <div class="bg-gray-900 rounded-xl border border-gray-800 overflow-hidden mb-6">
-      <div class="px-6 py-4 border-b border-gray-800">
-        <h2 class="font-semibold text-gray-200">合法選票記錄</h2>
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+      
+      <div class="bg-white/70 dark:bg-cardblack/80 backdrop-blur-lg rounded-xl border border-gray-200 dark:border-gray-800 shadow-md overflow-hidden flex flex-col">
+        <div class="px-5 py-4 border-b border-gray-100 dark:border-gray-800/60 bg-gray-50/50 dark:bg-[#0a0a0a]/50">
+          <h2 class="font-medium text-gray-800 dark:text-gray-200 text-sm flex items-center gap-2">
+            <svg class="w-4 h-4 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+            合法選票記錄
+          </h2>
+        </div>
+        {% if valid_votes %}
+        <div class="overflow-x-auto flex-1">
+          <table class="w-full text-sm">
+            <thead class="bg-gray-50 dark:bg-[#0a0a0a] text-gray-500 dark:text-gray-500 text-[11px] uppercase tracking-wider">
+              <tr>
+                <th class="px-5 py-3 text-left font-medium">#</th>
+                <th class="px-5 py-3 text-left font-medium">內容</th>
+                <th class="px-5 py-3 text-left font-medium">m_hex (前 20)</th>
+                <th class="px-5 py-3 text-left font-medium">驗證時間</th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-gray-100 dark:divide-gray-800/60">
+              {% for v in valid_votes %}
+              <tr class="hover:bg-gray-50 dark:hover:bg-[#1a1a1a] transition-colors">
+                <td class="px-5 py-3.5 text-gray-400 dark:text-gray-600 text-[11px]">{{ v.id }}</td>
+                <td class="px-5 py-3.5 font-mono text-gray-800 dark:text-gray-300 font-medium text-xs">{{ v.vote }}</td>
+                <td class="px-5 py-3.5 font-mono text-gray-500 dark:text-gray-500 text-[11px]">{{ v.m_hex[:20] }}...</td>
+                <td class="px-5 py-3.5">
+                  <p class="text-gray-600 dark:text-gray-400 text-[11px] font-mono">{{ v.verified_at | ts_to_str }}</p>
+                  <p class="text-gray-400 dark:text-gray-600 text-[10px]">{{ v.verified_at }}</p>
+                </td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        {% else %}
+        <div class="px-5 py-16 text-center text-gray-500 dark:text-gray-600 flex-1 flex flex-col justify-center">
+          <svg class="w-10 h-10 mx-auto text-gray-300 dark:text-gray-700 mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path></svg>
+          <p class="text-sm">尚無合法選票</p>
+          <p class="text-xs mt-1 text-gray-400">（需先觸發開票）</p>
+        </div>
+        {% endif %}
       </div>
-      {% if valid_votes %}
-      <table class="w-full text-sm">
-        <thead class="bg-gray-800 text-gray-400 text-xs uppercase">
-          <tr>
-            <th class="px-6 py-3 text-left">#</th>
-            <th class="px-6 py-3 text-left">投票內容</th>
-            <th class="px-6 py-3 text-left">m_hex（前 20 字元）</th>
-            <th class="px-6 py-3 text-left">驗證時間</th>
-            <th class="px-6 py-3 text-left">Unix ts</th>
-          </tr>
-        </thead>
-        <tbody class="divide-y divide-gray-800">
-          {% for v in valid_votes %}
-          <tr class="hover:bg-gray-800/50 transition">
-            <td class="px-6 py-3 text-gray-500">{{ v.id }}</td>
-            <td class="px-6 py-3 font-mono text-emerald-300">{{ v.vote }}</td>
-            <td class="px-6 py-3 font-mono text-gray-400 text-xs">{{ v.m_hex[:20] }}...</td>
-            <!-- UI 顯示：人類可讀格式 -->
-            <td class="px-6 py-3 text-gray-300 text-xs font-mono">{{ v.verified_at | ts_to_str }}</td>
-            <td class="px-6 py-3 text-gray-500 text-xs">{{ v.verified_at }}</td>
-          </tr>
-          {% endfor %}
-        </tbody>
-      </table>
-      {% else %}
-      <div class="px-6 py-10 text-center text-gray-500">尚無合法選票（需先觸發開票）</div>
-      {% endif %}
-    </div>
 
-    <!-- Envelopes Table -->
-    <div class="bg-gray-900 rounded-xl border border-gray-800 overflow-hidden">
-      <div class="px-6 py-4 border-b border-gray-800 flex items-center justify-between">
-        <h2 class="font-semibold text-gray-200">收到的數位信封</h2>
-        <span class="text-xs text-gray-500">每 15 秒自動更新</span>
+      <div class="bg-white/70 dark:bg-cardblack/80 backdrop-blur-lg rounded-xl border border-gray-200 dark:border-gray-800 shadow-md overflow-hidden flex flex-col">
+        <div class="px-5 py-4 border-b border-gray-100 dark:border-gray-800/60 bg-gray-50/50 dark:bg-[#0a0a0a]/50 flex items-center justify-between">
+          <h2 class="font-medium text-gray-800 dark:text-gray-200 text-sm flex items-center gap-2">
+            <svg class="w-4 h-4 text-msblue" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"></path></svg>
+            收到的數位信封
+          </h2>
+          <span class="text-[10px] text-gray-500 dark:text-gray-500 flex items-center gap-1.5">
+            <span class="relative flex h-1.5 w-1.5">
+              <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-msblue opacity-40"></span>
+              <span class="relative inline-flex rounded-full h-1.5 w-1.5 bg-msblue"></span>
+            </span>
+            自動更新
+          </span>
+        </div>
+        {% if envelopes %}
+        <div class="overflow-x-auto flex-1">
+          <table class="w-full text-sm">
+            <thead class="bg-gray-50 dark:bg-[#0a0a0a] text-gray-500 dark:text-gray-500 text-[11px] uppercase tracking-wider">
+              <tr>
+                <th class="px-5 py-3 text-left font-medium">#</th>
+                <th class="px-5 py-3 text-left font-medium">C_Data (前 20)</th>
+                <th class="px-5 py-3 text-left font-medium">狀態</th>
+                <th class="px-5 py-3 text-left font-medium">收到時間</th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-gray-100 dark:divide-gray-800/60">
+              {% for e in envelopes %}
+              <tr class="hover:bg-gray-50 dark:hover:bg-[#1a1a1a] transition-colors">
+                <td class="px-5 py-3.5 text-gray-400 dark:text-gray-600 text-[11px]">{{ e.id }}</td>
+                <td class="px-5 py-3.5 font-mono text-gray-500 dark:text-gray-500 text-[11px]">{{ e.c_data[:20] }}...</td>
+                <td class="px-5 py-3.5">
+                  {% if e.status == 'verified' %}
+                  <span class="px-2 py-0.5 rounded text-[10px] font-medium bg-green-50 dark:bg-green-900/30 text-green-700 dark:text-green-400 border border-green-200 dark:border-green-800 whitespace-nowrap">已驗證</span>
+                  {% elif e.status == 'invalid' %}
+                  <span class="px-2 py-0.5 rounded text-[10px] font-medium bg-red-50 dark:bg-red-900/30 text-red-700 dark:text-red-400 border border-red-200 dark:border-red-800 whitespace-nowrap">無效</span>
+                  {% else %}
+                  <span class="px-2 py-0.5 rounded text-[10px] font-medium bg-yellow-50 dark:bg-amber-900/30 text-yellow-700 dark:text-amber-400 border border-yellow-200 dark:border-amber-800 whitespace-nowrap">待驗證</span>
+                  {% endif %}
+                </td>
+                <td class="px-5 py-3.5">
+                  <p class="text-gray-600 dark:text-gray-400 text-[11px] font-mono">{{ e.received_at | ts_to_str }}</p>
+                  <p class="text-gray-400 dark:text-gray-600 text-[10px]">{{ e.received_at }}</p>
+                </td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        {% else %}
+        <div class="px-5 py-16 text-center text-gray-500 dark:text-gray-600 flex-1 flex flex-col justify-center">
+          <svg class="w-10 h-10 mx-auto text-gray-300 dark:text-gray-700 mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"></path></svg>
+          <p class="text-sm">尚未收到任何數位信封</p>
+        </div>
+        {% endif %}
       </div>
-      {% if envelopes %}
-      <table class="w-full text-sm">
-        <thead class="bg-gray-800 text-gray-400 text-xs uppercase">
-          <tr>
-            <th class="px-6 py-3 text-left">#</th>
-            <th class="px-6 py-3 text-left">C_Data（前 20 字元）</th>
-            <th class="px-6 py-3 text-left">狀態</th>
-            <th class="px-6 py-3 text-left">收到時間（人類可讀）</th>
-            <th class="px-6 py-3 text-left">Unix ts</th>
-          </tr>
-        </thead>
-        <tbody class="divide-y divide-gray-800">
-          {% for e in envelopes %}
-          <tr class="hover:bg-gray-800/50 transition">
-            <td class="px-6 py-3 text-gray-500">{{ e.id }}</td>
-            <td class="px-6 py-3 font-mono text-gray-400 text-xs">{{ e.c_data[:20] }}...</td>
-            <td class="px-6 py-3">
-              {% if e.status == 'verified' %}
-              <span class="px-2 py-0.5 rounded-full bg-green-900 text-green-300 text-xs">已驗證</span>
-              {% elif e.status == 'invalid' %}
-              <span class="px-2 py-0.5 rounded-full bg-red-900 text-red-300 text-xs">✗ 無效</span>
-              {% else %}
-              <span class="px-2 py-0.5 rounded-full bg-yellow-900 text-yellow-300 text-xs">待驗證</span>
-              {% endif %}
-            </td>
-            <!-- UI 顯示：人類可讀格式 -->
-            <td class="px-6 py-3 text-gray-300 text-xs font-mono">{{ e.received_at | ts_to_str }}</td>
-            <td class="px-6 py-3 text-gray-500 text-xs">{{ e.received_at }}</td>
-          </tr>
-          {% endfor %}
-        </tbody>
-      </table>
-      {% else %}
-      <div class="px-6 py-10 text-center text-gray-500">尚未收到任何數位信封</div>
-      {% endif %}
+      
     </div>
 
   </div>
 </body>
 </html>"""
-
-
 # ── 路由 ──────────────────────────────────────────────────
 
 @app.route('/')

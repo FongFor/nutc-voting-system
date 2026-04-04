@@ -2,8 +2,8 @@
 # NUTC Voting System — docker-compose.yml
 #
 # 所有可調整的參數（候選人、Port、時間）均由 config.json 統管。
-# 此檔案僅負責容器編排；業務參數透過環境變數注入，
-# 環境變數的預設值與 config.json 保持一致。
+# 此檔案僅負責容器編排；業務參數由各服務啟動時自動從
+# config.json 讀取，無需在此重複設定。
 #
 # Config Hot-Reload：
 #   config.json 以唯讀方式掛載進所有容器（/app/config.json）。
@@ -18,7 +18,7 @@
 # 快速指令：
 #   啟動：  docker compose up --build
 #   重置：  python reset.py
-#   E2E：   python e2e_test.py
+#   模擬：  python simulate_voters.py
 # ============================================================
 
 # ── 共用環境變數（YAML Anchor）────────────────────────────────
@@ -72,8 +72,9 @@ services:
     command: python tpa_server/app.py
     environment:
       <<: [*common-env, *service-urls]
-      # 認證時間容差（秒）— 對應 config.json timing.delta_t_seconds
-      DELTA_T: "300"
+      # DELTA_T 未設定時，tpa_server 會自動從 config.json timing.delta_t_seconds 讀取
+      # 若需臨時覆蓋，可取消下行註解並修改數值：
+      # DELTA_T: "300"
     volumes:
       - tpa_keys:/app/tpa_server/keys
       - ./config.json:/app/config.json:ro
@@ -100,8 +101,9 @@ services:
     command: python ta_server/app.py
     environment:
       <<: [*common-env, *service-urls]
-      # 投票開放時長（秒）— 對應 config.json timing.vote_duration_seconds
-      VOTE_DURATION_SECONDS: "120"
+      # VOTE_DURATION_SECONDS 未設定時，ta_server 會自動從 config.json timing.vote_duration_seconds 讀取
+      # 若需臨時覆蓋，可取消下行註解並修改數值：
+      # VOTE_DURATION_SECONDS: "120"
     volumes:
       - ta_keys:/app/ta_server/keys
       - ./config.json:/app/config.json:ro

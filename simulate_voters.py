@@ -9,6 +9,7 @@ simulate_voters.py  —  多人投票模擬腳本
   python simulate_voters.py              預設 50 人
   python simulate_voters.py -n 20        模擬 20 人
   python simulate_voters.py -n 100 --random   隨機分配候選人
+  python simulate_voters.py -n 50 --random
   python simulate_voters.py --skip-wait  跳過等待截止（TA 已過期時用）
   python simulate_voters.py --verbose    顯示每個人的詳細步驟
 """
@@ -119,7 +120,7 @@ class Progress:
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# Clock Skew 同步器（與 e2e_test.py 相同）
+# Clock Skew 同步器
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 class ClockSync:
@@ -559,6 +560,13 @@ def run_simulation(
     _p(f"  分配方式：  {C.CYAN}{'隨機' if use_random else '輪流'}{C.RESET}")
     _p(f"  開始時間：  {C.CYAN}{ts_to_human(start_ts)}{C.RESET}（Unix ts：{start_ts}）")
     _p(f"{'━'*62}")
+
+    # ── 初始等待（service_startup_wait）──────────────────────
+    # 讓剛啟動的容器有足夠時間完成初始化，再進行健康檢查
+    startup_wait = timing("service_startup_wait", 5)
+    if startup_wait > 0:
+        _info(f"等待服務初始化 {startup_wait} 秒（config.json timing.service_startup_wait）...")
+        time.sleep(startup_wait)
 
     # ── Phase 1：健康檢查 ─────────────────────────────────────
     if not phase1_health_check():
