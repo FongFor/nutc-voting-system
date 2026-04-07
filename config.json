@@ -1,0 +1,47 @@
+{
+  "_comment": "NUTC Voting System — 中心設定檔（修改後無需重啟容器，自動熱重載）",
+
+  "_section_candidates": "── 候選人清單 ──────────────────────────────────────────",
+  "candidates": [
+    "ado",
+    "billi ellish",
+    "wanna sleep",
+    "蛋堡"
+  ],
+
+  "_section_voters": "── 選民清單（用於 simulate_voters.py 本機測試）────────────",
+  "_voters_note": "id: 選民識別碼（需與 docker-compose.yml 的 VOTER_ID 一致）；port: 本機對外 port（local_url 使用）",
+  "voters": [
+    { "id": "VOTER_001", "port": 5005 },
+    { "id": "VOTER_002", "port": 5006 },
+    { "id": "VOTER_003", "port": 5007 }
+  ],
+
+  "_section_services": "── 服務位址（容器內部通訊 & 本機測試）────────────────────",
+  "_services_note": "host: Docker 容器名稱（容器間通訊用）；port: 容器內部 port；local_port: 本機對外 port（simulate_voters.py / 瀏覽器使用）",
+  "services": {
+    "ca":  { "host": "ca",  "port": 5001, "local_port": 5001 },
+    "tpa": { "host": "tpa", "port": 5000, "local_port": 5000 },
+    "ta":  { "host": "ta",  "port": 5002, "local_port": 5002 },
+    "cc":  { "host": "cc",  "port": 5003, "local_port": 5003 },
+    "bb":  { "host": "bb",  "port": 5004, "local_port": 5004 }
+  },
+
+  "_section_timing": "── 時間參數 ────────────────────────────────────────────",
+  "timing": {
+    "_vote_duration_seconds": "投票開放時長（秒）。TA 啟動後倒數此秒數，時間到才能開票。docker-compose 的 VOTE_DURATION_SECONDS 環境變數可覆蓋此值。",
+    "vote_duration_seconds": 30,
+
+    "_delta_t_seconds": "認證封包時間容差（秒）。TPA 驗證選民認證封包時，允許的時間偏差上限。docker-compose 的 DELTA_T 環境變數可覆蓋此值。",
+    "delta_t_seconds": 300,
+
+    "_service_startup_wait": "simulate_voters.py 啟動後等待各服務就緒的秒數（在健康檢查前的初始等待）。",
+    "service_startup_wait": 5,
+
+    "_health_check_retries": "simulate_voters.py 健康檢查的最大重試次數。每次失敗後等待 health_check_interval 秒再重試。",
+    "health_check_retries": 15,
+
+    "_health_check_interval": "simulate_voters.py 健康檢查每次重試之間的等待秒數。",
+    "health_check_interval": 3
+  }
+}
