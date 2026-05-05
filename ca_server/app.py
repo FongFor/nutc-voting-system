@@ -15,6 +15,9 @@ ca_server/app.py  —  憑證授權中心 (CA)
 
 import os
 import sys
+import hashlib
+import secrets
+import time
 import datetime
 
 # 確保 shared/ 可被 import
@@ -47,6 +50,24 @@ db.execute("""
         issued_at   TEXT NOT NULL
     )
 """)
+db.execute("""
+    CREATE TABLE IF NOT EXISTS voter_registry (
+        voter_id            TEXT PRIMARY KEY,
+        otp_hash            TEXT NOT NULL,
+        status              TEXT NOT NULL DEFAULT 'pending',
+        registered_at       INTEGER NOT NULL,
+        issued_cert_serial  TEXT
+    )
+""")
+
+# 服務帳號（不需 OTP 驗證）
+_SERVICE_IDS = {'TPA', 'TA', 'CC', 'BB', 'CA', 'ADMIN'}
+# 時間誤差容許值（秒）
+_DELTA_T = int(os.environ.get("DELTA_T", "300"))
+
+
+def _hash_otp(otp: str) -> str:
+    return hashlib.sha256(otp.encode('utf-8')).hexdigest()
 
 # ============================================================
 # CA 核心邏輯
@@ -316,21 +337,196 @@ def api_get_ca_cert():
     return jsonify({"status": "success", "ca_certificate": get_root_cert_pem()}), 200
 
 
+@app.route('/api/admin/register_voter', methods=['POST'])
+def api_admin_register_voter():
+    """
+    [POST] 管理員預先註冊選民（Phase 0 Step 0.1）。
+
+    Zero-knowledge 模式（推薦）：
+        Body: {"voter_id": str, "otp_hash": str}
+        管理員自行生成 OTP，僅傳入 H(OTP)；CA 永不接觸 OTP 明文。
+        回傳: {"status", "voter_id"}（不含 otp）
+
+    Legacy 模式（向後相容，測試用）：
+        Body: {"voter_id": str}
+        CA 自行生成 OTP 並回傳明文（CA 端有短暫明文）。
+        回傳: {"status", "voter_id", "otp"}
+
+    若 voter_id 已存在且 status='registered' 則回傳 409。
+    若 voter_id 存在但 status='pending' 則允許重新派發 OTP。
+    """
+    data = request.get_json()
+    if not data or 'voter_id' not in data:
+        return jsonify({"status": "error", "message": "缺少 voter_id"}), 400
+
+    voter_id = str(data['voter_id']).strip()
+    if not voter_id:
+        return jsonify({"status": "error", "message": "voter_id 不可為空"}), 400
+
+    now = int(time.time())
+    existing = db.fetchone("SELECT status FROM voter_registry WHERE voter_id = ?", (voter_id,))
+    if existing and existing['status'] == 'registered':
+        return jsonify({
+            "status": "error",
+            "code":   "ALREADY_REGISTERED",
+            "message": f"{voter_id} 已完成憑證申請",
+        }), 409
+
+    # ── Zero-knowledge 模式：管理員提供 H(OTP)，CA 永不知曉明文 ──
+    external_otp_hash = data.get('otp_hash', '').strip()
+    if external_otp_hash:
+        otp_hash    = external_otp_hash
+        otp_plain   = None  # CA 端完全無明文
+    else:
+        # Legacy 模式：CA 自行生成（測試用）
+        otp_plain = secrets.token_urlsafe(24)
+        otp_hash  = _hash_otp(otp_plain)
+
+    if existing:
+        db.execute(
+            "UPDATE voter_registry SET otp_hash = ?, registered_at = ? WHERE voter_id = ?",
+            (otp_hash, now, voter_id),
+        )
+    else:
+        db.execute(
+            "INSERT INTO voter_registry (voter_id, otp_hash, status, registered_at) VALUES (?, ?, 'pending', ?)",
+            (voter_id, otp_hash, now),
+        )
+
+    mode = "zero-knowledge" if external_otp_hash else "legacy"
+    print(f"[CA] 已預先註冊選民：{voter_id}（{mode} 模式）")
+
+    resp = {"status": "success", "voter_id": voter_id}
+    if otp_plain:
+        resp["otp"] = otp_plain  # 僅 legacy 模式回傳明文
+    return jsonify(resp), 200
+
+
 @app.route('/api/issue_cert', methods=['POST'])
 def api_issue_cert():
-    """[POST] 核發憑證。Body: {"entity_id": str, "public_key": str}"""
+    """
+    [POST] 核發憑證。
+    服務帳號（TPA/TA/CC/BB）：Body: {"entity_id": str, "public_key": str}
+    選民：Body: {"entity_id": str, "public_key": str, "otp": str,
+                 "timestamp": int, "pop_signature": str (base64)}
+    """
+    import base64 as _b64
+
     data = request.get_json()
     if not data or 'entity_id' not in data or 'public_key' not in data:
         return jsonify({"status": "error", "message": "缺少 entity_id 或 public_key"}), 400
+
+    entity_id = data['entity_id']
+
+    # 服務帳號：跳過 OTP/PoP 驗證
+    if entity_id in _SERVICE_IDS:
+        try:
+            cert_pem = issue_certificate(entity_id, data['public_key'])
+            return jsonify({
+                "status":      "success",
+                "message":     f"憑證核發成功 ({entity_id})",
+                "certificate": cert_pem,
+            }), 200
+        except Exception as e:
+            return jsonify({"status": "error", "message": str(e)}), 500
+
+    # 選民：需要 OTP + PoP 驗證
+    otp           = data.get('otp', '')
+    timestamp     = data.get('timestamp', 0)
+    pop_sig_b64   = data.get('pop_signature', '')
+
+    if not otp or not timestamp or not pop_sig_b64:
+        return jsonify({
+            "status":  "error",
+            "code":    "MISSING_FIELDS",
+            "message": "選民申請憑證需提供 otp、timestamp、pop_signature",
+        }), 400
+
+    # 1. 檢查 voter_registry
+    row = db.fetchone("SELECT otp_hash, status FROM voter_registry WHERE voter_id = ?", (entity_id,))
+    if not row:
+        return jsonify({"status": "error", "code": "ENTITY_NOT_REGISTERED",
+                        "message": f"{entity_id} 尚未在系統中預先註冊"}), 403
+
+    if row['status'] == 'registered':
+        return jsonify({"status": "error", "code": "ALREADY_REGISTERED",
+                        "message": f"{entity_id} 已申請過憑證"}), 403
+
+    # 2. 驗證 OTP 雜湊
+    if _hash_otp(otp) != row['otp_hash']:
+        return jsonify({"status": "error", "code": "OTP_INVALID",
+                        "message": "OTP 不正確"}), 403
+
+    # 3. 驗證時間誤差（雙向）
+    now = int(time.time())
+    if abs(now - int(timestamp)) > _DELTA_T:
+        return jsonify({"status": "error", "code": "TIMESTAMP_OUT_OF_RANGE",
+                        "message": f"時間偏差超過 {_DELTA_T} 秒"}), 403
+
+    # 4. 驗證 PoP 簽章
     try:
-        cert_pem = issue_certificate(data['entity_id'], data['public_key'])
+        from cryptography.hazmat.primitives.asymmetric import padding as asym_padding
+        pub_key = serialization.load_pem_public_key(data['public_key'].encode('utf-8'))
+        challenge = f"REGISTER|{entity_id}|{timestamp}".encode('utf-8')
+        pop_sig = _b64.b64decode(pop_sig_b64)
+        pub_key.verify(
+            pop_sig,
+            challenge,
+            asym_padding.PSS(
+                mgf=asym_padding.MGF1(hashes.SHA256()),
+                salt_length=asym_padding.PSS.AUTO,
+            ),
+            hashes.SHA256(),
+        )
+    except Exception as e:
+        return jsonify({"status": "error", "code": "POP_INVALID",
+                        "message": f"PoP 簽章驗證失敗：{e}"}), 403
+
+    # 5. 核發憑證
+    try:
+        cert_pem = issue_certificate(entity_id, data['public_key'])
+        serial = x509.load_pem_x509_certificate(cert_pem.encode('utf-8')).serial_number
+        db.execute(
+            "UPDATE voter_registry SET status = 'registered', issued_cert_serial = ? WHERE voter_id = ?",
+            (str(serial), entity_id),
+        )
         return jsonify({
             "status":      "success",
-            "message":     f"憑證核發成功 ({data['entity_id']})",
+            "message":     f"憑證核發成功 ({entity_id})",
             "certificate": cert_pem,
         }), 200
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@app.route('/api/admin/voter_registry', methods=['GET'])
+def api_admin_voter_registry():
+    """[GET] 回傳全部選民的註冊狀態（供 admin_tool 同步 ca_status）。"""
+    rows = db.fetchall(
+        "SELECT voter_id, status, registered_at, issued_cert_serial FROM voter_registry ORDER BY registered_at"
+    )
+    return jsonify({"status": "success", "voters": rows}), 200
+
+
+@app.route('/api/voter_status', methods=['GET'])
+def api_voter_status():
+    """[GET] 查詢特定選民的 CA 註冊狀態（供選民端自動偵測新一輪重置）。"""
+    voter_id = request.args.get('voter_id', '').strip()
+    if not voter_id:
+        return jsonify({"registered": False, "voter_id": ""}), 200
+    row = db.fetchone("SELECT status FROM voter_registry WHERE voter_id = ?", (voter_id,))
+    if not row:
+        return jsonify({"registered": False, "voter_id": voter_id}), 200
+    return jsonify({"registered": True, "status": row['status'], "voter_id": voter_id}), 200
+
+
+@app.route('/api/admin/reset_voter_registry', methods=['POST'])
+def api_admin_reset_voter_registry():
+    """[POST] 清除 CA 選民名冊（新一輪前使用）。刪除全部 voter_registry 記錄。"""
+    count = db.count("voter_registry")
+    db.execute("DELETE FROM voter_registry")
+    print(f"[CA] 選民名冊已清除（共 {count} 筆）。")
+    return jsonify({"status": "success", "deleted_count": count}), 200
 
 
 if __name__ == '__main__':

@@ -22,7 +22,12 @@ import os
 import sys
 import json
 import time
+import secrets
+import base64
 import datetime
+
+from cryptography.hazmat.primitives import hashes as _hashes
+from cryptography.hazmat.primitives.asymmetric import padding as _asym_padding
 
 # 確保 shared/ 可被 import
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -53,8 +58,9 @@ CA_URL      = os.environ.get("CA_URL", "http://localhost:5001")
 TA_URL      = os.environ.get("TA_URL", "http://localhost:5002")
 DELTA_T     = int(os.environ.get("DELTA_T", str(get_delta_t())))
 
-# 截止時間：優先從環境變數讀取，否則啟動時從 TA 取得
+# 截止時間與選舉狀態快取（每次請求時向 TA 重新查詢）
 _DEADLINE: int = int(os.environ.get("VOTE_DEADLINE", "0"))
+_ELECTION_STATE: str = 'standby'  # 安全預設值：啟動前凍結所有投票業務
 
 def _get_deadline() -> int:
     """
@@ -111,6 +117,15 @@ db.execute("""
         created_at      INTEGER NOT NULL
     )
 """)
+db.execute("""
+    CREATE TABLE IF NOT EXISTS issued_tokens (
+        token_id    TEXT PRIMARY KEY,
+        voter_id    TEXT NOT NULL,
+        issued_at   INTEGER NOT NULL,
+        expires_at  INTEGER NOT NULL,
+        used        INTEGER NOT NULL DEFAULT 0
+    )
+""")
 
 # ============================================================
 # 金鑰初始化（啟動時執行）
@@ -156,13 +171,34 @@ def ts_to_str(ts):
 # ── Deadline Middleware ────────────────────────────────────────
 def _check_deadline():
     """
-    截止時間強制執行 Middleware。
-    若當前時間 > deadline，回傳 HTTP 403（Forbidden）。
+    選舉狀態 + 截止時間強制執行 Middleware。
+    每次都向 TA 重新查詢，避免快取失效問題。
     回傳 None 表示允許繼續；回傳 Response 表示應立即拒絕。
     """
-    deadline = _get_deadline()
+    global _DEADLINE, _ELECTION_STATE
+    import requests as _req
+    election_state = _ELECTION_STATE
+    deadline = _DEADLINE
+    try:
+        resp = _req.get(f"{TA_URL}/api/deadline", timeout=5)
+        data = resp.json()
+        if data.get("status") == "success":
+            election_state = data.get("election_state", "standby")
+            deadline = int(data["deadline"])
+            _DEADLINE = deadline
+            _ELECTION_STATE = election_state
+    except Exception:
+        pass  # 若 TA 不可達，回退到快取值
+
+    if election_state == 'standby':
+        return jsonify({
+            "status":  "error",
+            "code":    "ELECTION_NOT_STARTED",
+            "message": "選舉尚未啟動，請等待管理員開始選舉",
+        }), 403
+
     if deadline <= 0:
-        return None   # 未設定截止時間，允許通過
+        return None
 
     now = int(time.time())
     if now > deadline:
@@ -172,10 +208,8 @@ def _check_deadline():
             "status":       "error",
             "code":         "DEADLINE_EXCEEDED",
             "message":      f"投票已截止，無法處理此請求（已超時 {remaining_over} 秒）",
-            # Unix timestamp（後端標準）
             "server_time":  now,
             "deadline":     deadline,
-            # 人類可讀（僅供 UI/日誌）
             "server_time_str": ts_to_human(now),
             "deadline_str":    ts_to_human(deadline),
         }), 403
@@ -275,9 +309,15 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
           <svg class="w-3.5 h-3.5 text-msblue" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
           簽章狀態
         </p>
+        {% if election_state == 'standby' %}
+        <p class="text-lg font-medium text-amber-600 dark:text-amber-500 flex items-center gap-1">
+          ⏸ 等待管理員啟動選舉
+        </p>
+        {% else %}
         <p class="text-lg font-medium text-green-600 dark:text-green-500 flex items-center gap-1">
           開放請求中
         </p>
+        {% endif %}
       </div>
     </div>
 
@@ -365,6 +405,7 @@ def dashboard():
         ts_to_human(deadline)
         if deadline > 0 else None
     )
+    election_state = _ELECTION_STATE
 
     return render_template_string(
         _DASHBOARD_HTML,
@@ -379,6 +420,7 @@ def dashboard():
         deadline_ts=deadline if deadline > 0 else None,
         deadline_str=deadline_str_local,
         is_expired=is_expired,
+        election_state=election_state,
     )
 
 
@@ -419,7 +461,8 @@ def api_auth():
     voter_cert_pem = data['voter_cert_pem']
     payload      = packet.get('payload', {})
     sender_id    = payload.get('sender_id', '')
-    si           = payload.get('si', '')
+    # v2.0：欄位名改為 nonce，向後兼容讀取舊名 si
+    si           = payload.get('nonce', payload.get('si', ''))
     timestamp    = payload.get('timestamp', 0)
     now          = int(time.time())
 
@@ -457,8 +500,8 @@ def api_auth():
             packet_timestamp=timestamp,
             packet_cert_pem=voter_cert_pem,
             packet_signature=signature_bytes,
-            packet_si=si,
-            ca_public_key=None,   # CA 公鑰驗證已在上方完成
+            packet_nonce=si,      # v2.0：packet_si → packet_nonce
+            ca_public_key=None,
             delta_t=DELTA_T,
         )
     except Exception as exc:
@@ -478,27 +521,60 @@ def api_auth():
     )
 
     _log('success')
-    # 日誌使用人類可讀格式
     print(f"[TPA] 認證成功：{sender_id}（Unix ts：{now}  →  {ts_to_human(now)}）")
 
     # ── 生成 TPA 認證回應封包 ────────────────────────────
     response_packet = create_auth_packet(TPA_ID, sender_id, _private_key, _cert_pem)
 
+    # ── 簽發 Voting Token（Phase 2 Step 2.3） ────────────
+    deadline = _get_deadline()
+    token_lifetime = 600  # 10 分鐘
+    expires_at = min(deadline, now + token_lifetime) if deadline > 0 else now + token_lifetime
+
+    token_id = secrets.token_hex(32)
+    token_payload = {
+        "token_id":   token_id,
+        "voter_id":   sender_id,
+        "issued_at":  now,
+        "expires_at": expires_at,
+        "nonce_bind": si,
+    }
+    token_payload_bytes = json.dumps(token_payload, sort_keys=True, ensure_ascii=False).encode('utf-8')
+    token_sig = _private_key.sign(
+        token_payload_bytes,
+        _asym_padding.PSS(
+            mgf=_asym_padding.MGF1(_hashes.SHA256()),
+            salt_length=_asym_padding.PSS.MAX_LENGTH,
+        ),
+        _hashes.SHA256(),
+    )
+    voting_token = {
+        "payload":   token_payload,
+        "signature": base64.b64encode(token_sig).decode('utf-8'),
+    }
+
+    db.execute(
+        "INSERT INTO issued_tokens (token_id, voter_id, issued_at, expires_at, used) VALUES (?, ?, ?, ?, 0)",
+        (token_id, sender_id, now, expires_at),
+    )
+    print(f"[TPA] 已簽發 Voting Token：{token_id[:16]}...（expires: {ts_to_human(expires_at)}）")
+
     return jsonify({
         "status":          "success",
         "response_packet": response_packet,
         "tpa_cert_pem":    _cert_pem,
+        "voting_token":    voting_token,
     }), 200
 
 
 @app.route('/api/blind_sign', methods=['POST'])
 def api_blind_sign():
     """
-    [POST] 對盲化選票執行盲簽章。（Phase 3）
+    [POST] 對盲化選票執行盲簽章。（Phase 3 Step 3.5-3.6）
     截止時間後回傳 HTTP 403。
-    Body: {"m_prime_hex": "0x..."}
+    Body: {"m_prime_hex": "0x...", "voting_token": {...}}
     回傳: {"S_hex": "0x..."}
-    注意：此端點應在 /api/auth 成功後才呼叫（由 voter_client 控制流程）。
+    Token 驗證：簽章有效 + 未過期 + 未使用，用後標記為 used。
     """
     # ── Deadline Middleware ──────────────────────────────────
     deadline_resp = _check_deadline()
@@ -509,14 +585,61 @@ def api_blind_sign():
     if not data or 'm_prime_hex' not in data:
         return jsonify({"status": "error", "message": "缺少 m_prime_hex"}), 400
 
+    now = int(time.time())
+
+    # ── Voting Token 驗證 ────────────────────────────────────
+    voting_token = data.get('voting_token')
+    if voting_token:
+        token_payload = voting_token.get('payload', {})
+        token_sig_b64 = voting_token.get('signature', '')
+        token_id      = token_payload.get('token_id', '')
+
+        # b. 驗證 Token 簽章
+        try:
+            token_payload_bytes = json.dumps(token_payload, sort_keys=True, ensure_ascii=False).encode('utf-8')
+            token_sig = base64.b64decode(token_sig_b64)
+            _public_key.verify(
+                token_sig,
+                token_payload_bytes,
+                _asym_padding.PSS(
+                    mgf=_asym_padding.MGF1(_hashes.SHA256()),
+                    salt_length=_asym_padding.PSS.MAX_LENGTH,
+                ),
+                _hashes.SHA256(),
+            )
+        except Exception:
+            return jsonify({"status": "error", "code": "TOKEN_SIGNATURE_INVALID",
+                            "message": "Voting Token 簽章驗證失敗"}), 403
+
+        # c. 驗證 Token 是否過期
+        if now > token_payload.get('expires_at', 0):
+            return jsonify({"status": "error", "code": "TOKEN_EXPIRED",
+                            "message": "Voting Token 已過期"}), 403
+
+        # d. 驗證 Token 未使用（並以原子方式標記已使用）
+        row = db.fetchone(
+            "SELECT used FROM issued_tokens WHERE token_id = ?", (token_id,)
+        )
+        if not row:
+            return jsonify({"status": "error", "code": "TOKEN_NOT_FOUND",
+                            "message": "Token 不存在（可能由非本 TPA 簽發）"}), 403
+        if row['used']:
+            return jsonify({"status": "error", "code": "TOKEN_ALREADY_USED",
+                            "message": "Voting Token 已使用"}), 403
+
+        # e. 原子標記為已使用
+        db.execute("UPDATE issued_tokens SET used = 1 WHERE token_id = ?", (token_id,))
+        print(f"[TPA] Token 已消耗：{token_id[:16]}...")
+    else:
+        print(f"[TPA] 警告：blind_sign 請求未附帶 Voting Token")
+
     try:
         m_prime = hex_to_int(data['m_prime_hex'])
         S = blind_sign(m_prime, _d, _n)
         S_hex = int_to_hex(S)
-        # ── 記錄盲簽章到資料庫 ──────────────────────────────
         db.execute(
             "INSERT INTO blind_sign_log (blinded_m_hex, signed_b_m_hex, created_at) VALUES (?, ?, ?)",
-            (data['m_prime_hex'], S_hex, int(time.time())),
+            (data['m_prime_hex'], S_hex, now),
         )
         return jsonify({"status": "success", "S_hex": S_hex}), 200
     except Exception as e:

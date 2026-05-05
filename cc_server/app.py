@@ -22,6 +22,7 @@ import os
 import sys
 import time
 import json
+import secrets
 import datetime
 
 # 確保 shared/ 可被 import
@@ -35,11 +36,12 @@ from shared.key_manager import (
     load_or_request_certificate,
     load_or_fetch_ca_cert,
 )
-from shared.crypto_utils import open_envelope_layer1, open_envelope_layer2
+from shared.crypto_utils import open_envelope_layer1, open_envelope_layer2, sign_data
 from shared.merkle_tree import MerkleTree
-from shared.format_utils import int_to_hex, hex_to_int, ts_to_human
+from shared.format_utils import int_to_hex, hex_to_int, ts_to_human, bytes_to_b64
 from shared.db_utils import Database
 from shared.config_loader import make_reload_endpoint
+from shared.auth_component import create_auth_packet
 from cryptography.hazmat.primitives import serialization
 
 # ============================================================
@@ -54,8 +56,9 @@ TA_URL      = os.environ.get("TA_URL",  "http://localhost:5002")
 BB_URL      = os.environ.get("BB_URL",  "http://localhost:5004")
 TPA_URL     = os.environ.get("TPA_URL", "http://localhost:5000")
 
-# 截止時間：優先從環境變數讀取，否則從 TA 取得
+# 截止時間與選舉狀態快取（每次請求時向 TA 重新查詢）
 _DEADLINE: int = int(os.environ.get("VOTE_DEADLINE", "0"))
+_ELECTION_STATE: str = 'standby'  # 安全預設值：啟動前凍結所有投票業務
 
 def _get_deadline() -> int:
     """
@@ -105,6 +108,23 @@ db.execute("""
         value       TEXT NOT NULL
     )
 """)
+db.execute("""
+    CREATE TABLE IF NOT EXISTS used_token_hashes (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        token_hash  TEXT UNIQUE NOT NULL,
+        recorded_at INTEGER NOT NULL
+    )
+""")
+# 為舊有 envelopes 表新增 v2.0 欄位（若不存在）
+for _col_sql in [
+    "ALTER TABLE envelopes ADD COLUMN tag        TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE envelopes ADD COLUMN aad        TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE envelopes ADD COLUMN token_hash TEXT NOT NULL DEFAULT ''",
+]:
+    try:
+        db.execute(_col_sql)
+    except Exception:
+        pass  # 欄位已存在
 
 # ============================================================
 # 金鑰初始化（啟動時執行）
@@ -148,13 +168,33 @@ def ts_to_str(ts):
 # ── Deadline Middleware ────────────────────────────────────────
 def _check_deadline():
     """
-    截止時間強制執行 Middleware。
-    若當前時間 > deadline，回傳 HTTP 403（Forbidden）。
+    選舉狀態 + 截止時間強制執行 Middleware。
+    每次都向 TA 重新查詢，避免多 worker 或重啟後快取失效的問題。
     回傳 None 表示允許繼續；回傳 Response 表示應立即拒絕。
     """
-    deadline = _get_deadline()
+    global _DEADLINE, _ELECTION_STATE
+    election_state = _ELECTION_STATE
+    deadline = _DEADLINE
+    try:
+        resp = http_requests.get(f"{TA_URL}/api/deadline", timeout=5)
+        data = resp.json()
+        if data.get("status") == "success":
+            election_state = data.get("election_state", "standby")
+            deadline = int(data["deadline"])
+            _DEADLINE = deadline
+            _ELECTION_STATE = election_state
+    except Exception:
+        pass  # 若 TA 不可達，回退到快取值
+
+    if election_state == 'standby':
+        return jsonify({
+            "status":  "error",
+            "code":    "ELECTION_NOT_STARTED",
+            "message": "選舉尚未啟動，所有投票業務目前凍結中",
+        }), 403
+
     if deadline <= 0:
-        return None   # 未設定截止時間，允許通過
+        return None
 
     now = int(time.time())
     if now > deadline:
@@ -164,10 +204,8 @@ def _check_deadline():
             "status":       "error",
             "code":         "DEADLINE_EXCEEDED",
             "message":      f"投票已截止，無法接收新選票（已超時 {remaining_over} 秒）",
-            # Unix timestamp（後端標準）
             "server_time":  now,
             "deadline":     deadline,
-            # 人類可讀（僅供 UI/日誌）
             "server_time_str": ts_to_human(now),
             "deadline_str":    ts_to_human(deadline),
         }), 403
@@ -233,6 +271,11 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
       
       <div class="ml-auto flex items-center gap-3">
         <div class="flex flex-col items-end gap-1.5">
+          {% if election_state == 'standby' %}
+          <span class="px-3 py-1 rounded-full text-[11px] font-medium border bg-amber-50 dark:bg-amber-900/20 text-amber-700 dark:text-amber-400 border-amber-200 dark:border-amber-800/50 backdrop-blur-sm flex items-center shadow-sm">
+            <span class="inline-block w-1.5 h-1.5 rounded-full bg-amber-400 mr-1.5"></span>⏸ 等待管理員啟動選舉
+          </span>
+          {% else %}
           <span class="px-3 py-1 rounded-full text-[11px] font-medium border bg-green-50 dark:bg-green-900/20 text-green-700 dark:text-green-400 border-green-200 dark:border-green-800/50 backdrop-blur-sm flex items-center shadow-sm">
             <span class="inline-block w-1.5 h-1.5 rounded-full bg-green-500 mr-1.5 shadow-[0_0_4px_#22c55e]"></span>運作中
           </span>
@@ -247,6 +290,7 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
               截止：{{ deadline_str }}
             {% endif %}
           </span>
+          {% endif %}
           {% endif %}
         </div>
 
@@ -469,6 +513,15 @@ def dashboard():
         ts_to_human(deadline)
         if deadline > 0 else None
     )
+    # 查詢選舉狀態（供 UI 顯示）
+    election_state = _ELECTION_STATE
+    try:
+        resp = http_requests.get(f"{TA_URL}/api/deadline", timeout=3)
+        data = resp.json()
+        if data.get("status") == "success":
+            election_state = data.get("election_state", "standby")
+    except Exception:
+        pass
 
     return render_template_string(
         _DASHBOARD_HTML,
@@ -482,6 +535,7 @@ def dashboard():
         deadline_ts=deadline if deadline > 0 else None,
         deadline_str=deadline_str_local,
         is_expired=is_expired,
+        election_state=election_state,
     )
 
 
@@ -504,10 +558,10 @@ def api_public_key():
 @app.route('/api/receive_envelope', methods=['POST'])
 def api_receive_envelope():
     """
-    [POST] 接收數位信封（Phase 3）。
+    [POST] 接收數位信封（Phase 3 Step 3.9-3.10）。
     截止時間後回傳 HTTP 403。
-    Body: {"c_data": "...", "iv": "...", "c_key": "..."}
-    用 SK_CC 解密 C_Key 取得 k，暫存至 DB。
+    Body: {"c_data": "...", "iv": "...", "tag": "...", "aad": "...", "c_key": "...", "token_hash": "..."}
+    驗證 token_hash 未重複使用，解開外層取 k，暫存至 DB。
     """
     # ── Deadline Middleware ──────────────────────────────────
     deadline_resp = _check_deadline()
@@ -518,14 +572,33 @@ def api_receive_envelope():
     if not data or not all(k in data for k in ('c_data', 'iv', 'c_key')):
         return jsonify({"status": "error", "message": "缺少信封欄位"}), 400
 
+    now = int(time.time())
+
+    # ── b. 防止 token_hash 重複（Phase 3 Step 3.10b） ───────
+    token_hash = data.get('token_hash', '')
+    if token_hash:
+        if db.exists("SELECT 1 FROM used_token_hashes WHERE token_hash = ?", (token_hash,)):
+            return jsonify({
+                "status":  "error",
+                "code":    "TOKEN_HASH_REUSED",
+                "message": "此 Token 已用於提交信封，不可重複使用",
+            }), 403
+
     try:
         pending = open_envelope_layer1(data, _private_key)
-        now = int(time.time())
         db.execute(
-            "INSERT INTO envelopes (c_data, iv, k, received_at, status) VALUES (?, ?, ?, ?, ?)",
-            (pending['c_data'], pending['iv'], pending['k'], now, 'pending'),
+            "INSERT INTO envelopes (c_data, iv, tag, aad, k, token_hash, received_at, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                pending['c_data'], pending['iv'],
+                pending.get('tag', ''), pending.get('aad', ''),
+                pending['k'], token_hash, now, 'pending',
+            ),
         )
-        # 日誌使用人類可讀格式
+        if token_hash:
+            db.execute(
+                "INSERT INTO used_token_hashes (token_hash, recorded_at) VALUES (?, ?)",
+                (token_hash, now),
+            )
         print(f"[CC] 收到數位信封（Unix ts：{now}  →  {ts_to_human(now)}）")
         return jsonify({"status": "success", "message": "信封已接收"}), 200
     except Exception as e:
@@ -614,17 +687,42 @@ def _set_state(key: str, value: str):
 
 
 def _do_tally() -> dict:
-    """執行開票流程（Phase 5）"""
+    """執行開票流程（Phase 5，v2.0 Sprint 2：含認證封包）"""
     # 檢查是否已開票
     if _get_state('done') == '1':
         return {"status": "already_done", "message": "已完成開票"}
 
-    # 步驟 1：向 TA 請求 SK_TA
+    # 步驟 1：向 TA 請求 SK_TA（v2.0 Sprint 2：附帶認證封包）
     try:
-        resp = http_requests.post(f"{TA_URL}/api/release_key", timeout=10)
+        # 創建認證封包
+        if _cert_pem and _private_key:
+            auth_packet = create_auth_packet(
+                sender_id=CC_ID,
+                receiver_id="TA",
+                sender_private_key=_private_key,
+                certificate_pem=_cert_pem
+            )
+            request_payload = {"auth": auth_packet}
+            print(f"[CC] 向 TA 請求 SK_TA（含認證封包，nonce: {auth_packet['payload']['nonce'][:16]}...）")
+        else:
+            # 向後兼容：若無憑證，則不附帶認證封包
+            request_payload = {}
+            print(f"[CC] 警告：無憑證，向 TA 請求 SK_TA（無認證封包）")
+        
+        resp = http_requests.post(f"{TA_URL}/api/release_key", json=request_payload, timeout=10)
         sk_ta_data = resp.json()
+        
         if sk_ta_data.get('status') != 'released':
-            return {"status": "error", "message": f"TA 拒絕釋放私鑰：{sk_ta_data.get('message', '')}"}
+            error_code = sk_ta_data.get('code', 'UNKNOWN')
+            error_msg = sk_ta_data.get('message', '未知錯誤')
+            print(f"[CC] TA 拒絕釋放私鑰（{error_code}）：{error_msg}")
+            return {
+                "status": "error",
+                "code": error_code,
+                "message": f"TA 拒絕釋放私鑰：{error_msg}"
+            }
+        
+        print(f"[CC] ✅ 已從 TA 取得 SK_TA")
     except Exception as e:
         return {"status": "error", "message": f"無法連接 TA：{e}"}
 
@@ -647,13 +745,19 @@ def _do_tally() -> dict:
 
     # 步驟 4：解密驗證所有暫存信封
     pending_envelopes = db.fetchall(
-        "SELECT id, c_data, iv, k FROM envelopes WHERE status = 'pending'"
+        "SELECT id, c_data, iv, tag, aad, k FROM envelopes WHERE status = 'pending'"
     )
     now = int(time.time())
     valid_count = 0
 
     for env in pending_envelopes:
-        pending = {'c_data': env['c_data'], 'iv': env['iv'], 'k': env['k']}
+        pending = {
+            'c_data': env['c_data'],
+            'iv':     env['iv'],
+            'tag':    env.get('tag', ''),
+            'aad':    env.get('aad', ''),
+            'k':      env['k'],
+        }
         try:
             result = open_envelope_layer2(pending, ta_private_key, tpa_e, tpa_n)
             db.execute(
@@ -674,13 +778,22 @@ def _do_tally() -> dict:
             )
             print(f"[CC] 選票無效：{exc}")
 
-    # 步驟 5：建構 Merkle Tree
-    valid_votes = db.fetchall("SELECT vote, m_hex FROM valid_votes ORDER BY id")
+    # 步驟 5：Secure Shuffle + 建構 Merkle Tree
+    # 將合法選票以密碼學安全隨機順序洗牌，斷絕「提交順序 → 選民」關聯
+    valid_votes_raw = db.fetchall("SELECT vote, m_hex FROM valid_votes ORDER BY id")
+
+    # Fisher-Yates shuffle（使用 secrets CSPRNG）
+    valid_votes = list(valid_votes_raw)
+    for i in range(len(valid_votes) - 1, 0, -1):
+        j = secrets.randbelow(i + 1)
+        valid_votes[i], valid_votes[j] = valid_votes[j], valid_votes[i]
+
     m_hex_list = [v['m_hex'] for v in valid_votes]
 
     if m_hex_list:
         tree = MerkleTree(m_hex_list)
         merkle_root = tree.get_root()
+        print(f"[CC] 已對 {len(m_hex_list)} 張合法選票進行 secure shuffle")
     else:
         merkle_root = ""
 
@@ -697,17 +810,34 @@ def _do_tally() -> dict:
 
     print(f"[CC] 開票完成（Unix ts：{now}  →  {ts_to_human(now)}）。合法選票：{valid_count}，Root_official：{merkle_root[:20]}...")
 
-    # 步驟 6：推送結果至 BB
+    # 步驟 6：對開票結果簽章並推送至 BB (v2.0 Sprint 2)
     try:
-        bb_payload = {
+        # 構造結果包（不含簽章）
+        result_bundle = {
             "root_official": merkle_root,
             "tally":         tally,
             "valid_votes":   valid_votes,
-            # Unix timestamp（後端標準）
             "tallied_at":    now,
         }
-        http_requests.post(f"{BB_URL}/api/publish", json=bb_payload, timeout=10)
-        print(f"[CC] 結果已推送至 BB")
+        
+        # 對結果包進行 RSA-PSS 簽章
+        # 簽章內容：JSON 字串的 UTF-8 編碼
+        bundle_json = json.dumps(result_bundle, sort_keys=True, ensure_ascii=False)
+        bundle_bytes = bundle_json.encode('utf-8')
+        signature = sign_data(bundle_bytes, _private_key)
+        
+        # 構造完整的推送包（含簽章和憑證）
+        bb_payload = {
+            "result_bundle":    result_bundle,
+            "signature":        bytes_to_b64(signature),
+            "cert_pem":         _cert_pem,
+        }
+        
+        resp = http_requests.post(f"{BB_URL}/api/publish", json=bb_payload, timeout=10)
+        if resp.status_code == 200:
+            print(f"[CC] 結果已簽章並推送至 BB（簽章長度：{len(signature)} bytes）")
+        else:
+            print(f"[CC] 警告：BB 拒絕結果（HTTP {resp.status_code}）：{resp.text}")
     except Exception as e:
         print(f"[CC] 警告：無法推送至 BB（{e}）")
 

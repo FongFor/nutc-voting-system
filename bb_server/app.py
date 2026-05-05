@@ -30,16 +30,23 @@ from flask import Flask, request, jsonify, render_template_string
 import requests as http_requests
 
 from shared.merkle_tree import MerkleTree
-from shared.format_utils import sha256_hex, ts_to_human
+from shared.format_utils import sha256_hex, ts_to_human, b64_to_bytes
 from shared.db_utils import Database
 from shared.config_loader import make_reload_endpoint
+from shared.crypto_utils import verify_signature
+from shared.key_manager import load_or_fetch_ca_cert
+from cryptography import x509
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import padding
 
 # ============================================================
 # 常數設定
 # ============================================================
 SERVICE_DIR = os.path.dirname(os.path.abspath(__file__))
+KEYS_DIR    = os.path.join(SERVICE_DIR, "keys")
 DB_PATH     = os.path.join(SERVICE_DIR, "bb.db")
 CC_URL      = os.environ.get("CC_URL", "http://localhost:5003")
+CA_URL      = os.environ.get("CA_URL", "http://localhost:5001")
 
 # ============================================================
 # 資料庫初始化
@@ -61,6 +68,18 @@ db.execute("""
 """)
 
 print("[BB] 公告板初始化完成。")
+
+# ============================================================
+# 載入 CA 憑證（用於驗證 CC 憑證）
+# ============================================================
+try:
+    _ca_cert_pem = load_or_fetch_ca_cert(KEYS_DIR, CA_URL)
+    _ca_cert = x509.load_pem_x509_certificate(_ca_cert_pem.encode('utf-8'))
+    print("[BB] CA 憑證已載入")
+except Exception as ex:
+    print(f"[BB] 警告：無法取得 CA 憑證（{ex}）")
+    _ca_cert_pem = None
+    _ca_cert = None
 
 # ============================================================
 # Flask App
@@ -1129,23 +1148,108 @@ def verify_page():
 @app.route('/api/publish', methods=['POST'])
 def api_publish():
     """
-    [POST] 接收 CC 推送的計票結果。
+    [POST] 接收 CC 推送的計票結果（v2.0 Sprint 2：含簽章驗證）
+    
     Body: {
-        "root_official": str,
-        "tally": dict,
-        "valid_votes": [{"vote": str, "m_hex": str}],
-        "tallied_at": int  (Unix timestamp，可選)
+        "result_bundle": {
+            "root_official": str,
+            "tally": dict,
+            "valid_votes": [{"vote": str, "m_hex": str}],
+            "tallied_at": int
+        },
+        "signature": str (Base64),
+        "cert_pem": str
     }
+    
+    驗證流程：
+      1. 驗證 CC 憑證是否由 CA 簽發
+      2. 驗證 CC 對 result_bundle 的 RSA-PSS 簽章
+      3. 檢查是否已公告（防止覆蓋）
+      4. 儲存結果
     """
     data = request.get_json()
-    if not data or 'root_official' not in data or 'tally' not in data:
-        return jsonify({"status": "error", "message": "缺少必要欄位"}), 400
+    if not data or 'result_bundle' not in data or 'signature' not in data or 'cert_pem' not in data:
+        return jsonify({
+            "status": "error",
+            "code": "MISSING_FIELDS",
+            "message": "缺少必要欄位（需要 result_bundle, signature, cert_pem）"
+        }), 400
 
-    root_official = data['root_official']
-    tally         = data['tally']
-    valid_votes   = data.get('valid_votes', [])
-    # Unix timestamp（後端標準）
-    tallied_at    = data.get('tallied_at', int(time.time()))
+    result_bundle = data['result_bundle']
+    signature_b64 = data['signature']
+    cert_pem = data['cert_pem']
+
+    # 檢查是否已公告（防止覆蓋）
+    published_row = db.fetchone("SELECT value FROM bb_state WHERE key = 'published'")
+    if published_row and published_row['value'] == '1':
+        return jsonify({
+            "status": "error",
+            "code": "ALREADY_PUBLISHED",
+            "message": "結果已公告，不可覆蓋"
+        }), 403
+
+    # 步驟 1：驗證 CC 憑證是否由 CA 簽發
+    global _ca_cert_pem, _ca_cert
+    if not _ca_cert:
+        try:
+            _ca_cert_pem = load_or_fetch_ca_cert(KEYS_DIR, CA_URL)
+            _ca_cert = x509.load_pem_x509_certificate(_ca_cert_pem.encode('utf-8'))
+            print("[BB] CA 憑證補載入成功")
+        except Exception as ex:
+            print(f"[BB] 補載入 CA 憑證失敗：{ex}")
+    if not _ca_cert:
+        return jsonify({
+            "status": "error",
+            "code": "CA_CERT_UNAVAILABLE",
+            "message": "BB 無法取得 CA 憑證，無法驗證 CC 憑證"
+        }), 500
+
+    try:
+        cc_cert = x509.load_pem_x509_certificate(cert_pem.encode('utf-8'))
+        cc_public_key = cc_cert.public_key()
+        
+        # 驗證憑證是否由 CA 簽發
+        ca_public_key = _ca_cert.public_key()
+        ca_public_key.verify(
+            cc_cert.signature,
+            cc_cert.tbs_certificate_bytes,
+            padding.PKCS1v15(),
+            cc_cert.signature_hash_algorithm,
+        )
+        print(f"[BB] CC 憑證驗證通過（Subject: {cc_cert.subject}）")
+    except Exception as e:
+        return jsonify({
+            "status": "error",
+            "code": "CERT_INVALID",
+            "message": f"CC 憑證驗證失敗：{e}"
+        }), 403
+
+    # 步驟 2：驗證 CC 對 result_bundle 的 RSA-PSS 簽章
+    try:
+        bundle_json = json.dumps(result_bundle, sort_keys=True, ensure_ascii=False)
+        bundle_bytes = bundle_json.encode('utf-8')
+        signature = b64_to_bytes(signature_b64)
+        
+        if not verify_signature(bundle_bytes, signature, cc_public_key):
+            return jsonify({
+                "status": "error",
+                "code": "SIGNATURE_INVALID",
+                "message": "CC 簽章驗證失敗"
+            }), 403
+        
+        print(f"[BB] CC 簽章驗證通過（簽章長度：{len(signature)} bytes）")
+    except Exception as e:
+        return jsonify({
+            "status": "error",
+            "code": "SIGNATURE_VERIFICATION_ERROR",
+            "message": f"簽章驗證過程發生錯誤：{e}"
+        }), 500
+
+    # 步驟 3：解析並儲存結果
+    root_official = result_bundle['root_official']
+    tally         = result_bundle['tally']
+    valid_votes   = result_bundle.get('valid_votes', [])
+    tallied_at    = result_bundle.get('tallied_at', int(time.time()))
 
     # 清空舊資料
     db.execute("DELETE FROM published_votes")
@@ -1163,10 +1267,19 @@ def api_publish():
     db.execute("INSERT OR REPLACE INTO bb_state (key, value) VALUES ('merkle_root', ?)", (root_official,))
     db.execute("INSERT OR REPLACE INTO bb_state (key, value) VALUES ('tally_json', ?)", (json.dumps(tally),))
     db.execute("INSERT OR REPLACE INTO bb_state (key, value) VALUES ('tallied_at', ?)", (str(tallied_at),))
+    db.execute("INSERT OR REPLACE INTO bb_state (key, value) VALUES ('cc_signature', ?)", (signature_b64,))
 
     # 日誌使用人類可讀格式
-    print(f"[BB] 結果已公告（Unix ts：{tallied_at}  →  {ts_to_human(tallied_at)}）。Root_official = {root_official[:20]}...")
-    return jsonify({"status": "success", "message": "結果已公告"}), 200
+    print(f"[BB] ✅ 結果已驗證並公告（Unix ts：{tallied_at}  →  {ts_to_human(tallied_at)}）")
+    print(f"[BB] Root_official = {root_official[:20]}...")
+    print(f"[BB] 合法選票數：{len(valid_votes)}")
+    
+    return jsonify({
+        "status": "success",
+        "message": "結果已驗證並公告",
+        "verified": True,
+        "tallied_at": tallied_at
+    }), 200
 
 
 @app.route('/api/results', methods=['GET'])
@@ -1179,6 +1292,7 @@ def api_results():
     root_row      = db.fetchone("SELECT value FROM bb_state WHERE key = 'merkle_root'")
     tally_row     = db.fetchone("SELECT value FROM bb_state WHERE key = 'tally_json'")
     tallied_at_row = db.fetchone("SELECT value FROM bb_state WHERE key = 'tallied_at'")
+    sig_row       = db.fetchone("SELECT value FROM bb_state WHERE key = 'cc_signature'")
     votes         = db.fetchall("SELECT vote, m_hex FROM published_votes ORDER BY id")
     tallied_at    = int(tallied_at_row['value']) if tallied_at_row else None
 
@@ -1187,9 +1301,8 @@ def api_results():
         "merkle_root":  root_row['value'] if root_row else "",
         "tally":        json.loads(tally_row['value']) if tally_row else {},
         "valid_votes":  votes,
-        # Unix timestamp（後端標準）
+        "cc_signature": sig_row['value'] if sig_row else "",
         "tallied_at":   tallied_at,
-        # 人類可讀（僅供 UI/日誌）
         "tallied_at_str": ts_to_human(tallied_at) if tallied_at else None,
     }), 200
 

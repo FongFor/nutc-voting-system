@@ -157,6 +157,83 @@ def load_or_fetch_ca_cert(keys_dir: str, ca_url: str) -> str:
 # CA 憑證驗證輔助函式
 # ============================================================
 
+def load_cert_if_exists(keys_dir: str) -> str | None:
+    """
+    嘗試從 keys_dir 載入憑證 PEM；若不存在則回傳 None。
+    用於 Phase 0：選民可能尚未完成 OTP 註冊，不強制要求憑證存在。
+    """
+    cert_path = os.path.join(keys_dir, "certificate.pem")
+    if os.path.exists(cert_path):
+        with open(cert_path, 'r') as f:
+            return f.read()
+    return None
+
+
+def request_certificate_with_otp(
+    keys_dir: str,
+    voter_id: str,
+    public_key_pem: str,
+    private_key,
+    otp: str,
+    ca_url: str,
+) -> str:
+    """
+    Phase 0 Step 0.3：Voter 攜帶 OTP + PoP 向 CA 申請憑證。
+
+    流程：
+      1. 取得當前 timestamp
+      2. 構建 challenge = "REGISTER|{voter_id}|{timestamp}"
+      3. 用 SK_Voter（RSA-PSS）對 challenge 簽章 → pop_signature
+      4. POST /api/issue_cert 帶 {entity_id, public_key, otp, timestamp, pop_signature}
+      5. 成功則儲存 certificate.pem 並回傳
+
+    回傳：certificate PEM 字串
+    """
+    import time as _time
+    import base64 as _b64
+    from cryptography.hazmat.primitives.asymmetric import padding as _padding
+    from cryptography.hazmat.primitives import hashes as _hashes
+
+    timestamp = int(_time.time())
+    challenge = f"REGISTER|{voter_id}|{timestamp}".encode('utf-8')
+
+    pop_sig = private_key.sign(
+        challenge,
+        _padding.PSS(
+            mgf=_padding.MGF1(_hashes.SHA256()),
+            salt_length=_padding.PSS.MAX_LENGTH,
+        ),
+        _hashes.SHA256(),
+    )
+    pop_sig_b64 = _b64.b64encode(pop_sig).decode('utf-8')
+
+    resp = requests.post(
+        f"{ca_url}/api/issue_cert",
+        json={
+            "entity_id":     voter_id,
+            "public_key":    public_key_pem,
+            "otp":           otp,
+            "timestamp":     timestamp,
+            "pop_signature": pop_sig_b64,
+        },
+        timeout=15,
+    )
+    resp.raise_for_status()
+    data = resp.json()
+    if data.get('status') != 'success':
+        code = data.get('code', 'UNKNOWN')
+        msg  = data.get('message', str(data))
+        raise ValueError(f"CA 拒絕申請（{code}）：{msg}")
+
+    cert_pem = data['certificate']
+    cert_path = os.path.join(keys_dir, "certificate.pem")
+    os.makedirs(keys_dir, exist_ok=True)
+    with open(cert_path, 'w') as f:
+        f.write(cert_pem)
+    print(f"[KeyManager] Phase 0 憑證已核發並儲存：{voter_id}")
+    return cert_pem
+
+
 def verify_cert_with_ca(cert_pem: str, ca_cert_pem: str) -> bool:
     """
     用 CA 根憑證驗證實體憑證的合法性（簽章 + 有效期）。
