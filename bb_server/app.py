@@ -29,7 +29,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from flask import Flask, request, jsonify, render_template_string
 import requests as http_requests
 
-from shared.merkle_tree import MerkleTree
+from shared.merkle_tree import MerkleTree, h_leaf
 from shared.format_utils import sha256_hex, ts_to_human, b64_to_bytes
 from shared.db_utils import Database
 from shared.config_loader import make_reload_endpoint
@@ -470,9 +470,17 @@ _VERIFY_HTML = """<!DOCTYPE html>
             <div class="absolute top-0 left-0 w-1 h-full bg-amber-500"></div>
             <div class="flex flex-col sm:flex-row sm:items-center gap-2 mb-2">
               <p class="text-[11px] text-gray-700 dark:text-gray-300 font-semibold tracking-wider">m_hex（選票包雜湊值）</p>
-              <span class="text-[10px] text-gray-400 dark:text-gray-600">— 驗證起點</span>
+              <span class="text-[10px] text-gray-400 dark:text-gray-600">— 驗證輸入</span>
             </div>
             <p class="font-mono text-[11px] text-gray-600 dark:text-gray-500 break-all">{{ result.m_hex }}</p>
+          </div>
+          <div class="bg-gray-50/80 dark:bg-[#0a0a0a] rounded-lg p-3.5 border border-gray-200 dark:border-gray-800 shadow-sm relative overflow-hidden">
+            <div class="absolute top-0 left-0 w-1 h-full bg-amber-400"></div>
+            <div class="flex flex-col sm:flex-row sm:items-center gap-2 mb-2">
+              <p class="text-[11px] text-gray-700 dark:text-gray-300 font-semibold tracking-wider">H_leaf(m)（Domain-Separated 葉節點雜湊）</p>
+              <span class="text-[10px] text-gray-400 dark:text-gray-600">— 樹中目標葉節點值 = H(0x00 ‖ m_hex)</span>
+            </div>
+            <p class="font-mono text-[11px] text-gray-600 dark:text-gray-500 break-all">{{ result.leaf_hash }}</p>
           </div>
           <div class="bg-gray-50/80 dark:bg-[#0a0a0a] rounded-lg p-3.5 border border-gray-200 dark:border-gray-800 shadow-sm relative overflow-hidden">
             <div class="absolute top-0 left-0 w-1 h-full bg-emerald-500"></div>
@@ -514,6 +522,7 @@ _VERIFY_HTML = """<!DOCTYPE html>
             <span class="flex items-center gap-1.5"><span class="legend-dot" style="background:#10b981;border:1.5px solid #059669;"></span><span class="text-gray-700 dark:text-gray-300 font-semibold">Sibling</span></span>
             <span class="flex items-center gap-1.5"><span class="legend-dot" style="background:#6366f1;border:1.5px solid #4f46e5;"></span><span class="text-gray-700 dark:text-gray-300 font-semibold">驗證路徑</span></span>
             <span class="flex items-center gap-1.5"><span class="legend-dot" style="background:#0ea5e9;border:1.5px solid #0284c7;"></span><span class="text-gray-700 dark:text-gray-300 font-semibold">Root</span></span>
+            <span class="flex items-center gap-1.5"><span class="legend-dot" style="background:transparent;border:1.5px dashed #9ca3af;"></span><span class="text-gray-500 dark:text-gray-500">虛擬佔位</span></span>
           </div>
           <div id="zoom-controls">
             <button type="button" class="zoom-btn" onclick="changeZoom(-0.15)" title="縮小"><svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20 12H4"></path></svg></button>
@@ -617,6 +626,13 @@ _VERIFY_HTML = """<!DOCTYPE html>
     return 'normal';
   }
 
+  function isVirtualNode(layerIdx, nodeIdx) {
+    for (const v of (treeData.virtual_nodes || [])) {
+      if (v.layer === layerIdx && v.index === nodeIdx) return true;
+    }
+    return false;
+  }
+
   function isPathEdge(fromLayer, fromIdx, toLayer, toIdx) {
     const parentIdx = Math.floor(fromIdx / 2);
     if (parentIdx !== toIdx) return false;
@@ -681,16 +697,17 @@ _VERIFY_HTML = """<!DOCTYPE html>
     const nodeMap = Array.from({length: totalLayers}, () => []);
 
     // ── 步驟 1：排列最底層的葉節點（從 X=0 開始，純相對座標）
-    // 只排列「真實」的葉節點（trueChildCount[0] 個）
-    const nRealLeaves = trueChildCount[0];
-    for (let ni = 0; ni < nRealLeaves; ni++) {
+    // 包含視覺補齊的虛擬佔位節點（layers[0].length 含補齊）
+    const nDisplayLeaves = layers[0].length;
+    for (let ni = 0; ni < nDisplayLeaves; ni++) {
       const hash = layers[0][ni];
       const role = getNodeRole(0, ni);
+      const virtual = isVirtualNode(0, ni);
       const nodeX = ni * (NODE_W + H_GAP);
       const node = {
         x: nodeX,
         y: canvasH - PADDING_Y - NODE_H,
-        w: NODE_W, h: NODE_H, hash, role,
+        w: NODE_W, h: NODE_H, hash, role, virtual,
         layerName: '葉節點層', layerIdx: 0, nodeIdx: ni,
       };
       nodePositions.push(node);
@@ -727,9 +744,10 @@ _VERIFY_HTML = """<!DOCTYPE html>
           nodeX = ni * (NODE_W + H_GAP);
         }
 
+        const virtual = isVirtualNode(li, ni);
         const node = {
           x: nodeX, y: layerY,
-          w: NODE_W, h: NODE_H, hash, role,
+          w: NODE_W, h: NODE_H, hash, role, virtual,
           layerName, layerIdx: li, nodeIdx: ni,
         };
         nodePositions.push(node);
@@ -834,35 +852,58 @@ _VERIFY_HTML = """<!DOCTYPE html>
         if (!child || !parent) continue;
 
         const onPath = isPathEdge(li, ci, li + 1, pi);
+        const isVirtEdge = child.virtual || parent.virtual;
 
         const startX = child.x + child.w / 2;
-        const startY = child.y;                   
+        const startY = child.y;
         const endX   = parent.x + parent.w / 2;
-        const endY   = parent.y + parent.h;       
-        const midY   = startY - (startY - endY) / 2; 
+        const endY   = parent.y + parent.h;
+        const midY   = startY - (startY - endY) / 2;
 
+        ctx.save();
+        if (isVirtEdge) ctx.setLineDash([4, 3]);
         ctx.beginPath();
         ctx.moveTo(startX, startY);
         ctx.bezierCurveTo(startX, midY, endX, midY, endX, endY);
-        
-        ctx.strokeStyle = onPath ? colors.edgePath : colors.edgeNormal;
-        // 路徑連線超級加粗，對比普通線條
-        ctx.lineWidth   = onPath ? 4.0 : 1.2;
-        ctx.globalAlpha = onPath ? 1.0 : 0.3;
+        ctx.strokeStyle = isVirtEdge ? colors.edgeNormal : (onPath ? colors.edgePath : colors.edgeNormal);
+        ctx.lineWidth   = onPath && !isVirtEdge ? 4.0 : 1.2;
+        ctx.globalAlpha = isVirtEdge ? 0.2 : (onPath ? 1.0 : 0.3);
         ctx.stroke();
+        ctx.restore();
         ctx.globalAlpha = 1.0;
       }
     }
 
     // ── 繪製高亮重點節點 ──
     for (const node of nodePositions) {
-      const c = colors[node.role] || colors.normal;
       const { x, y, w, h } = node;
+
+      if (node.virtual) {
+        // 虛擬佔位節點：虛線邊框 + 灰底 + 斜體標籤
+        const isDark = document.documentElement.classList.contains('dark');
+        roundRect(ctx, x, y, w, h, RADIUS);
+        ctx.fillStyle = isDark ? '#1a1a1a' : '#f9fafb';
+        ctx.fill();
+        roundRect(ctx, x, y, w, h, RADIUS);
+        ctx.save();
+        ctx.setLineDash([4, 3]);
+        ctx.strokeStyle = isDark ? '#4b5563' : '#9ca3af';
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+        ctx.restore();
+        ctx.fillStyle = isDark ? '#6b7280' : '#9ca3af';
+        ctx.font = 'italic 10px "Noto Sans", sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText('虛擬佔位', x + w / 2, y + h / 2);
+        continue;
+      }
+
+      const c = colors[node.role] || colors.normal;
 
       if (c.glow) {
         ctx.save();
         ctx.shadowColor = c.glow;
-        // 發光範圍擴大，讓重點更醒目
         ctx.shadowBlur  = 20;
         ctx.shadowOffsetX = 0;
         ctx.shadowOffsetY = 0;
@@ -878,7 +919,6 @@ _VERIFY_HTML = """<!DOCTYPE html>
 
       roundRect(ctx, x, y, w, h, RADIUS);
       ctx.strokeStyle = c.border;
-      // 增強高亮節點的邊框粗細
       ctx.lineWidth   = node.role !== 'normal' ? 3.0 : 1.5;
       ctx.stroke();
 
@@ -1032,16 +1072,23 @@ _VERIFY_HTML = """<!DOCTYPE html>
 
     if (hit) {
       const roleLabels = {
-        target:  '目標葉節點',
-        sibling: 'Sibling 節點',
-        path:    'Proof 路徑節點',
-        root:    'Root_official',
-        normal:  '一般節點',
+        target:  '目標葉節點（H_leaf = H(0x00 ‖ m_hex)）',
+        sibling: 'Sibling 節點（H_leaf 或 H_node）',
+        path:    'Proof 路徑節點（H_node = H(0x01 ‖ L ‖ R)）',
+        root:    'Root_official（H_node）',
+        normal:  '一般節點（Domain-Separated）',
       };
-      document.getElementById('panel-title').textContent = roleLabels[hit.role] || '節點';
-      document.getElementById('panel-hash').textContent  = hit.hash;
-      document.getElementById('panel-meta').textContent  =
-        `層級：${hit.layerName}　索引：${hit.nodeIdx}`;
+      if (hit.virtual) {
+        document.getElementById('panel-title').textContent = '虛擬佔位節點';
+        document.getElementById('panel-hash').textContent  = hit.hash;
+        document.getElementById('panel-meta').textContent  =
+          `層級：${hit.layerName}　索引：${hit.nodeIdx}\n此節點為奇數層上提（promote）時的視覺補齊佔位，並非實際樹節點`;
+      } else {
+        document.getElementById('panel-title').textContent = roleLabels[hit.role] || '節點';
+        document.getElementById('panel-hash').textContent  = hit.hash;
+        document.getElementById('panel-meta').textContent  =
+          `層級：${hit.layerName}　索引：${hit.nodeIdx}`;
+      }
 
       const px = Math.min(e.clientX + 16, window.innerWidth  - 440);
       const py = Math.min(e.clientY + 16, window.innerHeight - 120);
@@ -1360,7 +1407,7 @@ def _verify_m_hex(m_hex: str) -> dict:
         return {
             "valid":     True,
             "m_hex":     m_hex,
-            "leaf_hash": sha256_hex(m_hex.encode('utf-8')),
+            "leaf_hash": h_leaf(m_hex),
             "proof":     proof,
             "root":      root,
             "index":     index,
@@ -1417,21 +1464,25 @@ def _build_tree_data(m_hex: str) -> dict:
     proof_path.append({"layer": last_layer_idx, "index": 0, "role": "root"})
 
     # 建構 layers（每層節點的雜湊值，補齊奇數層）
+    # 同時記錄哪些節點是虛擬佔位（promote 後補齊的視覺用節點）
     layers = []
-    for layer in tree.tree:
-        # 若奇數個節點，補齊最後一個（與 MerkleTree._build_tree 一致）
+    virtual_nodes = []
+    for layer_idx, layer in enumerate(tree.tree):
+        # 若奇數個節點，補齊最後一個供視覺對稱用（虛擬佔位）
         if len(layer) % 2 == 1 and len(layer) > 1:
             layers.append(layer + [layer[-1]])
+            virtual_nodes.append({"layer": layer_idx, "index": len(layer)})
         else:
             layers.append(list(layer))
 
     return {
-        "layers":       layers,
-        "target_index": index,
-        "proof_path":   proof_path,
-        "root":         root,
-        "m_hex":        m_hex,
-        "leaf_hash":    sha256_hex(m_hex.encode('utf-8')),
+        "layers":        layers,
+        "target_index":  index,
+        "proof_path":    proof_path,
+        "root":          root,
+        "m_hex":         m_hex,
+        "leaf_hash":     h_leaf(m_hex),
+        "virtual_nodes": virtual_nodes,
     }
 
 

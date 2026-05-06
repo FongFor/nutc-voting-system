@@ -1,5 +1,5 @@
 """
-admin_tool/app.py  —  Phase 0 教務處：選民名冊管理工具
+admin_tool/app.py  —  admin
 
 admin，負責：
   1. 維護合法選民名冊
@@ -153,8 +153,7 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
       </svg>
     </div>
     <div>
-      <h1 class="text-2xl font-semibold text-gray-900 dark:text-white">Phase 0 教務處 — 選民名冊管理</h1>
-      <p class="text-gray-500 dark:text-gray-400 text-sm">NUTC Voting System · Admin Registration Tool</p>
+      <h1 class="text-2xl font-semibold text-gray-900 dark:text-white">Admin</h1>
     </div>
     <div class="ml-auto flex items-center gap-3">
       <a href="/api/export" target="_blank"
@@ -162,14 +161,14 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
         <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/>
         </svg>
-        匯出本輪資料
+        匯出
       </a>
       <a href="/print" target="_blank"
         class="no-print px-4 py-2 rounded-lg bg-white/70 dark:bg-cardblack/80 border border-gray-200 dark:border-gray-800 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-900 shadow-sm flex items-center gap-2 transition">
         <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 17h2a2 2 0 002-2v-4a2 2 0 00-2-2H5a2 2 0 00-2 2v4a2 2 0 002 2h2m2 4h6a2 2 0 002-2v-4a2 2 0 00-2-2H9a2 2 0 00-2 2v4a2 2 0 002 2zm8-12V5a2 2 0 00-2-2H9a2 2 0 00-2 2v4h10z"/>
         </svg>
-        列印 OTP 信件
+        列印
       </a>
       <button onclick="toggleTheme()" class="p-2 rounded-lg bg-white/70 dark:bg-cardblack/80 border border-gray-200 dark:border-gray-800 shadow-sm hover:bg-gray-100 dark:hover:bg-gray-900 transition text-gray-600 dark:text-gray-300">
         <svg class="w-4 h-4 hidden dark:block" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z"/></svg>
@@ -211,7 +210,7 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
       <div class="flex items-center gap-2">
         {% if election_state == 'standby' %}
         <span class="w-2.5 h-2.5 rounded-full bg-amber-400 shrink-0"></span>
-        <span class="text-amber-700 dark:text-amber-400 font-medium text-sm">待命中 — 選舉尚未啟動，投票業務已凍結</span>
+        <span class="text-amber-700 dark:text-amber-400 font-medium text-sm">待命</span>
         {% else %}
         <span class="w-2.5 h-2.5 rounded-full bg-green-500 shrink-0 shadow-[0_0_6px_#22c55e]"></span>
         <span class="text-green-700 dark:text-green-400 font-medium text-sm">進行中</span>
@@ -227,7 +226,7 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
           <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
           </svg>
-          啟動新一輪投票
+          重設名單
         </button>
         <button onclick="startElection()"
           class="px-5 py-2.5 bg-msblue hover:bg-msblueHover rounded-lg text-white font-medium text-sm transition shadow-md flex items-center gap-2 focus:outline-none focus:ring-2 focus:ring-msblue/50">
@@ -235,7 +234,7 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z"/>
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
           </svg>
-          啟動選舉
+          啟動
         </button>
         {% else %}
         <button onclick="newRound()"
@@ -253,12 +252,12 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
 
   <div class="grid grid-cols-1 lg:grid-cols-3 gap-8 mb-8">
 
-    <!-- 新增單一選民 -->
+    <!-- 新增單一 -->
     <div class="bg-white/70 dark:bg-cardblack/80 backdrop-blur-lg rounded-xl border border-gray-200 dark:border-gray-800 shadow-md p-6">
       <h2 class="font-medium text-gray-800 dark:text-gray-200 mb-4 text-sm uppercase tracking-wider flex items-center gap-2">
         <svg class="w-4 h-4 text-msblue" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6"/>
-        </svg>新增選民
+        </svg>新增
       </h2>
       <div class="space-y-3">
         <input type="text" id="singleVoterId" placeholder="學號 / VOTER_ID"
@@ -279,7 +278,7 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
       <h2 class="font-medium text-gray-800 dark:text-gray-200 mb-4 text-sm uppercase tracking-wider flex items-center gap-2">
         <svg class="w-4 h-4 text-msblue" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 10h16M4 14h7"/>
-        </svg>批次匯入選民名冊
+        </svg>批次匯入
       </h2>
       <p class="text-xs text-gray-500 dark:text-gray-400 mb-3">每行輸入一個學號，或以逗號分隔。</p>
       <textarea id="batchIds" rows="5" placeholder="VOTER_001&#10;VOTER_002&#10;VOTER_003"

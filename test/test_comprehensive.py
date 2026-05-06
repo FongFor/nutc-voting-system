@@ -85,7 +85,7 @@ import datetime as _dt
 # ════════════════════════════════════════════════════════════════
 
 def _ok(msg: str, verbose: bool = False):
-    print(f"  ✅ {msg}")
+    print(f"   {msg}")
 
 def _fail(msg: str):
     print(f"  ❌ {msg}")
@@ -536,7 +536,7 @@ class VotingSystemTestSuite:
                 else:
                     self.failed += 1
 
-        print(f"\n  📊 成功提交：{submitted}/{self.n_voters} 張")
+        print(f"\n  成功提交：{submitted}/{self.n_voters} 張")
         return submitted
 
     # ────────────────────────────────────────────────────────────
@@ -687,7 +687,7 @@ class VotingSystemTestSuite:
             if ok:
                 verified += 1
 
-        print(f"\n  📊 個別驗證通過：{verified}/{len(self.vote_records)}")
+        print(f"\n  個別驗證通過：{verified}/{len(self.vote_records)}")
 
     # ────────────────────────────────────────────────────────────
     # T-08：一人一票防禦（I-3）
