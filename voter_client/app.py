@@ -1,70 +1,51 @@
 """
 voter_client/app.py  —  選民端
 
-選民用來投票的 Web 介面。啟動時會自動處理金鑰和憑證，
-不需要手動設定什麼。
+所有密碼學運算在選民瀏覽器本地完成（Web Crypto API + BigInt）：
+  - RSA-2048 金鑰對生成
+  - PoP 持有權簽章（RSA-PSS-SHA256）
+  - TPA 認證封包（JSON sort + RSA-PSS）
+  - FDH 盲化因子（MGF1-SHA256 BigInt）
+  - 盲化 / 去盲化 / 驗證
+  - 數位信封封裝（AES-256-GCM + RSA-OAEP）
 
-投票流程：
-  1. 選民選好候選人後按送出
-  2. 先跟 TPA 做雙向身分認證
-  3. 把選票雜湊值盲化後送給 TPA 簽章（TPA 不知道你投給誰）
-  4. 去盲化後驗證簽章，打包成數位信封送到 CC
-  5. 投票完成，頁面會顯示 m_hex，記下來之後可以去 BB 驗證
+私鑰（SK_Voter）與憑證儲存於 IndexedDB
 
-截止時間到了之後，頁面的倒數計時會變紅，送出按鈕會被禁用。
-
-端點：
-  GET  /               投票頁面
-  POST /vote           執行投票流程
-  GET  /status         查看投票記錄
-  GET  /api/vote_status 查詢投票狀態（JSON）
+Flask 伺服器只做：
+  1. 提供 HTML 頁面與 /voter-crypto.js
+  2. 代理請求至 CA / TPA / CC / TA / BB
+  3. 接收並儲存投票回執（m_hex、SN）
 """
 
 import os
 import sys
-import json
 import time
 import datetime
 
-# 確保 shared/ 可被 import
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from flask import Flask, request, jsonify, render_template_string, redirect, url_for, session
+from flask import Flask, request, jsonify, render_template_string
 import requests as http_requests
 
-from shared.key_manager import (
-    load_or_generate_keypair,
-    load_or_request_certificate,
-    load_or_fetch_ca_cert,
-    verify_cert_with_ca,
-)
-from shared.auth_component import create_auth_packet, verify_auth_component
-from shared.crypto_utils import encapsulate_vote
-from shared.blind_signature import (
-    generate_blinding_factor,
-    blind_message,
-    unblind_signature,
-    verify_blind_signature,
-)
-from shared.format_utils import int_to_hex, hex_to_int, sha256_hex, ts_to_human
 from shared.db_utils import Database
 from shared.config_loader import get_candidates as cfg_get_candidates, make_reload_endpoint
+from shared.format_utils import ts_to_human
 
 # ============================================================
 # 常數設定
 # ============================================================
 SERVICE_DIR = os.path.dirname(os.path.abspath(__file__))
-KEYS_DIR    = os.path.join(SERVICE_DIR, "keys")
-DB_PATH     = os.path.join(SERVICE_DIR, "voter.db")
+DATA_DIR    = os.path.join(SERVICE_DIR, "data")
+os.makedirs(DATA_DIR, exist_ok=True)
+DB_PATH     = os.path.join(DATA_DIR, "voter.db")
 
-VOTER_ID    = os.environ.get("VOTER_ID", "VOTER_001")
-CA_URL      = os.environ.get("CA_URL",  "http://localhost:5001")
-TPA_URL     = os.environ.get("TPA_URL", "http://localhost:5000")
-TA_URL      = os.environ.get("TA_URL",  "http://localhost:5002")
-CC_URL      = os.environ.get("CC_URL",  "http://localhost:5003")
-BB_URL      = os.environ.get("BB_URL",  "http://localhost:5004")
+VOTER_ID = os.environ.get("VOTER_ID", "")   # 僅作表單預設值，不強制
+CA_URL   = os.environ.get("CA_URL",  "http://localhost:5001")
+TPA_URL  = os.environ.get("TPA_URL", "http://localhost:5000")
+TA_URL   = os.environ.get("TA_URL",  "http://localhost:5002")
+CC_URL   = os.environ.get("CC_URL",  "http://localhost:5003")
+BB_URL   = os.environ.get("BB_URL",  "http://localhost:5004")
 
-# 候選人清單：優先環境變數，否則從 config.json 讀取（hot-reload）
 def _get_candidates():
     env_val = os.environ.get("CANDIDATES")
     if env_val:
@@ -72,822 +53,832 @@ def _get_candidates():
     return cfg_get_candidates()
 
 # ============================================================
-# 資料庫初始化
+# 資料庫初始化（只保留回執記錄，crypto 在 browser 端）
 # ============================================================
 db = Database(DB_PATH)
 db.execute("""
     CREATE TABLE IF NOT EXISTS vote_record (
         id          INTEGER PRIMARY KEY AUTOINCREMENT,
         voter_id    TEXT NOT NULL,
-        sn          TEXT NOT NULL,
+        sn          TEXT NOT NULL UNIQUE,
         vote        TEXT NOT NULL,
         m_hex       TEXT NOT NULL,
         s_prime_hex TEXT NOT NULL,
-        voted_at    INTEGER NOT NULL,
-        status      TEXT NOT NULL DEFAULT 'submitted'
+        voted_at    INTEGER NOT NULL
     )
 """)
-db.execute("""
-    CREATE TABLE IF NOT EXISTS vote_log (
-        id          INTEGER PRIMARY KEY AUTOINCREMENT,
-        step        TEXT NOT NULL,
-        message     TEXT NOT NULL,
-        status      TEXT NOT NULL,
-        logged_at   INTEGER NOT NULL
-    )
-""")
-
-# ============================================================
-# 金鑰初始化（啟動時執行）
-# ============================================================
-print(f"[Voter:{VOTER_ID}] 初始化金鑰...")
-(
-    _private_key, _public_key, _e, _n, _d,
-    _private_key_pem, _public_key_pem
-) = load_or_generate_keypair(KEYS_DIR)
-
-try:
-    _ca_cert_pem = load_or_fetch_ca_cert(KEYS_DIR, CA_URL)
-except Exception as ex:
-    print(f"[Voter] 警告：無法取得 CA 憑證（{ex}）")
-    _ca_cert_pem = None
-
-try:
-    _cert_pem = load_or_request_certificate(KEYS_DIR, VOTER_ID, _public_key_pem, CA_URL)
-except Exception as ex:
-    print(f"[Voter] 警告：無法取得憑證（{ex}）")
-    _cert_pem = ""
-
-print(f"[Voter:{VOTER_ID}] 初始化完成。")
 
 # ============================================================
 # Flask App
 # ============================================================
 app = Flask(__name__)
-app.secret_key = os.urandom(24)
+app.secret_key = os.environ.get("SECRET_KEY", os.urandom(32))
 
+# ── 代理工具 ──────────────────────────────────────────────────
 
-# ── Jinja2 自訂過濾器：Unix timestamp → 人類可讀 ──────────────
-@app.template_filter('ts_to_str')
-def ts_to_str(ts):
-    """將 Unix timestamp 轉為 YYYY-MM-DD HH:MM:SS（僅用於 UI 顯示）"""
+def _proxy(method, url, data=None, params=None):
     try:
-        return datetime.datetime.fromtimestamp(int(ts)).strftime('%Y-%m-%d %H:%M:%S')
-    except Exception:
-        return str(ts)
+        if method == "GET":
+            r = http_requests.get(url, params=params, timeout=10)
+        else:
+            r = http_requests.post(url, json=data, timeout=15)
+        return jsonify(r.json()), r.status_code
+    except Exception as e:
+        return jsonify({"status": "error", "message": f"代理錯誤：{e}"}), 502
 
+# ── API 代理路由 ────────────────────────────────────────────
 
-# ── HTML 模板 ──────────────────────────────────────────────
-_VOTE_HTML = """<!DOCTYPE html>
-<html lang="zh-TW">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>投票系統 - {{ voter_id }}</title>
-  <script src="https://cdn.tailwindcss.com"></script>
-  <script>
-    tailwind.config = {
-      darkMode: 'class',
-      theme: {
-        extend: {
-          colors: {
-            msblue: '#0078D4',
-            msblueHover: '#0060A8',
-            deepblack: '#050505',
-            cardblack: '#111111'
-          }
-        }
-      }
-    }
-  </script>
-  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
-  <style>
-    body { font-family: 'Noto Sans', sans-serif; }
-    
-    /* 自訂單選框樣式 */
-    .candidate-radio:checked + div {
-      border-color: #0078D4;
-      background-color: rgba(0, 120, 212, 0.05);
-    }
-    .dark .candidate-radio:checked + div {
-      background-color: rgba(51, 153, 255, 0.1);
-      border-color: #3399FF;
-    }
-    .candidate-radio:checked + div .radio-inner-circle {
-      background-color: #0078D4;
-      transform: scale(1);
-    }
-    .dark .candidate-radio:checked + div .radio-inner-circle {
-      background-color: #3399FF;
-    }
-    .candidate-radio:checked + div .candidate-name {
-      color: #0078D4;
-      font-weight: 600;
-    }
-    .dark .candidate-radio:checked + div .candidate-name {
-      color: #3399FF;
-    }
-  </style>
-  <script>
-    if (localStorage.getItem('theme') === 'dark' || (!('theme' in localStorage) && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
-      document.documentElement.classList.add('dark');
-    } else {
-      document.documentElement.classList.remove('dark');
-    }
-    function toggleTheme() {
-      if (document.documentElement.classList.contains('dark')) {
-        document.documentElement.classList.remove('dark');
-        localStorage.setItem('theme', 'light');
-      } else {
-        document.documentElement.classList.add('dark');
-        localStorage.setItem('theme', 'dark');
-      }
-    }
-  </script>
-</head>
-<body class="bg-gray-50 dark:bg-deepblack text-gray-800 dark:text-gray-100 min-h-screen transition-colors duration-300">
-  <div class="max-w-2xl mx-auto px-4 py-10">
+@app.route('/api/proxy/ca/issue_cert', methods=['POST'])
+def proxy_ca_issue_cert():
+    return _proxy("POST", f"{CA_URL}/api/issue_cert", request.get_json())
 
-    <div class="flex items-center gap-4 mb-8">
-      <div class="w-12 h-12 rounded-xl bg-white/70 dark:bg-cardblack/80 backdrop-blur-md shadow-sm flex items-center justify-center border border-gray-200 dark:border-gray-800">
-        <svg class="w-6 h-6 text-msblue" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"></path></svg>
-      </div>
-      <div>
-        <h1 class="text-2xl font-semibold text-gray-900 dark:text-white">電子投票系統</h1>
-        <p class="text-gray-500 dark:text-gray-400 text-sm">NUTC Voting System · 選民：<span class="font-mono">{{ voter_id }}</span></p>
-      </div>
-      
-      <div class="ml-auto flex items-center gap-3">
-        {% if already_voted %}
-        <span class="px-3 py-1.5 rounded-full bg-green-50 dark:bg-green-900/20 text-green-700 dark:text-green-400 border border-green-200 dark:border-green-800/50 backdrop-blur-sm text-xs font-medium flex items-center shadow-sm">
-          <svg class="w-3.5 h-3.5 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path></svg> 已投票
-        </span>
-        {% else %}
-        <span class="px-3 py-1.5 rounded-full bg-msblue/10 dark:bg-msblue/20 text-msblue dark:text-[#3399FF] border border-msblue/20 dark:border-msblue/30 backdrop-blur-sm text-xs font-medium flex items-center shadow-sm">
-          <span class="inline-block w-1.5 h-1.5 rounded-full bg-msblue mr-1.5"></span> 尚未投票
-        </span>
-        {% endif %}
-        
-        <button onclick="toggleTheme()" class="p-2 rounded-lg bg-white/70 dark:bg-cardblack/80 border border-gray-200 dark:border-gray-800 shadow-sm hover:bg-gray-100 dark:hover:bg-gray-900 transition-colors text-gray-600 dark:text-gray-300 focus:outline-none focus:ring-2 focus:ring-msblue/50">
-          <svg class="w-4 h-4 hidden dark:block" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z"></path></svg>
-          <svg class="w-4 h-4 block dark:hidden" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z"></path></svg>
-        </button>
-      </div>
-    </div>
+@app.route('/api/proxy/ca/voter_status', methods=['GET'])
+def proxy_ca_voter_status():
+    voter_id = request.args.get('voter_id', '')
+    return _proxy("GET", f"{CA_URL}/api/voter_status", params={'voter_id': voter_id})
 
-    <div id="deadline-banner" class="mb-6 hidden transition-all duration-500">
-      <div id="deadline-active"
-        class="bg-amber-50/80 dark:bg-amber-900/10 border border-amber-200 dark:border-amber-800/50 backdrop-blur-md rounded-xl p-5 flex flex-col sm:flex-row sm:items-center justify-between shadow-sm hidden">
-        <div class="mb-3 sm:mb-0">
-          <p class="text-amber-800 dark:text-amber-400 font-medium text-sm flex items-center gap-1.5">
-            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
-            投票截止倒數
-          </p>
-          <p class="text-gray-600 dark:text-gray-400 text-[11px] mt-1">截止時間：<span id="deadline-str" class="font-mono text-amber-700 dark:text-amber-300"></span></p>
-          <p class="text-gray-500 dark:text-gray-500 text-[10px]">Unix timestamp：<span id="deadline-ts-display" class="font-mono"></span></p>
-        </div>
-        <div class="text-left sm:text-right">
-          <p id="countdown-display" class="text-2xl font-bold font-mono text-amber-600 dark:text-amber-500 tracking-wider">--:--:--</p>
-          <p class="text-[10px] text-amber-700/70 dark:text-amber-500/70 uppercase tracking-widest mt-0.5">剩餘時間</p>
-        </div>
-      </div>
-      
-      <div id="deadline-expired"
-        class="bg-red-50/80 dark:bg-red-900/10 border border-red-200 dark:border-red-900/50 backdrop-blur-md rounded-xl p-5 shadow-sm hidden">
-        <div class="flex items-start gap-3">
-          <svg class="w-5 h-5 text-red-600 dark:text-red-500 mt-0.5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"></path></svg>
-          <div>
-            <p class="text-red-800 dark:text-red-400 font-semibold text-sm">投票已截止</p>
-            <p class="text-red-600/80 dark:text-red-400/80 text-xs mt-1">截止時間已過，無法再提交選票。</p>
-          </div>
-        </div>
-      </div>
-    </div>
+@app.route('/api/proxy/tpa/public_key', methods=['GET'])
+def proxy_tpa_pk():
+    return _proxy("GET", f"{TPA_URL}/api/public_key")
 
-    {% if flash_msg %}
-    <div class="mb-6 p-4 rounded-xl shadow-sm flex items-start gap-3 {% if flash_type == 'error' %}bg-red-50/80 dark:bg-red-900/10 border border-red-200 dark:border-red-900/50 text-red-800 dark:text-red-300{% else %}bg-green-50/80 dark:bg-green-900/10 border border-green-200 dark:border-green-900/50 text-green-800 dark:text-green-300{% endif %}">
-      {% if flash_type == 'error' %}
-      <svg class="w-5 h-5 shrink-0 text-red-600 dark:text-red-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2m7-2a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
-      {% else %}
-      <svg class="w-5 h-5 shrink-0 text-green-600 dark:text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
-      {% endif %}
-      <span class="text-sm pt-0.5">{{ flash_msg }}</span>
-    </div>
-    {% endif %}
+@app.route('/api/proxy/tpa/auth', methods=['POST'])
+def proxy_tpa_auth():
+    return _proxy("POST", f"{TPA_URL}/api/auth", request.get_json())
 
-    {% if already_voted %}
-    <div class="bg-white/70 dark:bg-cardblack/80 backdrop-blur-lg rounded-2xl border border-gray-200 dark:border-gray-800 shadow-md p-8 mb-6 relative overflow-hidden">
-      <div class="absolute top-0 left-0 w-full h-1.5 bg-green-500"></div>
-      
-      <div class="flex flex-col items-center text-center mb-8 mt-2">
-        <div class="w-16 h-16 bg-green-50 dark:bg-green-900/20 rounded-full flex items-center justify-center mb-4 border border-green-100 dark:border-green-800/50 shadow-sm">
-          <svg class="w-8 h-8 text-green-500 dark:text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path></svg>
-        </div>
-        <h2 class="text-xl font-semibold text-gray-900 dark:text-white mb-2">投票完成！</h2>
-        <p class="text-gray-500 dark:text-gray-400 text-sm">您的選票已成功提交並加密傳送至計票中心。</p>
-      </div>
-      
-      <div class="space-y-4 mb-8">
-        <div class="bg-gray-50/80 dark:bg-[#0a0a0a] rounded-xl p-4 border border-gray-100 dark:border-gray-800/80 shadow-inner">
-          <p class="text-[11px] text-gray-500 dark:text-gray-500 uppercase tracking-wider mb-1 font-medium">投票內容</p>
-          <p class="font-mono text-msblue dark:text-[#3399FF] font-semibold text-lg">{{ vote_record.vote }}</p>
-        </div>
-        
-        <div class="bg-gray-50/80 dark:bg-[#0a0a0a] rounded-xl p-4 border border-gray-100 dark:border-gray-800/80 shadow-inner">
-          <p class="text-[11px] text-gray-500 dark:text-gray-500 uppercase tracking-wider mb-1 font-medium">投票時間</p>
-          <p class="font-mono text-sm text-gray-800 dark:text-gray-200">{{ vote_record.voted_at | ts_to_str }}</p>
-        </div>
-        
-        <div class="bg-blue-50/50 dark:bg-blue-900/5 rounded-xl p-4 border border-blue-100 dark:border-blue-900/30 relative overflow-hidden">
-          <div class="absolute left-0 top-0 w-1 h-full bg-msblue"></div>
-          <p class="text-[11px] text-msblue dark:text-[#3399FF] uppercase tracking-wider mb-1.5 font-semibold">選票包雜湊值 m_hex (用於獨立驗證)</p>
-          <p class="font-mono text-[11px] text-gray-700 dark:text-gray-300 break-all">{{ vote_record.m_hex }}</p>
-        </div>
-      </div>
-      
-      <div class="flex flex-col sm:flex-row gap-3">
-        <a href="/status" class="flex-1 py-3 bg-white dark:bg-cardblack border border-gray-300 dark:border-gray-700 hover:bg-gray-50 dark:hover:bg-gray-900 rounded-xl text-sm font-medium text-gray-700 dark:text-gray-200 text-center transition shadow-sm flex items-center justify-center gap-2">
-          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path></svg>
-          查看詳細狀態
-        </a>
-        <a href="{{ bb_url }}/verify?m_hex={{ vote_record.m_hex }}" target="_blank"
-          class="flex-1 py-3 bg-msblue hover:bg-msblueHover rounded-xl text-sm font-medium text-white text-center transition shadow-md flex items-center justify-center gap-2">
-          前往 BB 驗證 <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"></path></svg>
-        </a>
-      </div>
-    </div>
+@app.route('/api/proxy/tpa/blind_sign', methods=['POST'])
+def proxy_tpa_blind_sign():
+    return _proxy("POST", f"{TPA_URL}/api/blind_sign", request.get_json())
 
-    {% else %}
-    <div class="bg-white/70 dark:bg-cardblack/80 backdrop-blur-lg rounded-2xl border border-gray-200 dark:border-gray-800 shadow-md p-6 sm:p-8 mb-6">
-      <h2 class="font-medium text-gray-900 dark:text-white mb-6 text-base sm:text-lg flex items-center gap-2">
-        <svg class="w-5 h-5 text-msblue" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"></path></svg>
-        請選擇您支持的候選人
-      </h2>
-      
-      <form method="POST" action="/vote" id="voteForm">
-        <div class="space-y-3 mb-8">
-          {% for candidate in candidates %}
-          <label class="block relative cursor-pointer group">
-            <input type="radio" name="candidate" value="{{ candidate }}" required class="candidate-radio peer sr-only">
-            <div class="flex items-center p-4 rounded-xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-[#1a1a1a] hover:bg-gray-50 dark:hover:bg-[#222] transition-all duration-200 shadow-sm">
-              <div class="w-5 h-5 rounded-full border-2 border-gray-300 dark:border-gray-600 mr-4 flex flex-shrink-0 items-center justify-center bg-white dark:bg-gray-800">
-                <div class="radio-inner-circle w-2.5 h-2.5 rounded-full bg-transparent transform scale-0 transition-transform duration-200"></div>
-              </div>
-              <span class="candidate-name font-mono text-gray-700 dark:text-gray-300 text-sm sm:text-base transition-colors duration-200">{{ candidate }}</span>
-            </div>
-          </label>
-          {% endfor %}
-        </div>
-        
-        <button type="submit" id="submitBtn"
-          class="w-full py-3.5 bg-msblue hover:bg-msblueHover rounded-xl text-white font-medium transition shadow-md text-sm flex justify-center items-center gap-2 disabled:opacity-60 disabled:cursor-not-allowed disabled:hover:bg-msblue">
-          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8"></path></svg>
-          提交加密選票
-        </button>
-        <p id="deadline-block-msg" class="mt-4 text-center text-red-600 dark:text-red-400 text-sm font-medium hidden flex justify-center items-center gap-1">
-          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
-          投票已截止，無法提交選票。
-        </p>
-      </form>
-    </div>
+@app.route('/api/proxy/cc/public_key', methods=['GET'])
+def proxy_cc_pk():
+    return _proxy("GET", f"{CC_URL}/api/public_key")
 
-    <div class="bg-white/50 dark:bg-cardblack/50 backdrop-blur-md rounded-xl border border-gray-200 dark:border-gray-800 p-5 shadow-sm">
-      <h3 class="font-medium text-gray-800 dark:text-gray-200 mb-4 text-sm flex items-center gap-2">
-        <svg class="w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
-        零信任安全投票流程
-      </h3>
-      <div class="space-y-3 text-[13px] text-gray-600 dark:text-gray-400">
-        <div class="flex items-start gap-2.5">
-          <span class="flex items-center justify-center w-5 h-5 rounded-full bg-msblue/10 dark:bg-msblue/20 text-msblue dark:text-[#3399FF] text-[10px] font-bold shrink-0 mt-0.5">1</span>
-          <span>雙向身分認證（Voter ↔ TPA），包含 X.509 CA 憑證鏈驗證確保身分合法。</span>
-        </div>
-        <div class="flex items-start gap-2.5">
-          <span class="flex items-center justify-center w-5 h-5 rounded-full bg-msblue/10 dark:bg-msblue/20 text-msblue dark:text-[#3399FF] text-[10px] font-bold shrink-0 mt-0.5">2</span>
-          <span>盲簽章 (Blind Signature)：選票雜湊值盲化後送 TPA 簽章，發行方無法得知投票內容，保障絕對隱私。</span>
-        </div>
-        <div class="flex items-start gap-2.5">
-          <span class="flex items-center justify-center w-5 h-5 rounded-full bg-msblue/10 dark:bg-msblue/20 text-msblue dark:text-[#3399FF] text-[10px] font-bold shrink-0 mt-0.5">3</span>
-          <span class="break-all">封裝數位信封：C_Data = E_k(E_PK_TA(...), S', m)，C_Key = E_PK_CC(k)。</span>
-        </div>
-        <div class="flex items-start gap-2.5">
-          <span class="flex items-center justify-center w-5 h-5 rounded-full bg-msblue/10 dark:bg-msblue/20 text-msblue dark:text-[#3399FF] text-[10px] font-bold shrink-0 mt-0.5">4</span>
-          <span>信封加密傳送至計票中心（CC），等待時間授權中心 (TA) 截止後釋放私鑰進行開票。</span>
-        </div>
-      </div>
-    </div>
-    {% endif %}
+@app.route('/api/proxy/cc/receive_envelope', methods=['POST'])
+def proxy_cc_envelope():
+    return _proxy("POST", f"{CC_URL}/api/receive_envelope", request.get_json())
 
-  </div>
+@app.route('/api/proxy/ta/public_key', methods=['GET'])
+def proxy_ta_pk():
+    return _proxy("GET", f"{TA_URL}/api/public_key")
 
-  <script>
-    // ── 截止時間強制執行（前端）────────────────────────────────
-    // 1. 從 TA /api/deadline 取得 Unix timestamp
-    // 2. JS 倒數計時器（每 50ms 更新）
-    // 3. 截止後：禁用按鈕、顯示截止提示
-    // 4. fetch 攔截：提交前再次檢查 Date.now() > deadline * 1000
+@app.route('/api/proxy/ta/deadline', methods=['GET'])
+def proxy_ta_deadline():
+    return _proxy("GET", f"{TA_URL}/api/deadline")
 
-    let deadlineTs = 0;  // Unix timestamp（秒）
+@app.route('/api/proxy/bb/results', methods=['GET'])
+def proxy_bb_results():
+    return _proxy("GET", f"{BB_URL}/api/results")
 
-    async function fetchDeadline() {
-      try {
-        const resp = await fetch('{{ ta_url }}/api/deadline');
-        const data = await resp.json();
-        if (data.status === 'success') {
-          deadlineTs = data.deadline;  // Unix timestamp（後端標準）
-          // UI 顯示：人類可讀格式（YYYY-MM-DD HH:MM:SS）
-          const deadlineDate = new Date(deadlineTs * 1000);
-          const pad = n => String(n).padStart(2, '0');
-          const humanStr = `${deadlineDate.getFullYear()}-${pad(deadlineDate.getMonth()+1)}-${pad(deadlineDate.getDate())} ${pad(deadlineDate.getHours())}:${pad(deadlineDate.getMinutes())}:${pad(deadlineDate.getSeconds())}`;
-          const strEl = document.getElementById('deadline-str');
-          const tsEl  = document.getElementById('deadline-ts-display');
-          if (strEl) strEl.textContent = humanStr;
-          if (tsEl)  tsEl.textContent  = deadlineTs;
-          document.getElementById('deadline-banner')?.classList.remove('hidden');
-          document.getElementById('deadline-active')?.classList.remove('hidden');
-          startCountdown();
-        }
-      } catch (e) {
-        console.warn('[Voter] 無法取得截止時間：', e);
-      }
-    }
+# ── 業務 API ──────────────────────────────────────────────────
 
-    function startCountdown() {
-      const countdownEl = document.getElementById('countdown-display');
-      const submitBtn   = document.getElementById('submitBtn');
-      const blockMsg    = document.getElementById('deadline-block-msg');
-      const activeEl    = document.getElementById('deadline-active');
-      const expiredEl   = document.getElementById('deadline-expired');
+@app.route('/api/candidates', methods=['GET'])
+def api_candidates():
+    return jsonify({"status": "success", "candidates": _get_candidates()}), 200
 
-      function update() {
-        if (!deadlineTs) return;
-        const now  = Math.floor(Date.now() / 1000);  // 轉為秒，與後端 Unix ts 一致
-        const diff = deadlineTs - now;
-
-        if (diff <= 0) {
-          // ── 截止：禁用按鈕、顯示截止提示 ──
-          if (countdownEl) countdownEl.textContent = '00:00:00';
-          if (submitBtn) {
-            submitBtn.disabled = true;
-            submitBtn.innerHTML = '<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"></path></svg> 投票已截止';
-          }
-          if (blockMsg)   blockMsg.classList.remove('hidden');
-          if (activeEl)   activeEl.classList.add('hidden');
-          if (expiredEl)  expiredEl.classList.remove('hidden');
-          return;  // 停止更新
-        }
-
-        // ── 倒數顯示（人類可讀格式）──
-        const h  = Math.floor(diff / 3600);
-        const m  = Math.floor((diff % 3600) / 60);
-        const s  = diff % 60;
-        const pad = n => String(n).padStart(2, '0');
-        if (countdownEl) countdownEl.textContent = `${pad(h)}:${pad(m)}:${pad(s)}`;
-
-        // 剩餘 60 秒以內：倒數變紅色警示
-        if (diff <= 60 && countdownEl) {
-          countdownEl.classList.remove('text-amber-600', 'dark:text-amber-500');
-          countdownEl.classList.add('text-red-600', 'dark:text-red-500');
-        }
-
-        setTimeout(update, 500);
-      }
-      update();
-    }
-
-    // ── fetch 攔截：提交前再次檢查截止時間 ──────────────────────
-    document.getElementById('voteForm')?.addEventListener('submit', function(e) {
-      // 若已取得截止時間，且當前時間已超過截止時間，阻止提交
-      if (deadlineTs > 0) {
-        const nowSec = Math.floor(Date.now() / 1000);
-        if (nowSec > deadlineTs) {
-          e.preventDefault();
-          const blockMsg = document.getElementById('deadline-block-msg');
-          if (blockMsg) blockMsg.classList.remove('hidden');
-          const submitBtn = document.getElementById('submitBtn');
-          if (submitBtn) {
-            submitBtn.disabled = true;
-            submitBtn.innerHTML = '<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"></path></svg> 投票已截止';
-          }
-          console.warn('[Voter] fetch 攔截：截止時間已過，阻止提交（nowSec=' + nowSec + ' > deadlineTs=' + deadlineTs + '）');
-          return;
-        }
-      }
-      // 正常提交：顯示處理中
-      const btn = document.getElementById('submitBtn');
-      if (btn) {
-        btn.innerHTML = '<svg class="w-4 h-4 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path></svg> 處理中...';
-        btn.disabled = true;
-      }
-    });
-
-    // 頁面載入時取得截止時間
-    fetchDeadline();
-  </script>
-</body>
-</html>"""
-
-_STATUS_HTML = """<!DOCTYPE html>
-<html lang="zh-TW">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>投票狀態 - {{ voter_id }}</title>
-  <script src="https://cdn.tailwindcss.com"></script>
-  <script>
-    tailwind.config = {
-      darkMode: 'class',
-      theme: {
-        extend: {
-          colors: {
-            msblue: '#0078D4',
-            msblueHover: '#0060A8',
-            deepblack: '#050505',
-            cardblack: '#111111'
-          }
-        }
-      }
-    }
-  </script>
-  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
-  <style>
-    body { font-family: 'Noto Sans', sans-serif; }
-  </style>
-  <script>
-    if (localStorage.getItem('theme') === 'dark' || (!('theme' in localStorage) && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
-      document.documentElement.classList.add('dark');
-    } else {
-      document.documentElement.classList.remove('dark');
-    }
-    function toggleTheme() {
-      if (document.documentElement.classList.contains('dark')) {
-        document.documentElement.classList.remove('dark');
-        localStorage.setItem('theme', 'light');
-      } else {
-        document.documentElement.classList.add('dark');
-        localStorage.setItem('theme', 'dark');
-      }
-    }
-  </script>
-</head>
-<body class="bg-gray-50 dark:bg-deepblack text-gray-800 dark:text-gray-100 min-h-screen transition-colors duration-300">
-  <div class="max-w-3xl mx-auto px-4 py-10">
-
-    <div class="flex items-center justify-between mb-8">
-      <div class="flex items-center gap-4">
-        <a href="/" class="p-2 -ml-2 rounded-lg text-gray-500 dark:text-gray-400 hover:text-msblue hover:bg-msblue/10 dark:hover:text-white transition-colors" title="返回投票頁">
-          <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18"></path></svg>
-        </a>
-        <div class="w-10 h-10 rounded-xl bg-white/70 dark:bg-cardblack/80 shadow-sm flex items-center justify-center border border-gray-200 dark:border-gray-800">
-          <svg class="w-5 h-5 text-msblue" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"></path></svg>
-        </div>
-        <div>
-          <h1 class="text-xl font-semibold text-gray-900 dark:text-white">投票狀態</h1>
-          <p class="text-gray-500 dark:text-gray-400 text-xs mt-0.5">選民：<span class="font-mono">{{ voter_id }}</span></p>
-        </div>
-      </div>
-      
-      <button onclick="toggleTheme()" class="p-2 rounded-lg bg-white/70 dark:bg-cardblack/80 border border-gray-200 dark:border-gray-800 shadow-sm hover:bg-gray-100 dark:hover:bg-gray-900 transition-colors text-gray-600 dark:text-gray-300 focus:outline-none focus:ring-2 focus:ring-msblue/50">
-        <svg class="w-4 h-4 hidden dark:block" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z"></path></svg>
-        <svg class="w-4 h-4 block dark:hidden" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z"></path></svg>
-      </button>
-    </div>
-
-    {% if vote_record %}
-    <div class="bg-white/70 dark:bg-cardblack/80 backdrop-blur-lg rounded-2xl border border-gray-200 dark:border-gray-800 shadow-md p-6 sm:p-8 mb-6">
-      <h2 class="font-medium text-gray-800 dark:text-gray-200 mb-6 text-sm flex items-center gap-2 uppercase tracking-wider">
-        <svg class="w-4 h-4 text-msblue" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path></svg>
-        加密記錄檔案
-      </h2>
-      
-      <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 text-sm mb-6">
-        <div class="bg-gray-50 dark:bg-[#0a0a0a] rounded-xl p-4 border border-gray-100 dark:border-gray-800/80 shadow-inner">
-          <p class="text-gray-500 dark:text-gray-500 text-[11px] uppercase tracking-wider mb-1 font-medium">選民 ID</p>
-          <p class="font-mono text-gray-800 dark:text-gray-200">{{ vote_record.voter_id }}</p>
-        </div>
-        <div class="bg-gray-50 dark:bg-[#0a0a0a] rounded-xl p-4 border border-gray-100 dark:border-gray-800/80 shadow-inner">
-          <p class="text-gray-500 dark:text-gray-500 text-[11px] uppercase tracking-wider mb-1 font-medium">隨機序號 (SN)</p>
-          <p class="font-mono text-gray-800 dark:text-gray-300 text-xs">{{ vote_record.sn }}</p>
-        </div>
-        <div class="bg-gray-50 dark:bg-[#0a0a0a] rounded-xl p-4 border border-gray-100 dark:border-gray-800/80 shadow-inner">
-          <p class="text-gray-500 dark:text-gray-500 text-[11px] uppercase tracking-wider mb-1 font-medium">投票內容</p>
-          <p class="font-mono text-msblue dark:text-[#3399FF] font-semibold text-base">{{ vote_record.vote }}</p>
-        </div>
-        <div class="bg-gray-50 dark:bg-[#0a0a0a] rounded-xl p-4 border border-gray-100 dark:border-gray-800/80 shadow-inner">
-          <p class="text-gray-500 dark:text-gray-500 text-[11px] uppercase tracking-wider mb-1 font-medium">投票時間</p>
-          <p class="text-gray-800 dark:text-gray-200 font-mono text-[13px]">{{ vote_record.voted_at | ts_to_str }}</p>
-          <p class="text-gray-400 dark:text-gray-600 text-[10px] mt-1 font-mono">ts: {{ vote_record.voted_at }}</p>
-        </div>
-      </div>
-      
-      <div class="space-y-4 pt-4 border-t border-gray-100 dark:border-gray-800">
-        <div>
-          <p class="text-gray-500 dark:text-gray-500 text-[11px] uppercase tracking-wider mb-1 font-medium flex items-center gap-1.5">
-            <span class="w-1.5 h-1.5 rounded-full bg-msblue"></span> m_hex（選票包雜湊值，用於 Merkle Proof 驗證）
-          </p>
-          <p class="font-mono text-[11px] sm:text-xs text-gray-700 dark:text-gray-400 break-all bg-gray-50 dark:bg-[#0a0a0a] p-3 rounded-lg border border-gray-100 dark:border-gray-800/80 shadow-inner">{{ vote_record.m_hex }}</p>
-        </div>
-        <div>
-          <p class="text-gray-500 dark:text-gray-500 text-[11px] uppercase tracking-wider mb-1 font-medium flex items-center gap-1.5">
-            <span class="w-1.5 h-1.5 rounded-full bg-purple-500"></span> S'_hex（TPA 盲簽章截斷預覽）
-          </p>
-          <p class="font-mono text-[11px] text-gray-500 dark:text-gray-500 break-all bg-gray-50 dark:bg-[#0a0a0a] p-3 rounded-lg border border-gray-100 dark:border-gray-800/80 shadow-inner">{{ vote_record.s_prime_hex[:80] }}...</p>
-        </div>
-      </div>
-    </div>
-
-    <div class="flex gap-3 mb-8">
-      <a href="{{ bb_url }}/verify?m_hex={{ vote_record.m_hex }}" target="_blank"
-        class="w-full py-3.5 bg-msblue hover:bg-msblueHover rounded-xl text-white font-medium transition shadow-md text-sm flex justify-center items-center gap-2">
-        前往公告板 (BB) 驗證 Merkle Proof <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"></path></svg>
-      </a>
-    </div>
-    {% else %}
-    <div class="bg-white/70 dark:bg-cardblack/80 backdrop-blur-lg rounded-2xl border border-gray-200 dark:border-gray-800 shadow-md p-16 text-center">
-      <div class="w-16 h-16 bg-gray-50 dark:bg-[#1a1a1a] rounded-full flex items-center justify-center mx-auto mb-4 border border-gray-100 dark:border-gray-800">
-        <svg class="w-8 h-8 text-gray-400 dark:text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
-      </div>
-      <p class="text-gray-600 dark:text-gray-400 font-medium mb-4">您尚未完成投票。</p>
-      <a href="/" class="inline-flex px-6 py-2.5 bg-msblue hover:bg-msblueHover rounded-lg text-sm font-medium text-white transition shadow-sm">
-        前往投票頁面
-      </a>
-    </div>
-    {% endif %}
-
-    {% if logs %}
-    <div class="bg-white/70 dark:bg-cardblack/80 backdrop-blur-lg rounded-xl border border-gray-200 dark:border-gray-800 shadow-md overflow-hidden">
-      <div class="px-6 py-4 border-b border-gray-100 dark:border-gray-800/60 bg-gray-50/50 dark:bg-[#0a0a0a]/50 flex items-center justify-between">
-        <h2 class="font-medium text-gray-800 dark:text-gray-200 text-sm flex items-center gap-2">
-          <svg class="w-4 h-4 text-msblue" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 10h16M4 14h16M4 18h16"></path></svg>
-          底層加密流程記錄
-        </h2>
-      </div>
-      <div class="divide-y divide-gray-100 dark:divide-gray-800/60">
-        {% for log in logs %}
-        <div class="px-6 py-4 flex items-start gap-4 hover:bg-gray-50 dark:hover:bg-[#1a1a1a] transition-colors">
-          <span class="mt-0.5 shrink-0">
-            {% if log.status == 'ok' %}
-            <svg class="w-5 h-5 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
-            {% else %}
-            <svg class="w-5 h-5 text-red-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2m7-2a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
-            {% endif %}
-          </span>
-          <div class="flex-1 min-w-0">
-            <p class="text-[11px] text-gray-500 dark:text-gray-400 font-medium mb-0.5">{{ log.step }}</p>
-            <p class="text-sm text-gray-800 dark:text-gray-300 font-mono leading-relaxed truncate">{{ log.message }}</p>
-          </div>
-          <div class="text-right shrink-0">
-            <p class="text-[11px] text-gray-600 dark:text-gray-400 font-mono">{{ log.logged_at | ts_to_str }}</p>
-            <p class="text-[10px] text-gray-400 dark:text-gray-600 font-mono mt-0.5">ts: {{ log.logged_at }}</p>
-          </div>
-        </div>
-        {% endfor %}
-      </div>
-    </div>
-    {% endif %}
-
-  </div>
-</body>
-</html>"""
-# ── 路由 ──────────────────────────────────────────────────
-
-@app.route('/')
-def index():
-    vote_record = db.fetchone(
-        "SELECT * FROM vote_record WHERE voter_id = ? ORDER BY id DESC LIMIT 1",
-        (VOTER_ID,)
+@app.route('/api/all_receipts', methods=['GET'])
+def api_all_receipts():
+    """回傳本輪所有投票回執（供 Admin 匯出使用）。"""
+    rows = db.fetchall(
+        "SELECT voter_id, sn, vote, m_hex, voted_at FROM vote_record ORDER BY voted_at"
     )
-    already_voted = vote_record is not None
-
-    flash_msg  = session.pop('flash_msg', None)
-    flash_type = session.pop('flash_type', 'info')
-
-    # 每次請求都讀最新候選人清單（hot-reload）
-    candidates = _get_candidates()
-
-    return render_template_string(
-        _VOTE_HTML,
-        voter_id=VOTER_ID,
-        candidates=candidates,
-        already_voted=already_voted,
-        vote_record=vote_record,
-        flash_msg=flash_msg,
-        flash_type=flash_type,
-        bb_url=BB_URL,
-        ta_url=TA_URL,
-    )
-
-
-@app.route('/vote', methods=['POST'])
-def vote():
-    """執行完整投票流程（Phase 2 + 3）"""
-    # 檢查是否已投票
-    existing = db.fetchone(
-        "SELECT id FROM vote_record WHERE voter_id = ?", (VOTER_ID,)
-    )
-    if existing:
-        session['flash_msg']  = "您已投票，不可重複投票。"
-        session['flash_type'] = 'error'
-        return redirect('/')
-
-    candidate = request.form.get('candidate', '').strip()
-    candidates = _get_candidates()
-    if not candidate or candidate not in candidates:
-        session['flash_msg']  = "請選擇有效的候選人。"
-        session['flash_type'] = 'error'
-        return redirect('/')
-
-    now = int(time.time())
-    sn  = f"SN{now}{VOTER_ID[-3:]}"   # 唯一序號
-
-    def _log(step, message, status='ok'):
-        db.execute(
-            "INSERT INTO vote_log (step, message, status, logged_at) VALUES (?, ?, ?, ?)",
-            (step, message, status, now),
-        )
-
-    try:
-        # ── Step 1：取得 TPA 公鑰 ────────────────────────
-        resp = http_requests.get(f"{TPA_URL}/api/public_key", timeout=10)
-        tpa_data = resp.json()
-        tpa_e = hex_to_int(tpa_data['e'])
-        tpa_n = hex_to_int(tpa_data['n'])
-        tpa_pub_pem = tpa_data['public_key_pem']
-        _log("Phase 2 - 取得 TPA 公鑰", f"e={tpa_data['e'][:20]}...")
-
-        # ── Step 2：取得 CC 公鑰 ─────────────────────────
-        resp = http_requests.get(f"{CC_URL}/api/public_key", timeout=10)
-        cc_pub_pem = resp.json()['public_key_pem']
-        _log("Phase 2 - 取得 CC 公鑰", "CC 公鑰已取得")
-
-        # ── Step 3：取得 TA 公鑰 ─────────────────────────
-        resp = http_requests.get(f"{TA_URL}/api/public_key", timeout=10)
-        ta_pub_pem = resp.json()['public_key_pem']
-        _log("Phase 2 - 取得 TA 公鑰", "TA 公鑰已取得")
-
-        # ── Step 4：Phase 2 雙向認證 ─────────────────────
-        auth_packet = create_auth_packet(VOTER_ID, "TPA", _private_key, _cert_pem)
-        resp = http_requests.post(
-            f"{TPA_URL}/api/auth",
-            json={"auth_packet": auth_packet, "voter_cert_pem": _cert_pem},
-            timeout=10,
-        )
-        auth_result = resp.json()
-        if auth_result.get('status') != 'success':
-            # 截止時間錯誤特別處理
-            if auth_result.get('code') == 'DEADLINE_EXCEEDED':
-                raise Exception(f"投票已截止（TPA 拒絕）：{auth_result.get('message', '')}")
-            raise Exception(f"TPA 認證失敗：{auth_result.get('message', '')}")
-        _log("Phase 2 - TPA 認證", "TPA 認證成功")
-
-        # 驗證 TPA 回應封包（雙向認證）
-        import base64
-        response_packet = auth_result['response_packet']
-        tpa_cert_pem    = auth_result['tpa_cert_pem']
-
-        # 若有 CA 憑證，驗證 TPA 憑證合法性
-        if _ca_cert_pem and tpa_cert_pem:
-            if not verify_cert_with_ca(tpa_cert_pem, _ca_cert_pem):
-                raise Exception("TPA 憑證 CA 驗證失敗")
-
-        rp = response_packet
-        sig_bytes = base64.b64decode(rp['signature'])
-        verify_auth_component(
-            expected_receiver_id=VOTER_ID,
-            sender_id=rp['payload']['sender_id'],
-            packet_receiver_id=rp['payload']['receiver_id'],
-            packet_timestamp=rp['payload']['timestamp'],
-            packet_cert_pem=tpa_cert_pem,
-            packet_signature=sig_bytes,
-            packet_si=rp['payload']['si'],
-            ca_public_key=None,
-            delta_t=300,
-        )
-        _log("Phase 2 - 驗證 TPA 回應", "雙向認證完成")
-
-        # ── Step 5：計算選票雜湊值 m ─────────────────────
-        inner_hash = sha256_hex(f"{VOTER_ID}|{sn}|{candidate}".encode('utf-8'))
-        outer_hash = sha256_hex(f"{inner_hash}|{candidate}".encode('utf-8'))
-        m_hex = hex(int(outer_hash, 16))
-        _log("Phase 3 - 計算 m", f"m={m_hex[:20]}...")
-
-        # ── Step 6：盲化選票 ─────────────────────────────
-        m_int = hex_to_int(m_hex)
-        r = generate_blinding_factor(tpa_n)
-        m_prime = blind_message(m_int, r, tpa_e, tpa_n)
-        m_prime_hex = int_to_hex(m_prime)
-        _log("Phase 3 - 盲化選票", f"m'={m_prime_hex[:20]}...")
-
-        # ── Step 7：TPA 盲簽章 ───────────────────────────
-        resp = http_requests.post(
-            f"{TPA_URL}/api/blind_sign",
-            json={"m_prime_hex": m_prime_hex},
-            timeout=10,
-        )
-        sign_result = resp.json()
-        if sign_result.get('status') != 'success':
-            if sign_result.get('code') == 'DEADLINE_EXCEEDED':
-                raise Exception(f"投票已截止（TPA 拒絕盲簽章）：{sign_result.get('message', '')}")
-            raise Exception(f"盲簽章失敗：{sign_result.get('message', '')}")
-        S_hex = sign_result['S_hex']
-        _log("Phase 3 - TPA 盲簽章", f"S={S_hex[:20]}...")
-
-        # ── Step 8：去盲化，取得 S' ──────────────────────
-        S_int = hex_to_int(S_hex)
-        r_inv = pow(r, -1, tpa_n)
-        S_prime_int = (S_int * r_inv) % tpa_n
-        S_prime_hex = int_to_hex(S_prime_int)
-
-        if not verify_blind_signature(S_prime_int, tpa_e, tpa_n, m_int):
-            raise Exception("盲簽章數學驗證失敗")
-        _log("Phase 3 - 去盲化 + 驗證", f"S'={S_prime_hex[:20]}... 驗證通過")
-
-        # ── Step 9：封裝數位信封 ─────────────────────────
-        envelope = encapsulate_vote(
-            voter_id=VOTER_ID,
-            sn=sn,
-            vote_content=candidate,
-            s_prime_hex=S_prime_hex,
-            m_hex=m_hex,
-            cc_public_key_pem=cc_pub_pem,
-            ta_public_key_pem=ta_pub_pem,
-        )
-        _log("Phase 3 - 封裝數位信封", "信封已封裝")
-
-        # ── Step 10：傳送信封至 CC ───────────────────────
-        resp = http_requests.post(
-            f"{CC_URL}/api/receive_envelope",
-            json=envelope,
-            timeout=10,
-        )
-        cc_result = resp.json()
-        if cc_result.get('status') != 'success':
-            if cc_result.get('code') == 'DEADLINE_EXCEEDED':
-                raise Exception(f"投票已截止（CC 拒絕信封）：{cc_result.get('message', '')}")
-            raise Exception(f"CC 接收失敗：{cc_result.get('message', '')}")
-        _log("Phase 3 - 傳送至 CC", "信封已送達 CC")
-
-        # ── 儲存投票記錄（Unix timestamp）────────────────
-        db.execute(
-            "INSERT INTO vote_record (voter_id, sn, vote, m_hex, s_prime_hex, voted_at, status) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (VOTER_ID, sn, candidate, m_hex, S_prime_hex, now, 'submitted'),
-        )
-        # 日誌使用人類可讀格式
-        print(f"[Voter:{VOTER_ID}] 投票成功（Unix ts：{now}  →  {ts_to_human(now)}）")
-
-        session['flash_msg']  = f"投票成功！您的選票已加密傳送至計票中心。請保存您的 m_hex 以便日後驗證。"
-        session['flash_type'] = 'success'
-        return redirect('/')
-
-    except Exception as exc:
-        _log("投票流程錯誤", str(exc), status='error')
-        session['flash_msg']  = f"投票失敗：{exc}"
-        session['flash_type'] = 'error'
-        return redirect('/')
-
-
-@app.route('/status')
-def status():
-    vote_record = db.fetchone(
-        "SELECT * FROM vote_record WHERE voter_id = ? ORDER BY id DESC LIMIT 1",
-        (VOTER_ID,)
-    )
-    logs = db.fetchall(
-        "SELECT step, message, status, logged_at FROM vote_log ORDER BY id DESC LIMIT 30"
-    )
-    return render_template_string(
-        _STATUS_HTML,
-        voter_id=VOTER_ID,
-        vote_record=vote_record,
-        logs=logs,
-        bb_url=BB_URL,
-    )
-
+    for r in rows:
+        r['voted_at_str'] = ts_to_human(r['voted_at'])
+    return jsonify({"status": "success", "receipts": rows, "count": len(rows)}), 200
 
 @app.route('/api/vote_status', methods=['GET'])
 def api_vote_status():
-    """[GET] 回傳投票狀態 JSON（Unix timestamp）"""
-    vote_record = db.fetchone(
-        "SELECT voter_id, sn, vote, m_hex, voted_at, status FROM vote_record WHERE voter_id = ? ORDER BY id DESC LIMIT 1",
-        (VOTER_ID,)
+    voter_id = request.args.get('voter_id', '')
+    if not voter_id:
+        return jsonify({"status": "not_voted"}), 200
+    rec = db.fetchone(
+        "SELECT voter_id, sn, vote, m_hex, voted_at FROM vote_record WHERE voter_id = ? ORDER BY id DESC LIMIT 1",
+        (voter_id,)
     )
-    if vote_record:
-        return jsonify({
-            "status":      "voted",
-            "voter_id":    vote_record['voter_id'],
-            "vote":        vote_record['vote'],
-            "m_hex":       vote_record['m_hex'],
-            # Unix timestamp（後端標準）
-            "voted_at":    vote_record['voted_at'],
-            # 人類可讀（僅供 UI/日誌）
-            "voted_at_str": ts_to_human(vote_record['voted_at']),
-        }), 200
+    if rec:
+        return jsonify({"status": "voted", **rec, "voted_at_str": ts_to_human(rec['voted_at'])}), 200
+    return jsonify({"status": "not_voted", "voter_id": voter_id}), 200
+
+@app.route('/api/save_vote_receipt', methods=['POST'])
+def api_save_vote_receipt():
+    """瀏覽器完成投票流程後，上傳回執儲存於 DB 供查詢。"""
+    d = request.get_json() or {}
+    required = ['voter_id', 'sn', 'vote', 'm_hex', 's_prime_hex']
+    if not all(k in d for k in required):
+        return jsonify({"status": "error", "message": "缺少必要欄位"}), 400
+    now = int(time.time())
+    try:
+        db.execute(
+            "INSERT OR IGNORE INTO vote_record (voter_id, sn, vote, m_hex, s_prime_hex, voted_at) VALUES (?,?,?,?,?,?)",
+            (d['voter_id'], d['sn'], d['vote'], d['m_hex'], d['s_prime_hex'], now),
+        )
+        print(f"[Voter:{d['voter_id']}] 投票回執已儲存  sn={d['sn']}  m={d['m_hex'][:16]}...")
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+    return jsonify({"status": "success"}), 200
+
+# ── 共用 JS（瀏覽器端密碼學工具集） ─────────────────────────────
+
+_CRYPTO_JS = r"""
+/* =====================================================================
+   voter-crypto.js  —  瀏覽器端密碼學工具集
+   - Web Crypto API：RSA-2048 keygen / RSA-PSS sign / RSA-OAEP encrypt / AES-GCM
+   - BigInt：modpow, modinv, FDH (MGF1-SHA256), 盲化 / 去盲化
+   - IndexedDB：keypair + cert 本地持久化
+   ===================================================================== */
+
+/* ---------- IndexedDB helpers ---------- */
+function _idb(mode) {
+  return new Promise((res, rej) => {
+    const req = indexedDB.open('voter-crypto', 1);
+    req.onupgradeneeded = e => e.target.result.createObjectStore('kv');
+    req.onsuccess = e => res([e.target.result, mode]);
+    req.onerror  = () => rej(req.error);
+  });
+}
+async function idbSave(entries) {
+  const [db] = await _idb('readwrite');
+  return new Promise((res, rej) => {
+    const tx = db.transaction('kv', 'readwrite');
+    const s  = tx.objectStore('kv');
+    for (const [k, v] of Object.entries(entries)) s.put(v, k);
+    tx.oncomplete = res;
+    tx.onerror    = () => rej(tx.error);
+  });
+}
+async function idbLoad(key) {
+  const [db] = await _idb('readonly');
+  return new Promise((res, rej) => {
+    const tx = db.transaction('kv', 'readonly');
+    const r  = tx.objectStore('kv').get(key);
+    r.onsuccess = () => res(r.result ?? null);
+    r.onerror   = () => rej(r.error);
+  });
+}
+async function idbHasCert() {
+  return !!(await idbLoad('certPem'));
+}
+
+/* ---------- PEM / DER / Bytes ---------- */
+function pemToDer(pem) {
+  const b64 = pem.replace(/-----[^-]+-----/g, '').replace(/\s/g, '');
+  const str  = atob(b64);
+  return Uint8Array.from(str, c => c.charCodeAt(0)).buffer;
+}
+function derToPem(der, type) {
+  const b64 = btoa(String.fromCharCode(...new Uint8Array(der)));
+  return `-----BEGIN ${type}-----\n${b64.match(/.{1,64}/g).join('\n')}\n-----END ${type}-----`;
+}
+function hexToBytes(hex) {
+  const h = hex.startsWith('0x') || hex.startsWith('0X') ? hex.slice(2) : hex;
+  const padded = h.length % 2 ? '0' + h : h;
+  return new Uint8Array(padded.match(/.{2}/g).map(b => parseInt(b, 16)));
+}
+function bytesToHex(bytes) {
+  return Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+function hexToBigInt(hex) {
+  return BigInt(hex.startsWith('0x') || hex.startsWith('0X') ? hex : '0x' + hex);
+}
+function b64encode(bytes) {
+  return btoa(String.fromCharCode(...bytes));
+}
+
+/* ---------- SHA-256 ---------- */
+async function sha256Bytes(input) {
+  const data = typeof input === 'string' ? new TextEncoder().encode(input) : input;
+  return new Uint8Array(await crypto.subtle.digest('SHA-256', data));
+}
+async function sha256Hex(input) {
+  return bytesToHex(await sha256Bytes(input));
+}
+
+/* ---------- RSA keypair ---------- */
+async function generateRSAKeypair() {
+  return crypto.subtle.generateKey(
+    { name: 'RSA-PSS', modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]), hash: 'SHA-256' },
+    true, ['sign', 'verify']
+  );
+}
+async function exportPublicKeyPEM(publicKey) {
+  return derToPem(await crypto.subtle.exportKey('spki', publicKey), 'PUBLIC KEY');
+}
+
+/* ---------- RSA-PSS 簽章 (saltLength=32 = hLen) ---------- */
+async function rsaPssSign(privateKey, data) {
+  const bytes = typeof data === 'string' ? new TextEncoder().encode(data) : data;
+  const sig   = await crypto.subtle.sign({ name: 'RSA-PSS', saltLength: 32 }, privateKey, bytes);
+  return b64encode(new Uint8Array(sig));
+}
+
+/* ---------- RSA-OAEP 加密 ---------- */
+async function rsaOaepEncrypt(publicKeyPEM, plaintext) {
+  const key  = await crypto.subtle.importKey('spki', pemToDer(publicKeyPEM), { name: 'RSA-OAEP', hash: 'SHA-256' }, false, ['encrypt']);
+  const data = plaintext instanceof Uint8Array ? plaintext : new TextEncoder().encode(plaintext);
+  return b64encode(new Uint8Array(await crypto.subtle.encrypt({ name: 'RSA-OAEP' }, key, data)));
+}
+
+/* ---------- AES-256-GCM 加密 ---------- */
+async function aesGcmEncrypt(plaintext, aadStr) {
+  const k    = crypto.getRandomValues(new Uint8Array(32));
+  const iv   = crypto.getRandomValues(new Uint8Array(12));
+  const aad  = new TextEncoder().encode(aadStr);
+  const pt   = typeof plaintext === 'string' ? new TextEncoder().encode(plaintext) : plaintext;
+  const sk   = await crypto.subtle.importKey('raw', k, 'AES-GCM', true, ['encrypt']);
+  const ct   = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv, additionalData: aad }, sk, pt));
+  return {
+    k,
+    iv:     b64encode(iv),
+    c_data: b64encode(ct.slice(0, -16)),
+    tag:    b64encode(ct.slice(-16)),
+    aad:    b64encode(aad),
+  };
+}
+
+/* ---------- BigInt 工具 ---------- */
+function modpow(base, exp, mod) {
+  let r = 1n; base %= mod;
+  for (; exp > 0n; exp >>= 1n) {
+    if (exp & 1n) r = r * base % mod;
+    base = base * base % mod;
+  }
+  return r;
+}
+function modinv(a, m) {
+  let [r0, r1, s0, s1] = [a, m, 1n, 0n];
+  while (r1 !== 0n) {
+    const q = r0 / r1;
+    [r0, r1] = [r1, r0 - q * r1];
+    [s0, s1] = [s1, s0 - q * s1];
+  }
+  return ((s0 % m) + m) % m;
+}
+
+/* ---------- FDH (MGF1-SHA256)  ---------- */
+async function fdh(mBytes, nBits) {
+  const target = Math.ceil(nBits / 8);
+  const parts  = [];
+  let len = 0;
+  for (let i = 0; len < target; i++) {
+    const ctr = new Uint8Array(4);
+    new DataView(ctr.buffer).setUint32(0, i, false);
+    const h = await sha256Bytes(new Uint8Array([...mBytes, ...ctr]));
+    parts.push(h); len += 32;
+  }
+  const mask = new Uint8Array(parts.flat ? parts.flatMap(a => [...a]) : [].concat(...parts.map(a => [...a]))).slice(0, target);
+  const excess = 8 * target - nBits + 1;
+  if (excess > 0) mask[0] &= (0xFF >> excess);
+  return hexToBigInt(bytesToHex(mask));
+}
+
+/* ---------- 盲化 / 去盲化 ---------- */
+function generateBlindingFactor(n) {
+  const bytes = new Uint8Array(Math.ceil(n.toString(16).length / 2) + 4);
+  let r;
+  do {
+    crypto.getRandomValues(bytes);
+    r = hexToBigInt(bytesToHex(bytes)) % n;
+  } while (r <= 1n);
+  return r;
+}
+function blindMessage(mu, r, e, n)   { return (mu * modpow(r, e, n)) % n; }
+function unblindSignature(S, r, n)   { return (S  * modinv(r, n))   % n; }
+
+/* ---------- 認證封包（格式須與 Python shared/auth_component.py 一致） ---------- */
+async function createAuthPacket(senderId, receiverId, privateKey, certPem, nonceEcho) {
+  const nonce   = bytesToHex(crypto.getRandomValues(new Uint8Array(16)));
+  const ts      = Math.floor(Date.now() / 1000);
+  const payload = { cert_pem: certPem, nonce, receiver_id: receiverId, sender_id: senderId, timestamp: ts };
+  if (nonceEcho) payload.nonce_echo = nonceEcho;
+  /* sort_keys=True + separators=(',',':') — 與 Python _serialize_payload 完全一致 */
+  const sorted  = Object.fromEntries(Object.keys(payload).sort().map(k => [k, payload[k]]));
+  const jsonStr = JSON.stringify(sorted);          // compact，無空格，自然排序後已一致
+  const sig     = await rsaPssSign(privateKey, jsonStr);
+  return { payload, signature: sig };
+}
+"""
+
+@app.route('/voter-crypto.js')
+def serve_crypto_js():
+    return _CRYPTO_JS, 200, {'Content-Type': 'application/javascript; charset=utf-8'}
+
+# ── HTML 模板 ──────────────────────────────────────────────────
+
+_BASE_STYLE = """
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+  tailwind.config = { darkMode: 'class', theme: { extend: { colors: { msblue:'#0078D4', msblueHover:'#0060A8', deepblack:'#050505', cardblack:'#111111' } } } };
+  if (localStorage.getItem('theme')==='dark'||(!('theme' in localStorage)&&window.matchMedia('(prefers-color-scheme: dark)').matches)) document.documentElement.classList.add('dark');
+  function toggleTheme() { document.documentElement.classList.toggle('dark'); localStorage.setItem('theme', document.documentElement.classList.contains('dark')?'dark':'light'); }
+</script>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>body{font-family:'Noto Sans',sans-serif;}</style>
+<script src="/voter-crypto.js"></script>
+"""
+
+# ─────────────────────────────────────────
+# 1. 身分綁定頁
+# ─────────────────────────────────────────
+_REGISTER_HTML = """<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>選民身分綁定</title>""" + _BASE_STYLE + """
+</head>
+<body class="bg-gray-50 dark:bg-deepblack text-gray-800 dark:text-gray-100 min-h-screen flex items-center justify-center p-4">
+<div class="w-full max-w-md">
+
+  <div class="flex items-center gap-3 mb-8">
+    <div class="w-10 h-10 rounded-xl bg-white/70 dark:bg-cardblack border border-gray-200 dark:border-gray-800 flex items-center justify-center shadow-sm">
+      <svg class="w-5 h-5 text-msblue" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"/></svg>
+    </div>
+    <div>
+      <h1 class="text-xl font-semibold text-gray-900 dark:text-white">身分綁定 — Phase 0</h1>
+      <p class="text-xs text-gray-500">金鑰在您的瀏覽器本地生成，私鑰永不上傳</p>
+    </div>
+    <button onclick="toggleTheme()" class="ml-auto p-2 rounded-lg bg-white/70 dark:bg-cardblack border border-gray-200 dark:border-gray-800 text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-900">
+      <svg class="w-4 h-4 hidden dark:block" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z"/></svg>
+      <svg class="w-4 h-4 block dark:hidden" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z"/></svg>
+    </button>
+  </div>
+
+  <div class="bg-white/70 dark:bg-cardblack/80 backdrop-blur-lg rounded-2xl border border-gray-200 dark:border-gray-800 shadow-md p-7">
+    <div class="space-y-5">
+      <div>
+        <label class="block text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider mb-2">學號 / Voter ID</label>
+        <input id="voterId" type="text" value="{{ default_voter_id }}" placeholder="請輸入您的學號"
+          class="w-full px-4 py-3 rounded-xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-[#1a1a1a] text-sm font-mono text-gray-800 dark:text-gray-200 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-msblue/50 focus:border-msblue transition" spellcheck="false">
+      </div>
+      <div>
+        <label class="block text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider mb-2">一次性密碼 (OTP)</label>
+        <input id="otp" type="text" placeholder="請輸入教務處信件中的 OTP"
+          class="w-full px-4 py-3 rounded-xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-[#1a1a1a] text-sm font-mono text-gray-800 dark:text-gray-200 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-msblue/50 focus:border-msblue transition" spellcheck="false" autocomplete="off">
+      </div>
+      <button id="regBtn" onclick="doRegister()"
+        class="w-full py-3.5 bg-msblue hover:bg-msblueHover rounded-xl text-white font-medium text-sm transition shadow-md flex justify-center items-center gap-2">
+        <svg id="regIcon" class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"/></svg>
+        <span id="regText">生成金鑰 · 建立 PoP · 申請憑證</span>
+      </button>
+    </div>
+    <div id="regStatus" class="mt-4 text-sm hidden p-3 rounded-lg"></div>
+  </div>
+
+  <!-- 步驟說明 -->
+  <div class="mt-5 bg-white/50 dark:bg-cardblack/50 rounded-xl border border-gray-200 dark:border-gray-800 p-4 text-xs text-gray-500 dark:text-gray-400 space-y-1.5">
+    <p class="font-semibold text-gray-700 dark:text-gray-300 mb-2">瀏覽器本地執行步驟：</p>
+    <p>① 在您的瀏覽器生成 RSA-2048 金鑰對（私鑰永不離開此裝置）</p>
+    <p>② 用私鑰對 <code class="font-mono bg-gray-100 dark:bg-gray-800 px-1 rounded">REGISTER|學號|時間戳</code> 簽章（PoP 持有權證明）</p>
+    <p>③ 將公鑰 + OTP + PoP 送至 CA，驗證通過後取得憑證</p>
+    <p>④ 憑證與金鑰對儲存於 IndexedDB（僅此瀏覽器可存取）</p>
+  </div>
+</div>
+
+<script>
+// 若為新一輪自動導向，顯示提示
+(function() {
+  const reason = new URLSearchParams(location.search).get('reason');
+  if (reason === 'new_round') {
+    const el = document.getElementById('regStatus');
+    el.classList.remove('hidden');
+    el.className = 'mt-4 text-sm p-3 rounded-lg text-blue-700 dark:text-blue-400 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800/50';
+    el.textContent = 'ℹ 系統已進入新一輪投票，請重新輸入學號與新的 OTP 完成身分綁定。';
+  }
+})();
+
+async function doRegister() {
+  const voterId = document.getElementById('voterId').value.trim();
+  const otp     = document.getElementById('otp').value.trim();
+  const btn     = document.getElementById('regBtn');
+  const icon    = document.getElementById('regIcon');
+  const text    = document.getElementById('regText');
+  const status  = document.getElementById('regStatus');
+
+  if (!voterId) { showStatus(status, '請輸入學號', 'error'); return; }
+  if (!otp)     { showStatus(status, '請輸入 OTP', 'error'); return; }
+
+  btn.disabled = true;
+  icon.outerHTML = '<svg id="regIcon" class="w-4 h-4 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>';
+
+  try {
+    showStatus(status, '① 生成 RSA-2048 金鑰對...', 'info');
+    const keypair = await generateRSAKeypair();
+    const pubPEM  = await exportPublicKeyPEM(keypair.publicKey);
+    const privJwk = await crypto.subtle.exportKey('jwk', keypair.privateKey);
+
+    showStatus(status, '② 建立 PoP 持有權簽章...', 'info');
+    const ts       = Math.floor(Date.now() / 1000);
+    const challenge = `REGISTER|${voterId}|${ts}`;
+    const popSig   = await rsaPssSign(keypair.privateKey, challenge);
+
+    showStatus(status, '③ 向 CA 申請憑證...', 'info');
+    const resp = await fetch('/api/proxy/ca/issue_cert', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ entity_id: voterId, public_key: pubPEM, otp, timestamp: ts, pop_signature: popSig }),
+    });
+    const data = await resp.json();
+    if (data.status !== 'success') {
+      const codeMap = {
+        ENTITY_NOT_REGISTERED: '此學號尚未在教務處名冊中登記，請聯繫教務處。',
+        ALREADY_REGISTERED:    '此學號已完成過身分綁定。',
+        OTP_INVALID:           'OTP 不正確，請確認信件內容。',
+        TIMESTAMP_OUT_OF_RANGE:'裝置時間偏差過大，請校正後重試。',
+        POP_INVALID:           'PoP 驗證失敗，請重新整理頁面後再試。',
+      };
+      throw new Error(codeMap[data.code] || data.message || data.code);
+    }
+
+    showStatus(status, '④ 儲存憑證至 IndexedDB...', 'info');
+    await idbSave({ privJwk, pubPEM, certPem: data.certificate, voterId });
+
+    showStatus(status, `✓ 身分綁定成功！憑證已安全儲存於本裝置。`, 'success');
+    document.getElementById('regText').textContent = '✓ 完成，跳轉至投票頁...';
+    setTimeout(() => location.href = '/', 1500);
+
+  } catch (e) {
+    showStatus(status, `✗ ${e.message}`, 'error');
+    document.getElementById('regBtn').disabled = false;
+    document.getElementById('regText').textContent = '生成金鑰 · 建立 PoP · 申請憑證';
+  }
+}
+
+function showStatus(el, msg, type) {
+  el.classList.remove('hidden');
+  const cls = { success:'text-green-700 dark:text-green-400 bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800/50',
+                error:  'text-red-700 dark:text-red-400 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800/50',
+                info:   'text-blue-700 dark:text-blue-400 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800/50' };
+  el.className = `mt-4 text-sm p-3 rounded-lg ${cls[type]}`;
+  el.textContent = msg;
+}
+</script>
+</body>
+</html>"""
+
+# ─────────────────────────────────────────
+# 2. 投票頁
+# ─────────────────────────────────────────
+_VOTE_HTML = """<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>電子投票系統</title>""" + _BASE_STYLE + """
+</head>
+<body class="bg-gray-50 dark:bg-deepblack text-gray-800 dark:text-gray-100 min-h-screen transition-colors duration-300">
+<div class="max-w-2xl mx-auto px-4 py-10">
+
+  <!-- 頁首 -->
+  <div class="flex items-center gap-3 mb-8">
+    <div class="w-10 h-10 rounded-xl bg-white/70 dark:bg-cardblack border border-gray-200 dark:border-gray-800 flex items-center justify-center shadow-sm">
+      <svg class="w-5 h-5 text-msblue" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+    </div>
+    <div>
+      <h1 class="text-xl font-semibold text-gray-900 dark:text-white">電子投票系統</h1>
+      <p class="text-xs text-gray-500 dark:text-gray-400">選民：<span id="voterIdDisplay" class="font-mono">載入中...</span></p>
+    </div>
+    <div class="ml-auto flex gap-2">
+      <a href="/status" class="text-xs px-3 py-1.5 rounded-lg bg-white/70 dark:bg-cardblack border border-gray-200 dark:border-gray-800 text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-900 transition">投票記錄</a>
+      <button onclick="doLogout()" class="text-xs px-3 py-1.5 rounded-lg bg-white/70 dark:bg-cardblack border border-gray-200 dark:border-gray-800 text-gray-500 hover:bg-red-50 dark:hover:bg-red-900/20 hover:text-red-600 dark:hover:text-red-400 transition">重新身分綁定</button>
+      <button onclick="toggleTheme()" class="p-2 rounded-lg bg-white/70 dark:bg-cardblack border border-gray-200 dark:border-gray-800 text-gray-500">
+        <svg class="w-4 h-4 hidden dark:block" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z"/></svg>
+        <svg class="w-4 h-4 block dark:hidden" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z"/></svg>
+      </button>
+    </div>
+  </div>
+
+  <!-- 截止時間 -->
+  <div id="deadlineCard" class="mb-6 hidden bg-white/70 dark:bg-cardblack/80 rounded-xl border border-gray-200 dark:border-gray-800 shadow-md p-4 text-sm text-center text-gray-600 dark:text-gray-400">
+    截止：<span id="deadlineStr" class="font-mono font-medium text-msblue"></span>
+  </div>
+
+  <!-- 已投票提示 -->
+  <div id="votedBanner" class="hidden mb-6 bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800/50 rounded-xl p-5 text-center">
+    <p class="text-green-700 dark:text-green-400 font-semibold mb-1">您已完成投票</p>
+    <p class="text-xs text-gray-500 dark:text-gray-400">m_hex：<span id="votedMhex" class="font-mono break-all"></span></p>
+    <a href="/status" class="mt-3 inline-block text-xs text-msblue hover:underline">查看完整回執 →</a>
+  </div>
+
+  <!-- 投票表單 -->
+  <div id="voteForm" class="bg-white/70 dark:bg-cardblack/80 backdrop-blur-lg rounded-2xl border border-gray-200 dark:border-gray-800 shadow-md p-7">
+    <h2 class="font-semibold text-gray-800 dark:text-gray-200 mb-5 text-sm uppercase tracking-wider">請選擇候選人</h2>
+    <div id="candidateList" class="space-y-3 mb-6">
+      <p class="text-gray-400 text-sm">載入候選人中...</p>
+    </div>
+    <button id="voteBtn" onclick="doVote()" disabled
+      class="w-full py-3.5 bg-msblue hover:bg-msblueHover disabled:opacity-50 disabled:cursor-not-allowed rounded-xl text-white font-medium text-sm transition shadow-md flex justify-center items-center gap-2">
+      <svg id="voteIcon" class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"/></svg>
+      <span id="voteText">確認投票</span>
+    </button>
+    <!-- 進度步驟 -->
+    <div id="voteProgress" class="mt-4 space-y-1.5 hidden text-xs font-mono text-gray-500 dark:text-gray-400"></div>
+  </div>
+
+  <!-- 成功提示 -->
+  <div id="successCard" class="hidden mt-6 bg-green-50 dark:bg-green-900/10 border border-green-200 dark:border-green-800/50 rounded-xl p-6">
+    <p class="text-green-700 dark:text-green-400 font-semibold text-base mb-3">投票成功</p>
+    <p class="text-xs text-gray-500 mb-1">請保存您的 m_hex 以便日後在 BB 驗證：</p>
+    <code id="successMhex" class="block bg-gray-100 dark:bg-gray-800/60 rounded-lg p-3 text-xs font-mono break-all text-gray-700 dark:text-gray-300 mt-2"></code>
+    <a href="/status" class="mt-4 inline-block text-xs text-msblue hover:underline">查看完整回執 →</a>
+  </div>
+
+  <!-- 錯誤提示 -->
+  <div id="errorCard" class="hidden mt-4 bg-red-50 dark:bg-red-900/10 border border-red-200 dark:border-red-800/50 rounded-xl p-4 text-sm text-red-700 dark:text-red-400"></div>
+</div>
+
+<script>
+let _selectedCandidate = null;
+let _privateKey = null, _certPem = null, _voterId = null;
+
+async function init() {
+  // 1. 確認身分綁定
+  const certPem = await idbLoad('certPem');
+  if (!certPem) { location.href = '/register'; return; }
+  _certPem  = certPem;
+  _voterId  = await idbLoad('voterId');
+  const jwk = await idbLoad('privJwk');
+  _privateKey = await crypto.subtle.importKey('jwk', jwk, { name:'RSA-PSS', hash:'SHA-256' }, false, ['sign']);
+  document.getElementById('voterIdDisplay').textContent = _voterId || '—';
+
+  // 1.5 自動偵測新一輪重置（CA 名冊已清除 → 自動清除舊憑證並導向重新綁定）
+  try {
+    const caResp = await fetch(`/api/proxy/ca/voter_status?voter_id=${encodeURIComponent(_voterId)}`);
+    const caData = await caResp.json();
+    if (caData.registered === false) {
+      await new Promise(res => {
+        const req = indexedDB.deleteDatabase('voter-crypto');
+        req.onsuccess = res; req.onerror = res;
+      });
+      location.href = '/register?reason=new_round';
+      return;
+    }
+  } catch(_) {}
+
+  // 2. 確認未重複投票
+  const statusResp = await fetch(`/api/vote_status?voter_id=${encodeURIComponent(_voterId)}`);
+  const statusData = await statusResp.json();
+  if (statusData.status === 'voted') {
+    document.getElementById('votedBanner').classList.remove('hidden');
+    document.getElementById('votedMhex').textContent = statusData.m_hex;
+    document.getElementById('voteForm').classList.add('hidden');
+    return;
+  }
+
+  // 3. 載入截止時間
+  try {
+    const deadResp = await fetch('/api/proxy/ta/deadline');
+    const dead = await deadResp.json();
+    if (dead.status === 'success' && dead.deadline_str) {
+      document.getElementById('deadlineCard').classList.remove('hidden');
+      document.getElementById('deadlineStr').textContent = dead.deadline_str;
+    }
+  } catch(_) {}
+
+  // 4. 載入候選人
+  try {
+    const candResp = await fetch('/api/candidates');
+    const candData = await candResp.json();
+    const list = document.getElementById('candidateList');
+    list.innerHTML = '';
+    if (!candData.candidates || candData.candidates.length === 0) {
+      list.innerHTML = '<p class="text-amber-500 text-sm">⚠ 目前無候選人，請聯繫管理員確認 config.json。</p>';
+      return;
+    }
+    candData.candidates.forEach(c => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.setAttribute('data-candidate', c);
+      btn.onclick = () => selectCandidate(c);
+      btn.className = 'w-full text-left px-5 py-3.5 rounded-xl border-2 border-gray-200 dark:border-gray-700 hover:border-msblue hover:bg-blue-50/50 dark:hover:bg-blue-900/10 transition font-medium text-gray-800 dark:text-gray-200 text-sm';
+      btn.id = `cand-${c}`;
+      btn.textContent = c;
+      list.appendChild(btn);
+    });
+  } catch(e) {
+    document.getElementById('candidateList').innerHTML =
+      `<p class="text-red-500 text-sm">✗ 候選人載入失敗：${e.message}<br>請確認選民端服務是否正常運作。</p>`;
+  }
+}
+
+function selectCandidate(c) {
+  _selectedCandidate = c;
+  document.querySelectorAll('[data-candidate]').forEach(el => {
+    el.classList.toggle('border-msblue', el.getAttribute('data-candidate') === c);
+    el.classList.toggle('bg-blue-50/50', el.getAttribute('data-candidate') === c);
+    el.classList.toggle('dark:bg-blue-900/10', el.getAttribute('data-candidate') === c);
+  });
+  document.getElementById('voteBtn').disabled = false;
+}
+
+function addStep(msg, ok) {
+  const div = document.getElementById('voteProgress');
+  div.classList.remove('hidden');
+  const p = document.createElement('p');
+  p.textContent = (ok === true ? '✓ ' : ok === false ? '✗ ' : '⋯ ') + msg;
+  p.className = ok === true ? 'text-green-600 dark:text-green-400' : ok === false ? 'text-red-500' : 'text-blue-500';
+  div.appendChild(p);
+  div.scrollTop = div.scrollHeight;
+}
+
+async function doVote() {
+  if (!_selectedCandidate) return;
+  const btn = document.getElementById('voteBtn');
+  btn.disabled = true;
+  document.getElementById('voteText').textContent = '處理中...';
+  document.getElementById('voteProgress').innerHTML = '';
+  document.getElementById('voteProgress').classList.remove('hidden');
+  document.getElementById('errorCard').classList.add('hidden');
+  document.getElementById('successCard').classList.add('hidden');
+
+  try {
+    const candidate = _selectedCandidate;
+
+    // Step 1: 取得公鑰
+    addStep('取得 TPA / CC / TA 公鑰...');
+    const [tpaR, ccR, taR] = await Promise.all([
+      fetch('/api/proxy/tpa/public_key').then(r=>r.json()),
+      fetch('/api/proxy/cc/public_key').then(r=>r.json()),
+      fetch('/api/proxy/ta/public_key').then(r=>r.json()),
+    ]);
+    if (tpaR.status !== 'success') throw new Error('無法取得 TPA 公鑰：' + (tpaR.message || ''));
+    const tpa_e = hexToBigInt(tpaR.e), tpa_n = hexToBigInt(tpaR.n);
+    const cc_pub_pem = ccR.public_key_pem, ta_pub_pem = taR.public_key_pem;
+    addStep('公鑰取得完成', true);
+
+    // Step 2: TPA 身分認證
+    addStep('向 TPA 進行雙向認證...');
+    const authPkt = await createAuthPacket(_voterId, 'TPA', _privateKey, _certPem);
+    const authResp = await fetch('/api/proxy/tpa/auth', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ auth_packet: authPkt, voter_cert_pem: _certPem }),
+    });
+    const authData = await authResp.json();
+    if (authData.status !== 'success') throw new Error('TPA 認證失敗：' + (authData.message || authData.code || ''));
+    addStep('TPA 認證成功', true);
+
+    // Step 3: 計算選票雜湊 m（FDH 預處理）
+    addStep('計算選票雜湊值...');
+    const sn         = 'SN' + Date.now() + (_voterId.slice(-3) || '000');
+    const innerHash  = await sha256Hex(_voterId + '|' + sn + '|' + candidate);
+    const outerHash  = await sha256Hex(innerHash + '|' + candidate);
+    const m_hex      = outerHash;                   // 64-char hex，不含 0x
+    const m_bytes    = hexToBytes(m_hex);            // 32 bytes
+    addStep(`m = ${m_hex.slice(0,16)}...`, true);
+
+    // Step 4: FDH + 盲化
+    addStep('FDH 擴展 + 盲化選票...');
+    const nBits   = tpa_n.toString(2).length;
+    const mu      = await fdh(m_bytes, nBits);
+    const r       = generateBlindingFactor(tpa_n);
+    const m_prime = blindMessage(mu, r, tpa_e, tpa_n);
+    const m_prime_hex = '0x' + m_prime.toString(16);
+    addStep('盲化完成', true);
+
+    // Step 5: TPA 盲簽章
+    addStep('向 TPA 請求盲簽章...');
+    const signResp = await fetch('/api/proxy/tpa/blind_sign', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ m_prime_hex }),
+    });
+    const signData = await signResp.json();
+    if (signData.status !== 'success') throw new Error('盲簽章失敗：' + (signData.message || signData.code || ''));
+    const S_int   = hexToBigInt(signData.S_hex);
+    addStep('盲簽章取得', true);
+
+    // Step 6: 去盲化 + 驗證
+    addStep('去盲化 + 本地數學驗證...');
+    const S_prime   = unblindSignature(S_int, r, tpa_n);
+    const mu_check  = await fdh(m_bytes, nBits);
+    if (modpow(S_prime, tpa_e, tpa_n) !== mu_check) throw new Error('盲簽章本地驗證失敗');
+    const s_prime_hex = '0x' + S_prime.toString(16);
+    addStep('盲簽章驗證通過', true);
+
+    // Step 7: 封裝數位信封
+    addStep('封裝 AES-GCM + RSA-OAEP 數位信封...');
+    const inner_enc_b64 = await rsaOaepEncrypt(ta_pub_pem, innerHash + '|' + candidate);
+    const aes_pt        = inner_enc_b64 + '|' + s_prime_hex + '|' + m_hex;
+    const aad_str       = 'voting-system-v2|' + _voterId + '|' + sn;
+    const { k, iv, c_data, tag, aad } = await aesGcmEncrypt(aes_pt, aad_str);
+    const c_key  = await rsaOaepEncrypt(cc_pub_pem, k);
+    const envelope = { c_data, iv, tag, aad, c_key, token_hash: '' };
+    addStep('信封封裝完成', true);
+
+    // Step 8: 傳送至 CC
+    addStep('傳送數位信封至計票中心...');
+    const ccResp = await fetch('/api/proxy/cc/receive_envelope', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(envelope),
+    });
+    const ccData = await ccResp.json();
+    if (ccData.status !== 'success') throw new Error('CC 拒絕信封：' + (ccData.message || ccData.code || ''));
+    addStep('CC 已接收信封', true);
+
+    // Step 9: 上傳回執
+    await fetch('/api/save_vote_receipt', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ voter_id: _voterId, sn, vote: candidate, m_hex, s_prime_hex }),
+    });
+
+    document.getElementById('successCard').classList.remove('hidden');
+    document.getElementById('successMhex').textContent = m_hex;
+    document.getElementById('voteForm').classList.add('opacity-50', 'pointer-events-none');
+
+  } catch(e) {
+    addStep(e.message, false);
+    const errCard = document.getElementById('errorCard');
+    errCard.textContent = e.message;
+    errCard.classList.remove('hidden');
+    btn.disabled = false;
+    document.getElementById('voteText').textContent = '確認投票';
+  }
+}
+
+async function doLogout() {
+  if (!confirm('確定要清除本裝置的身分綁定？\\n清除後需重新輸入學號和 OTP 才能投票。')) return;
+  await new Promise((res, rej) => {
+    const req = indexedDB.deleteDatabase('voter-crypto');
+    req.onsuccess = res;
+    req.onerror   = () => rej(req.error);
+  });
+  location.href = '/register';
+}
+
+init().catch(e => {
+  document.body.innerHTML = `<div class="p-8 text-red-600">初始化錯誤：${e.message}</div>`;
+});
+</script>
+</body>
+</html>"""
+
+# ─────────────────────────────────────────
+# 3. 狀態 / 回執頁
+# ─────────────────────────────────────────
+_STATUS_HTML = """<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>投票回執</title>""" + _BASE_STYLE + """
+</head>
+<body class="bg-gray-50 dark:bg-deepblack text-gray-800 dark:text-gray-100 min-h-screen p-6">
+<div class="max-w-xl mx-auto">
+  <div class="flex items-center gap-3 mb-8">
+    <a href="/" class="text-xs text-msblue hover:underline">← 返回</a>
+    <h1 class="text-xl font-semibold text-gray-900 dark:text-white">投票回執</h1>
+    <button onclick="toggleTheme()" class="ml-auto p-2 rounded-lg bg-white/70 dark:bg-cardblack border border-gray-200 dark:border-gray-800 text-gray-500">
+      <svg class="w-4 h-4 hidden dark:block" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z"/></svg>
+      <svg class="w-4 h-4 block dark:hidden" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z"/></svg>
+    </button>
+  </div>
+
+  {% if record %}
+  <div class="bg-white/70 dark:bg-cardblack/80 rounded-xl border border-gray-200 dark:border-gray-800 shadow-md p-6 space-y-4">
+    <div class="flex items-center gap-2 mb-2">
+      <span class="px-2.5 py-1 rounded-full text-xs font-medium bg-green-50 dark:bg-green-900/20 text-green-700 dark:text-green-400 border border-green-200 dark:border-green-800/50">已投票</span>
+      <span class="text-xs text-gray-400">{{ record.voted_at | ts_to_str }}</span>
+    </div>
+    {% for label, val in [('選民 ID', record.voter_id), ('SN', record.sn), ('投票對象', record.vote)] %}
+    <div>
+      <p class="text-xs text-gray-400 uppercase tracking-wider mb-1">{{ label }}</p>
+      <p class="font-mono text-sm text-gray-800 dark:text-gray-200">{{ val }}</p>
+    </div>
+    {% endfor %}
+    <div>
+      <p class="text-xs text-gray-400 uppercase tracking-wider mb-1">m_hex（可至 BB 驗證）</p>
+      <code class="block bg-gray-50 dark:bg-[#050505] rounded-lg p-3 text-xs font-mono break-all text-gray-700 dark:text-gray-300 border border-gray-100 dark:border-gray-800/80">{{ record.m_hex }}</code>
+    </div>
+  </div>
+  {% else %}
+  <div class="text-center py-16 text-gray-400">
+    <p>尚未找到投票記錄。</p>
+    <a href="/" class="mt-3 inline-block text-sm text-msblue hover:underline">前往投票</a>
+  </div>
+  {% endif %}
+</div>
+</body>
+</html>"""
+
+# ── 路由 ─────────────────────────────────────────────────────
+
+@app.route('/')
+def index():
+    return render_template_string(_VOTE_HTML)
+
+@app.route('/register')
+def register_page():
+    return render_template_string(_REGISTER_HTML, default_voter_id=VOTER_ID)
+
+@app.route('/status')
+def status():
+    voter_id = request.args.get('voter_id', '')
+    record   = None
+    if voter_id:
+        record = db.fetchone(
+            "SELECT voter_id, sn, vote, m_hex, voted_at FROM vote_record WHERE voter_id = ? ORDER BY id DESC LIMIT 1",
+            (voter_id,)
+        )
     else:
-        return jsonify({"status": "not_voted", "voter_id": VOTER_ID}), 200
+        record = db.fetchone("SELECT voter_id, sn, vote, m_hex, voted_at FROM vote_record ORDER BY id DESC LIMIT 1")
 
+    app.jinja_env.filters['ts_to_str'] = lambda ts: datetime.datetime.fromtimestamp(int(ts)).strftime('%Y-%m-%d %H:%M:%S') if ts else ''
+    return render_template_string(_STATUS_HTML, record=record)
 
-# ── Config Hot-Reload 端點 ────────────────────────────────────
 make_reload_endpoint(app)
-
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5005, debug=False)

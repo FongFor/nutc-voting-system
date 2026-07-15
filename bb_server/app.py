@@ -29,17 +29,24 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from flask import Flask, request, jsonify, render_template_string
 import requests as http_requests
 
-from shared.merkle_tree import MerkleTree
-from shared.format_utils import sha256_hex, ts_to_human
+from shared.merkle_tree import MerkleTree, h_leaf
+from shared.format_utils import sha256_hex, ts_to_human, b64_to_bytes
 from shared.db_utils import Database
 from shared.config_loader import make_reload_endpoint
+from shared.crypto_utils import verify_signature
+from shared.key_manager import load_or_fetch_ca_cert
+from cryptography import x509
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import padding
 
 # ============================================================
 # 常數設定
 # ============================================================
 SERVICE_DIR = os.path.dirname(os.path.abspath(__file__))
+KEYS_DIR    = os.path.join(SERVICE_DIR, "keys")
 DB_PATH     = os.path.join(SERVICE_DIR, "bb.db")
 CC_URL      = os.environ.get("CC_URL", "http://localhost:5003")
+CA_URL      = os.environ.get("CA_URL", "http://localhost:5001")
 
 # ============================================================
 # 資料庫初始化
@@ -61,6 +68,18 @@ db.execute("""
 """)
 
 print("[BB] 公告板初始化完成。")
+
+# ============================================================
+# 載入 CA 憑證（用於驗證 CC 憑證）
+# ============================================================
+try:
+    _ca_cert_pem = load_or_fetch_ca_cert(KEYS_DIR, CA_URL)
+    _ca_cert = x509.load_pem_x509_certificate(_ca_cert_pem.encode('utf-8'))
+    print("[BB] CA 憑證已載入")
+except Exception as ex:
+    print(f"[BB] 警告：無法取得 CA 憑證（{ex}）")
+    _ca_cert_pem = None
+    _ca_cert = None
 
 # ============================================================
 # Flask App
@@ -451,9 +470,17 @@ _VERIFY_HTML = """<!DOCTYPE html>
             <div class="absolute top-0 left-0 w-1 h-full bg-amber-500"></div>
             <div class="flex flex-col sm:flex-row sm:items-center gap-2 mb-2">
               <p class="text-[11px] text-gray-700 dark:text-gray-300 font-semibold tracking-wider">m_hex（選票包雜湊值）</p>
-              <span class="text-[10px] text-gray-400 dark:text-gray-600">— 驗證起點</span>
+              <span class="text-[10px] text-gray-400 dark:text-gray-600">— 驗證輸入</span>
             </div>
             <p class="font-mono text-[11px] text-gray-600 dark:text-gray-500 break-all">{{ result.m_hex }}</p>
+          </div>
+          <div class="bg-gray-50/80 dark:bg-[#0a0a0a] rounded-lg p-3.5 border border-gray-200 dark:border-gray-800 shadow-sm relative overflow-hidden">
+            <div class="absolute top-0 left-0 w-1 h-full bg-amber-400"></div>
+            <div class="flex flex-col sm:flex-row sm:items-center gap-2 mb-2">
+              <p class="text-[11px] text-gray-700 dark:text-gray-300 font-semibold tracking-wider">H_leaf(m)（Domain-Separated 葉節點雜湊）</p>
+              <span class="text-[10px] text-gray-400 dark:text-gray-600">— 樹中目標葉節點值 = H(0x00 ‖ m_hex)</span>
+            </div>
+            <p class="font-mono text-[11px] text-gray-600 dark:text-gray-500 break-all">{{ result.leaf_hash }}</p>
           </div>
           <div class="bg-gray-50/80 dark:bg-[#0a0a0a] rounded-lg p-3.5 border border-gray-200 dark:border-gray-800 shadow-sm relative overflow-hidden">
             <div class="absolute top-0 left-0 w-1 h-full bg-emerald-500"></div>
@@ -495,6 +522,7 @@ _VERIFY_HTML = """<!DOCTYPE html>
             <span class="flex items-center gap-1.5"><span class="legend-dot" style="background:#10b981;border:1.5px solid #059669;"></span><span class="text-gray-700 dark:text-gray-300 font-semibold">Sibling</span></span>
             <span class="flex items-center gap-1.5"><span class="legend-dot" style="background:#6366f1;border:1.5px solid #4f46e5;"></span><span class="text-gray-700 dark:text-gray-300 font-semibold">驗證路徑</span></span>
             <span class="flex items-center gap-1.5"><span class="legend-dot" style="background:#0ea5e9;border:1.5px solid #0284c7;"></span><span class="text-gray-700 dark:text-gray-300 font-semibold">Root</span></span>
+            <span class="flex items-center gap-1.5"><span class="legend-dot" style="background:transparent;border:1.5px dashed #9ca3af;"></span><span class="text-gray-500 dark:text-gray-500">虛擬佔位</span></span>
           </div>
           <div id="zoom-controls">
             <button type="button" class="zoom-btn" onclick="changeZoom(-0.15)" title="縮小"><svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20 12H4"></path></svg></button>
@@ -598,6 +626,13 @@ _VERIFY_HTML = """<!DOCTYPE html>
     return 'normal';
   }
 
+  function isVirtualNode(layerIdx, nodeIdx) {
+    for (const v of (treeData.virtual_nodes || [])) {
+      if (v.layer === layerIdx && v.index === nodeIdx) return true;
+    }
+    return false;
+  }
+
   function isPathEdge(fromLayer, fromIdx, toLayer, toIdx) {
     const parentIdx = Math.floor(fromIdx / 2);
     if (parentIdx !== toIdx) return false;
@@ -662,16 +697,17 @@ _VERIFY_HTML = """<!DOCTYPE html>
     const nodeMap = Array.from({length: totalLayers}, () => []);
 
     // ── 步驟 1：排列最底層的葉節點（從 X=0 開始，純相對座標）
-    // 只排列「真實」的葉節點（trueChildCount[0] 個）
-    const nRealLeaves = trueChildCount[0];
-    for (let ni = 0; ni < nRealLeaves; ni++) {
+    // 包含視覺補齊的虛擬佔位節點（layers[0].length 含補齊）
+    const nDisplayLeaves = layers[0].length;
+    for (let ni = 0; ni < nDisplayLeaves; ni++) {
       const hash = layers[0][ni];
       const role = getNodeRole(0, ni);
+      const virtual = isVirtualNode(0, ni);
       const nodeX = ni * (NODE_W + H_GAP);
       const node = {
         x: nodeX,
         y: canvasH - PADDING_Y - NODE_H,
-        w: NODE_W, h: NODE_H, hash, role,
+        w: NODE_W, h: NODE_H, hash, role, virtual,
         layerName: '葉節點層', layerIdx: 0, nodeIdx: ni,
       };
       nodePositions.push(node);
@@ -708,9 +744,10 @@ _VERIFY_HTML = """<!DOCTYPE html>
           nodeX = ni * (NODE_W + H_GAP);
         }
 
+        const virtual = isVirtualNode(li, ni);
         const node = {
           x: nodeX, y: layerY,
-          w: NODE_W, h: NODE_H, hash, role,
+          w: NODE_W, h: NODE_H, hash, role, virtual,
           layerName, layerIdx: li, nodeIdx: ni,
         };
         nodePositions.push(node);
@@ -815,35 +852,58 @@ _VERIFY_HTML = """<!DOCTYPE html>
         if (!child || !parent) continue;
 
         const onPath = isPathEdge(li, ci, li + 1, pi);
+        const isVirtEdge = child.virtual || parent.virtual;
 
         const startX = child.x + child.w / 2;
-        const startY = child.y;                   
+        const startY = child.y;
         const endX   = parent.x + parent.w / 2;
-        const endY   = parent.y + parent.h;       
-        const midY   = startY - (startY - endY) / 2; 
+        const endY   = parent.y + parent.h;
+        const midY   = startY - (startY - endY) / 2;
 
+        ctx.save();
+        if (isVirtEdge) ctx.setLineDash([4, 3]);
         ctx.beginPath();
         ctx.moveTo(startX, startY);
         ctx.bezierCurveTo(startX, midY, endX, midY, endX, endY);
-        
-        ctx.strokeStyle = onPath ? colors.edgePath : colors.edgeNormal;
-        // 路徑連線超級加粗，對比普通線條
-        ctx.lineWidth   = onPath ? 4.0 : 1.2;
-        ctx.globalAlpha = onPath ? 1.0 : 0.3;
+        ctx.strokeStyle = isVirtEdge ? colors.edgeNormal : (onPath ? colors.edgePath : colors.edgeNormal);
+        ctx.lineWidth   = onPath && !isVirtEdge ? 4.0 : 1.2;
+        ctx.globalAlpha = isVirtEdge ? 0.2 : (onPath ? 1.0 : 0.3);
         ctx.stroke();
+        ctx.restore();
         ctx.globalAlpha = 1.0;
       }
     }
 
     // ── 繪製高亮重點節點 ──
     for (const node of nodePositions) {
-      const c = colors[node.role] || colors.normal;
       const { x, y, w, h } = node;
+
+      if (node.virtual) {
+        // 虛擬佔位節點：虛線邊框 + 灰底 + 斜體標籤
+        const isDark = document.documentElement.classList.contains('dark');
+        roundRect(ctx, x, y, w, h, RADIUS);
+        ctx.fillStyle = isDark ? '#1a1a1a' : '#f9fafb';
+        ctx.fill();
+        roundRect(ctx, x, y, w, h, RADIUS);
+        ctx.save();
+        ctx.setLineDash([4, 3]);
+        ctx.strokeStyle = isDark ? '#4b5563' : '#9ca3af';
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+        ctx.restore();
+        ctx.fillStyle = isDark ? '#6b7280' : '#9ca3af';
+        ctx.font = 'italic 10px "Noto Sans", sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText('虛擬佔位', x + w / 2, y + h / 2);
+        continue;
+      }
+
+      const c = colors[node.role] || colors.normal;
 
       if (c.glow) {
         ctx.save();
         ctx.shadowColor = c.glow;
-        // 發光範圍擴大，讓重點更醒目
         ctx.shadowBlur  = 20;
         ctx.shadowOffsetX = 0;
         ctx.shadowOffsetY = 0;
@@ -859,7 +919,6 @@ _VERIFY_HTML = """<!DOCTYPE html>
 
       roundRect(ctx, x, y, w, h, RADIUS);
       ctx.strokeStyle = c.border;
-      // 增強高亮節點的邊框粗細
       ctx.lineWidth   = node.role !== 'normal' ? 3.0 : 1.5;
       ctx.stroke();
 
@@ -1013,16 +1072,23 @@ _VERIFY_HTML = """<!DOCTYPE html>
 
     if (hit) {
       const roleLabels = {
-        target:  '目標葉節點',
-        sibling: 'Sibling 節點',
-        path:    'Proof 路徑節點',
-        root:    'Root_official',
-        normal:  '一般節點',
+        target:  '目標葉節點（H_leaf = H(0x00 ‖ m_hex)）',
+        sibling: 'Sibling 節點（H_leaf 或 H_node）',
+        path:    'Proof 路徑節點（H_node = H(0x01 ‖ L ‖ R)）',
+        root:    'Root_official（H_node）',
+        normal:  '一般節點（Domain-Separated）',
       };
-      document.getElementById('panel-title').textContent = roleLabels[hit.role] || '節點';
-      document.getElementById('panel-hash').textContent  = hit.hash;
-      document.getElementById('panel-meta').textContent  =
-        `層級：${hit.layerName}　索引：${hit.nodeIdx}`;
+      if (hit.virtual) {
+        document.getElementById('panel-title').textContent = '虛擬佔位節點';
+        document.getElementById('panel-hash').textContent  = hit.hash;
+        document.getElementById('panel-meta').textContent  =
+          `層級：${hit.layerName}　索引：${hit.nodeIdx}\n此節點為奇數層上提（promote）時的視覺補齊佔位，並非實際樹節點`;
+      } else {
+        document.getElementById('panel-title').textContent = roleLabels[hit.role] || '節點';
+        document.getElementById('panel-hash').textContent  = hit.hash;
+        document.getElementById('panel-meta').textContent  =
+          `層級：${hit.layerName}　索引：${hit.nodeIdx}`;
+      }
 
       const px = Math.min(e.clientX + 16, window.innerWidth  - 440);
       const py = Math.min(e.clientY + 16, window.innerHeight - 120);
@@ -1129,23 +1195,108 @@ def verify_page():
 @app.route('/api/publish', methods=['POST'])
 def api_publish():
     """
-    [POST] 接收 CC 推送的計票結果。
+    [POST] 接收 CC 推送的計票結果（v2.0 Sprint 2：含簽章驗證）
+    
     Body: {
-        "root_official": str,
-        "tally": dict,
-        "valid_votes": [{"vote": str, "m_hex": str}],
-        "tallied_at": int  (Unix timestamp，可選)
+        "result_bundle": {
+            "root_official": str,
+            "tally": dict,
+            "valid_votes": [{"vote": str, "m_hex": str}],
+            "tallied_at": int
+        },
+        "signature": str (Base64),
+        "cert_pem": str
     }
+    
+    驗證流程：
+      1. 驗證 CC 憑證是否由 CA 簽發
+      2. 驗證 CC 對 result_bundle 的 RSA-PSS 簽章
+      3. 檢查是否已公告（防止覆蓋）
+      4. 儲存結果
     """
     data = request.get_json()
-    if not data or 'root_official' not in data or 'tally' not in data:
-        return jsonify({"status": "error", "message": "缺少必要欄位"}), 400
+    if not data or 'result_bundle' not in data or 'signature' not in data or 'cert_pem' not in data:
+        return jsonify({
+            "status": "error",
+            "code": "MISSING_FIELDS",
+            "message": "缺少必要欄位（需要 result_bundle, signature, cert_pem）"
+        }), 400
 
-    root_official = data['root_official']
-    tally         = data['tally']
-    valid_votes   = data.get('valid_votes', [])
-    # Unix timestamp（後端標準）
-    tallied_at    = data.get('tallied_at', int(time.time()))
+    result_bundle = data['result_bundle']
+    signature_b64 = data['signature']
+    cert_pem = data['cert_pem']
+
+    # 檢查是否已公告（防止覆蓋）
+    published_row = db.fetchone("SELECT value FROM bb_state WHERE key = 'published'")
+    if published_row and published_row['value'] == '1':
+        return jsonify({
+            "status": "error",
+            "code": "ALREADY_PUBLISHED",
+            "message": "結果已公告，不可覆蓋"
+        }), 403
+
+    # 步驟 1：驗證 CC 憑證是否由 CA 簽發
+    global _ca_cert_pem, _ca_cert
+    if not _ca_cert:
+        try:
+            _ca_cert_pem = load_or_fetch_ca_cert(KEYS_DIR, CA_URL)
+            _ca_cert = x509.load_pem_x509_certificate(_ca_cert_pem.encode('utf-8'))
+            print("[BB] CA 憑證補載入成功")
+        except Exception as ex:
+            print(f"[BB] 補載入 CA 憑證失敗：{ex}")
+    if not _ca_cert:
+        return jsonify({
+            "status": "error",
+            "code": "CA_CERT_UNAVAILABLE",
+            "message": "BB 無法取得 CA 憑證，無法驗證 CC 憑證"
+        }), 500
+
+    try:
+        cc_cert = x509.load_pem_x509_certificate(cert_pem.encode('utf-8'))
+        cc_public_key = cc_cert.public_key()
+        
+        # 驗證憑證是否由 CA 簽發
+        ca_public_key = _ca_cert.public_key()
+        ca_public_key.verify(
+            cc_cert.signature,
+            cc_cert.tbs_certificate_bytes,
+            padding.PKCS1v15(),
+            cc_cert.signature_hash_algorithm,
+        )
+        print(f"[BB] CC 憑證驗證通過（Subject: {cc_cert.subject}）")
+    except Exception as e:
+        return jsonify({
+            "status": "error",
+            "code": "CERT_INVALID",
+            "message": f"CC 憑證驗證失敗：{e}"
+        }), 403
+
+    # 步驟 2：驗證 CC 對 result_bundle 的 RSA-PSS 簽章
+    try:
+        bundle_json = json.dumps(result_bundle, sort_keys=True, ensure_ascii=False)
+        bundle_bytes = bundle_json.encode('utf-8')
+        signature = b64_to_bytes(signature_b64)
+        
+        if not verify_signature(bundle_bytes, signature, cc_public_key):
+            return jsonify({
+                "status": "error",
+                "code": "SIGNATURE_INVALID",
+                "message": "CC 簽章驗證失敗"
+            }), 403
+        
+        print(f"[BB] CC 簽章驗證通過（簽章長度：{len(signature)} bytes）")
+    except Exception as e:
+        return jsonify({
+            "status": "error",
+            "code": "SIGNATURE_VERIFICATION_ERROR",
+            "message": f"簽章驗證過程發生錯誤：{e}"
+        }), 500
+
+    # 步驟 3：解析並儲存結果
+    root_official = result_bundle['root_official']
+    tally         = result_bundle['tally']
+    valid_votes   = result_bundle.get('valid_votes', [])
+    tallied_at    = result_bundle.get('tallied_at', int(time.time()))
 
     # 清空舊資料
     db.execute("DELETE FROM published_votes")
@@ -1163,10 +1314,19 @@ def api_publish():
     db.execute("INSERT OR REPLACE INTO bb_state (key, value) VALUES ('merkle_root', ?)", (root_official,))
     db.execute("INSERT OR REPLACE INTO bb_state (key, value) VALUES ('tally_json', ?)", (json.dumps(tally),))
     db.execute("INSERT OR REPLACE INTO bb_state (key, value) VALUES ('tallied_at', ?)", (str(tallied_at),))
+    db.execute("INSERT OR REPLACE INTO bb_state (key, value) VALUES ('cc_signature', ?)", (signature_b64,))
 
     # 日誌使用人類可讀格式
-    print(f"[BB] 結果已公告（Unix ts：{tallied_at}  →  {ts_to_human(tallied_at)}）。Root_official = {root_official[:20]}...")
-    return jsonify({"status": "success", "message": "結果已公告"}), 200
+    print(f"[BB] ✅ 結果已驗證並公告（Unix ts：{tallied_at}  →  {ts_to_human(tallied_at)}）")
+    print(f"[BB] Root_official = {root_official[:20]}...")
+    print(f"[BB] 合法選票數：{len(valid_votes)}")
+    
+    return jsonify({
+        "status": "success",
+        "message": "結果已驗證並公告",
+        "verified": True,
+        "tallied_at": tallied_at
+    }), 200
 
 
 @app.route('/api/results', methods=['GET'])
@@ -1179,6 +1339,7 @@ def api_results():
     root_row      = db.fetchone("SELECT value FROM bb_state WHERE key = 'merkle_root'")
     tally_row     = db.fetchone("SELECT value FROM bb_state WHERE key = 'tally_json'")
     tallied_at_row = db.fetchone("SELECT value FROM bb_state WHERE key = 'tallied_at'")
+    sig_row       = db.fetchone("SELECT value FROM bb_state WHERE key = 'cc_signature'")
     votes         = db.fetchall("SELECT vote, m_hex FROM published_votes ORDER BY id")
     tallied_at    = int(tallied_at_row['value']) if tallied_at_row else None
 
@@ -1187,9 +1348,8 @@ def api_results():
         "merkle_root":  root_row['value'] if root_row else "",
         "tally":        json.loads(tally_row['value']) if tally_row else {},
         "valid_votes":  votes,
-        # Unix timestamp（後端標準）
+        "cc_signature": sig_row['value'] if sig_row else "",
         "tallied_at":   tallied_at,
-        # 人類可讀（僅供 UI/日誌）
         "tallied_at_str": ts_to_human(tallied_at) if tallied_at else None,
     }), 200
 
@@ -1247,7 +1407,7 @@ def _verify_m_hex(m_hex: str) -> dict:
         return {
             "valid":     True,
             "m_hex":     m_hex,
-            "leaf_hash": sha256_hex(m_hex.encode('utf-8')),
+            "leaf_hash": h_leaf(m_hex),
             "proof":     proof,
             "root":      root,
             "index":     index,
@@ -1304,21 +1464,25 @@ def _build_tree_data(m_hex: str) -> dict:
     proof_path.append({"layer": last_layer_idx, "index": 0, "role": "root"})
 
     # 建構 layers（每層節點的雜湊值，補齊奇數層）
+    # 同時記錄哪些節點是虛擬佔位（promote 後補齊的視覺用節點）
     layers = []
-    for layer in tree.tree:
-        # 若奇數個節點，補齊最後一個（與 MerkleTree._build_tree 一致）
+    virtual_nodes = []
+    for layer_idx, layer in enumerate(tree.tree):
+        # 若奇數個節點，補齊最後一個供視覺對稱用（虛擬佔位）
         if len(layer) % 2 == 1 and len(layer) > 1:
             layers.append(layer + [layer[-1]])
+            virtual_nodes.append({"layer": layer_idx, "index": len(layer)})
         else:
             layers.append(list(layer))
 
     return {
-        "layers":       layers,
-        "target_index": index,
-        "proof_path":   proof_path,
-        "root":         root,
-        "m_hex":        m_hex,
-        "leaf_hash":    sha256_hex(m_hex.encode('utf-8')),
+        "layers":        layers,
+        "target_index":  index,
+        "proof_path":    proof_path,
+        "root":          root,
+        "m_hex":         m_hex,
+        "leaf_hash":     h_leaf(m_hex),
+        "virtual_nodes": virtual_nodes,
     }
 
 

@@ -156,6 +156,7 @@ services:
     command: python bb_server/app.py
     environment:
       <<: *common-env
+      CA_URL: http://ca:5001
       CC_URL: http://cc:5003
     volumes:
       - ./config.json:/app/config.json:ro
@@ -170,18 +171,16 @@ services:
       retries: 5
       start_period: 10s
 
-  # ── 6. 選民端 (Voter 001) ────────────────────────────────
-  voter1:
+  # ── 6. 選民端（共用，多使用者透過同一服務投票）────────────
+  voter:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: voting_voter1
+    container_name: voting_voter
     command: python voter_client/app.py
     environment:
       <<: [*common-env, *service-urls]
-      VOTER_ID: "VOTER_001"
     volumes:
-      - voter1_keys:/app/voter_client/keys
       - ./config.json:/app/config.json:ro
     ports:
       - "5005:5005"
@@ -196,64 +195,41 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
-  # ── 7. 選民端 (Voter 002) ────────────────────────────────
-  voter2:
+  # ── 9.  (Admin Tool) ─────────────────────
+  admin:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: voting_voter2
-    command: python voter_client/app.py
+    container_name: voting_admin
+    command: python admin_tool/app.py
     environment:
-      <<: [*common-env, *service-urls]
-      VOTER_ID: "VOTER_002"
+      <<: *common-env
+      CA_URL: http://ca:5001
+      TA_URL: http://ta:5002
+      CC_URL: http://cc:5003
+      BB_URL: http://bb:5004
+      VOTER_URL: http://voter:5005
     volumes:
-      - voter2_keys:/app/voter_client/keys
       - ./config.json:/app/config.json:ro
     ports:
-      - "5006:5005"
+      - "5010:5010"
     depends_on:
       ca:
         condition: service_healthy
-      tpa:
-        condition: service_healthy
       ta:
         condition: service_healthy
-      cc:
-        condition: service_healthy
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request; urllib.request.urlopen('http://localhost:5010/api/voters')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
 
-  # ── 8. 選民端 (Voter 003) ────────────────────────────────
-  voter3:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: voting_voter3
-    command: python voter_client/app.py
-    environment:
-      <<: [*common-env, *service-urls]
-      VOTER_ID: "VOTER_003"
-    volumes:
-      - voter3_keys:/app/voter_client/keys
-      - ./config.json:/app/config.json:ro
-    ports:
-      - "5007:5005"
-    depends_on:
-      ca:
-        condition: service_healthy
-      tpa:
-        condition: service_healthy
-      ta:
-        condition: service_healthy
-      cc:
-        condition: service_healthy
-    restart: unless-stopped
-
-# ── Named Volumes（金鑰持久化）────────────────────────────
+# ── Named Volumes（只保留金鑰，資料庫隨容器生滅）────────────
 volumes:
   ca_keys:
   tpa_keys:
   ta_keys:
   cc_keys:
-  voter1_keys:
-  voter2_keys:
-  voter3_keys:
