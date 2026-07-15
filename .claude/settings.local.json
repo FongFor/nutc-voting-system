@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"import sys; print\\('Python imports:', sys.path[:3]\\)\")",
+      "Bash(python -m py_compile test/test_comprehensive.py)",
+      "Bash(python -c ' *)",
+      "Bash(python test/test_comprehensive.py --help)",
+      "Bash(Get-ChildItem -Path \"c:\\\\Users\\\\Noku0\\\\Desktop\\\\暫存\\\\test\\\\nutc-voting-system\" -Recurse -File)",
+      "Bash(Select-Object FullName)",
+      "Bash(Get-ChildItem -Path \"c:\\\\Users\\\\Noku0\\\\Desktop\\\\暫存\\\\test\\\\nutc-voting-system\" -Recurse -Directory)",
+      "Bash(Sort-Object FullName)"
+    ]
+  }
+}
