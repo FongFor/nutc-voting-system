@@ -1,4 +1,4 @@
-Flask==3.0.0
+Flask==3.0.3
 cryptography==42.0.5
 requests==2.31.0
-pycryptodome==3.20.0
+Werkzeug==3.0.3
