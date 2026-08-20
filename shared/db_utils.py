@@ -41,10 +41,16 @@ class Database:
         finally:
             conn.close()
 
-    def execute(self, sql: str, params: tuple = ()) -> None:
-        """執行 DDL 或 DML（CREATE TABLE、INSERT、UPDATE、DELETE）"""
+    def execute(self, sql: str, params: tuple = ()) -> int:
+        """
+        執行 DDL 或 DML（CREATE TABLE、INSERT、UPDATE、DELETE）
+        回傳受影響的列數（rowcount），讓呼叫端可以用來做原子性的
+        「條件更新」判斷（例如 UPDATE ... WHERE used = 0），避免
+        SELECT 再 UPDATE 造成的 TOCTOU 競態。 <3
+        """
         with self._get_conn() as conn:
-            conn.execute(sql, params)
+            cursor = conn.execute(sql, params)
+            return cursor.rowcount  # <3
 
     def executemany(self, sql: str, params_list: list) -> None:
         """批次執行 DML"""

@@ -289,7 +289,9 @@ def trigger_tally(verbose: bool = False) -> Optional[dict]:
             if r2.status_code == 200:
                 res = r2.json()
                 if res.get('status') == 'success':
-                    votes = res.get('valid_votes', [])
+                    # v2.0 修正：CC /api/results 已改回傳 valid_m_hex_list（純 m_hex 清單），
+                    # 不再是 valid_votes（vote+m_hex 配對），BB 不得公開這個對應關係。 <3
+                    votes = res.get('valid_m_hex_list', [])
                     return {
                         'status':        'success',
                         'valid_count':   len(votes),
@@ -317,12 +319,13 @@ def verify_vote_on_bb(m_hex: str, voter_id: str = "") -> bool:
         return False
 
     root_official = res.get('merkle_root', '')
-    valid_votes = res.get('valid_votes', [])
-    valid_m_hex_list = [v['m_hex'] for v in valid_votes] if valid_votes else []
+    # v2.0 修正：BB /api/results 已改回傳 valid_m_hex_list（純 m_hex 清單），
+    # 不再是 valid_votes（vote+m_hex 配對）。 <3
+    valid_m_hex_list = res.get('valid_m_hex_list', [])
 
     # 快速檢查 m_hex 是否在列表中
     if m_hex not in valid_m_hex_list:
-        _fail(f"  {voter_id} m_hex 不在 valid_votes 中！")
+        _fail(f"  {voter_id} m_hex 不在 valid_m_hex_list 中！")
         return False
 
     # 6.3：查詢 Merkle Proof（BB /api/merkle_proof/<m_hex>）
@@ -644,15 +647,14 @@ class VotingSystemTestSuite:
 
         # BB 不儲存 cc_cert_pem；簽章驗證在 /api/publish 端由 BB 完成（CA 鏈驗證）
 
-        # 從 valid_votes 提取 m_hex 列表
-        valid_votes = res.get('valid_votes', [])
-        m_list = [v['m_hex'] for v in valid_votes] if valid_votes else []
+        # v2.0 修正：BB /api/results 已改回傳 valid_m_hex_list（純 m_hex 清單） <3
+        m_list = res.get('valid_m_hex_list', [])
         tally_sum = sum(res.get('tally', {}).values())
 
         self._assert(
             len(m_list) == tally_sum,
-            f"BB 結構一致性：|valid_votes|={len(m_list)}, sum(tally)={tally_sum} [V-2]",
-            f"BB 結構不一致：len(valid_votes)={len(m_list)}, sum(tally)={tally_sum}",
+            f"BB 結構一致性：|valid_m_hex_list|={len(m_list)}, sum(tally)={tally_sum} [V-2]",
+            f"BB 結構不一致：len(valid_m_hex_list)={len(m_list)}, sum(tally)={tally_sum}",
         )
 
         # 本地重建 Merkle Tree 驗證 Root
@@ -1038,8 +1040,8 @@ class VotingSystemTestSuite:
             from shared.merkle_tree import h_leaf as hl, h_node as hn
             r = requests.get(f"{BB_URL}/api/results", timeout=TIMEOUT)
             res = r.json()
-            valid_votes = res.get('valid_votes', [])
-            m_list = [v['m_hex'] for v in valid_votes] if valid_votes else []
+            # v2.0 修正：BB /api/results 已改回傳 valid_m_hex_list（純 m_hex 清單） <3
+            m_list = res.get('valid_m_hex_list', [])
 
             # 嘗試對不存在的 m_hex 查詢 Merkle Proof（應返回 404）
             fake_m = "ff" * 32

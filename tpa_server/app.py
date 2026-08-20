@@ -26,6 +26,7 @@ import secrets
 import base64
 import datetime
 
+from cryptography import x509  # <3 新增：驗證 Voter 憑證的 CA 簽章鏈需要載入憑證物件
 from cryptography.hazmat.primitives import hashes as _hashes
 from cryptography.hazmat.primitives.asymmetric import padding as _asym_padding
 
@@ -455,7 +456,9 @@ def api_auth():
 
     data = request.get_json()
     if not data or 'auth_packet' not in data or 'voter_cert_pem' not in data:
-        return jsonify({"status": "error", "message": "缺少 auth_packet 或 voter_cert_pem"}), 400
+        # v2.0 修正：補上 code 欄位，統一符合規格書 §18 通用錯誤格式。 <3
+        return jsonify({"status": "error", "code": "MISSING_FIELDS",
+                        "message": "缺少 auth_packet 或 voter_cert_pem"}), 400  # <3
 
     packet       = data['auth_packet']
     voter_cert_pem = data['voter_cert_pem']
@@ -475,23 +478,37 @@ def api_auth():
     # ── 防重放：檢查 si ──────────────────────────────────
     if db.exists("SELECT 1 FROM used_nonces WHERE si = ?", (si,)):
         _log('rejected', '重放攻擊：si 已使用')
-        return jsonify({"status": "error", "message": "重放攻擊：nonce 已使用"}), 403
+        # v2.0 修正：補上 code 欄位（§2.5 錯誤碼表）。 <3
+        return jsonify({"status": "error", "code": "NONCE_REPLAY",
+                        "message": "重放攻擊：nonce 已使用"}), 403  # <3
 
     # ── 防重複投票：檢查 sender_id ───────────────────────
     if db.exists("SELECT 1 FROM voted_users WHERE sender_id = ?", (sender_id,)):
         _log('rejected', f'重複投票：{sender_id} 已投票')
-        return jsonify({"status": "error", "message": f"{sender_id} 已投票，不可重複投票"}), 403
+        return jsonify({"status": "error", "code": "ALREADY_VOTED",
+                        "message": f"{sender_id} 已投票，不可重複投票"}), 403  # <3
 
     # ── 升級認證：verify_auth_component ─────────────────
     import base64
     try:
         signature_bytes = base64.b64decode(packet['signature'])
 
-        # 若有 CA 憑證，先驗證 Voter 憑證合法性
-        if _ca_cert_pem:
-            if not verify_cert_with_ca(voter_cert_pem, _ca_cert_pem):
-                _log('rejected', 'Voter 憑證 CA 驗證失敗')
-                return jsonify({"status": "error", "message": "Voter 憑證 CA 驗證失敗"}), 403
+        # Fail-secure：沒有 CA 憑證就無法驗證 Voter 身分，一律拒絕而非放行 <3
+        if not _ca_cert_pem:
+            _log('rejected', 'TPA 無 CA 憑證，無法驗證請求方身分')
+            return jsonify({
+                "status": "error",
+                "code": "CA_CERT_UNAVAILABLE",
+                "message": "TPA 無法取得 CA 憑證，無法驗證請求方身分"
+            }), 500  # <3
+
+        if not verify_cert_with_ca(voter_cert_pem, _ca_cert_pem):
+            _log('rejected', 'Voter 憑證 CA 驗證失敗')
+            return jsonify({"status": "error", "code": "CERT_INVALID",
+                            "message": "Voter 憑證 CA 驗證失敗"}), 403  # <3
+
+        _ca_cert_obj = x509.load_pem_x509_certificate(_ca_cert_pem.encode('utf-8'))  # <3
+        _ca_pub = _ca_cert_obj.public_key()  # <3
 
         verify_auth_component(
             expected_receiver_id=TPA_ID,
@@ -501,12 +518,27 @@ def api_auth():
             packet_cert_pem=voter_cert_pem,
             packet_signature=signature_bytes,
             packet_nonce=si,      # v2.0：packet_si → packet_nonce
-            ca_public_key=None,
+            ca_public_key=_ca_pub,  # <3 之前固定傳 None，CA 簽章鏈驗證形同虛設，現在確實傳入 CA 公鑰
             delta_t=DELTA_T,
         )
     except Exception as exc:
         _log('rejected', str(exc))
-        return jsonify({"status": "error", "message": f"認證失敗：{exc}"}), 403
+        # v2.0 修正：verify_auth_component 拋出的例外訊息裡通常已經帶有明確
+        # 的失敗原因，這裡對照規格書 §2.5 錯誤碼表做字串比對分類，統一補上
+        # code 欄位，而不是一律回傳沒有 code 的通用訊息。 <3
+        _error_msg = str(exc)
+        if "CERT_INVALID" in _error_msg:
+            _code = "CERT_INVALID"
+        elif "接收方 ID 不符" in _error_msg:
+            _code = "RECEIVER_ID_MISMATCH"
+        elif "時間誤差超過" in _error_msg:
+            _code = "TIMESTAMP_OUT_OF_RANGE"
+        elif "nonce_echo 不符" in _error_msg:
+            _code = "NONCE_ECHO_MISMATCH"
+        else:
+            _code = "SIGNATURE_INVALID"  # <3
+        return jsonify({"status": "error", "code": _code,
+                        "message": f"認證失敗：{exc}"}), 403  # <3
 
     # ── 記錄 si（防重放）────────────────────────────────
     db.execute(
@@ -539,7 +571,10 @@ def api_auth():
         "expires_at": expires_at,
         "nonce_bind": si,
     }
-    token_payload_bytes = json.dumps(token_payload, sort_keys=True, ensure_ascii=False).encode('utf-8')
+    # v2.0 修正：補上 separators=(',', ':') 做 canonical JSON（規格書 §18.6）。
+    # 先前缺少此參數，TPA 自簽自驗雖能自洽，但外部稽核工具照規格重建
+    # canonical JSON 後會因序列化結果不同而驗章失敗。 <3
+    token_payload_bytes = json.dumps(token_payload, sort_keys=True, ensure_ascii=False, separators=(',', ':')).encode('utf-8')  # <3
     token_sig = _private_key.sign(
         token_payload_bytes,
         _asym_padding.PSS(
@@ -588,50 +623,59 @@ def api_blind_sign():
     now = int(time.time())
 
     # ── Voting Token 驗證 ────────────────────────────────────
+    # v2.0 修正：Token 之前是可選的（缺 Token 只印警告照樣簽），等於任何人
+    # 都能跳過 Phase 2 身分驗證直接拿到盲簽章。現在強制要求 Token。 <3
     voting_token = data.get('voting_token')
-    if voting_token:
-        token_payload = voting_token.get('payload', {})
-        token_sig_b64 = voting_token.get('signature', '')
-        token_id      = token_payload.get('token_id', '')
+    if not voting_token:
+        return jsonify({"status": "error", "code": "TOKEN_REQUIRED",
+                        "message": "缺少 Voting Token，必須先完成 Phase 2 身分驗證取得授權"}), 403  # <3
 
-        # b. 驗證 Token 簽章
-        try:
-            token_payload_bytes = json.dumps(token_payload, sort_keys=True, ensure_ascii=False).encode('utf-8')
-            token_sig = base64.b64decode(token_sig_b64)
-            _public_key.verify(
-                token_sig,
-                token_payload_bytes,
-                _asym_padding.PSS(
-                    mgf=_asym_padding.MGF1(_hashes.SHA256()),
-                    salt_length=_asym_padding.PSS.MAX_LENGTH,
-                ),
-                _hashes.SHA256(),
-            )
-        except Exception:
-            return jsonify({"status": "error", "code": "TOKEN_SIGNATURE_INVALID",
-                            "message": "Voting Token 簽章驗證失敗"}), 403
+    token_payload = voting_token.get('payload', {})
+    token_sig_b64 = voting_token.get('signature', '')
+    token_id      = token_payload.get('token_id', '')
 
-        # c. 驗證 Token 是否過期
-        if now > token_payload.get('expires_at', 0):
-            return jsonify({"status": "error", "code": "TOKEN_EXPIRED",
-                            "message": "Voting Token 已過期"}), 403
-
-        # d. 驗證 Token 未使用（並以原子方式標記已使用）
-        row = db.fetchone(
-            "SELECT used FROM issued_tokens WHERE token_id = ?", (token_id,)
+    # b. 驗證 Token 簽章
+    try:
+        # v2.0 修正：與簽發端一致，補上 canonical JSON 的 separators。 <3
+        token_payload_bytes = json.dumps(token_payload, sort_keys=True, ensure_ascii=False, separators=(',', ':')).encode('utf-8')  # <3
+        token_sig = base64.b64decode(token_sig_b64)
+        _public_key.verify(
+            token_sig,
+            token_payload_bytes,
+            _asym_padding.PSS(
+                mgf=_asym_padding.MGF1(_hashes.SHA256()),
+                salt_length=_asym_padding.PSS.MAX_LENGTH,
+            ),
+            _hashes.SHA256(),
         )
-        if not row:
-            return jsonify({"status": "error", "code": "TOKEN_NOT_FOUND",
-                            "message": "Token 不存在（可能由非本 TPA 簽發）"}), 403
-        if row['used']:
-            return jsonify({"status": "error", "code": "TOKEN_ALREADY_USED",
-                            "message": "Voting Token 已使用"}), 403
+    except Exception:
+        return jsonify({"status": "error", "code": "TOKEN_SIGNATURE_INVALID",
+                        "message": "Voting Token 簽章驗證失敗"}), 403
 
-        # e. 原子標記為已使用
-        db.execute("UPDATE issued_tokens SET used = 1 WHERE token_id = ?", (token_id,))
-        print(f"[TPA] Token 已消耗：{token_id[:16]}...")
-    else:
-        print(f"[TPA] 警告：blind_sign 請求未附帶 Voting Token")
+    # c. 驗證 Token 是否過期
+    if now > token_payload.get('expires_at', 0):
+        return jsonify({"status": "error", "code": "TOKEN_EXPIRED",
+                        "message": "Voting Token 已過期"}), 403
+
+    # d+e. 驗證 Token 未使用，並以「原子條件更新」標記已使用
+    # v2.0 修正：原本是先 SELECT 查 used 再另外 UPDATE，兩步之間存在 TOCTOU
+    # 競態，併發請求可能讓同一 Token 被消耗兩次。現在改成單一原子 UPDATE ...
+    # WHERE used = 0，用 rowcount 判斷是否搶佔成功。 <3
+    row = db.fetchone(
+        "SELECT used FROM issued_tokens WHERE token_id = ?", (token_id,)
+    )
+    if not row:
+        return jsonify({"status": "error", "code": "TOKEN_NOT_FOUND",
+                        "message": "Token 不存在（可能由非本 TPA 簽發）"}), 403
+
+    claimed = db.execute(
+        "UPDATE issued_tokens SET used = 1 WHERE token_id = ? AND used = 0", (token_id,)
+    )  # <3 rowcount==0 代表已被搶先使用（即使剛剛的 SELECT 顯示未使用）
+    if claimed == 0:
+        return jsonify({"status": "error", "code": "TOKEN_ALREADY_USED",
+                        "message": "Voting Token 已使用"}), 403  # <3
+
+    print(f"[TPA] Token 已消耗：{token_id[:16]}...")
 
     try:
         m_prime = hex_to_int(data['m_prime_hex'])

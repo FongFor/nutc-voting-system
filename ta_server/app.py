@@ -30,12 +30,17 @@ from shared.key_manager import (
     load_or_generate_keypair,
     load_or_request_certificate,
     load_or_fetch_ca_cert,
+    verify_cert_with_ca,
 )
 from shared.format_utils import int_to_hex, ts_to_human
 from shared.db_utils import Database
-from shared.config_loader import make_reload_endpoint, get_vote_duration
-from shared.auth_component import verify_auth_component
+from shared.config_loader import make_reload_endpoint, get_vote_duration, get_delta_t
+# v2.0 修正：release_key 改用專用驗證邏輯（見下方），不再需要通用 verify_auth_component <3
 from cryptography import x509
+from cryptography.hazmat.primitives import hashes as _ta_hashes  # <3 用於驗證 release_key 請求簽章
+from cryptography.hazmat.primitives.asymmetric import padding as _ta_padding  # <3
+from cryptography.x509.oid import NameOID  # <3 新增：用於核對憑證 Subject CN，防止冒充 CC
+import json  # <3 用於 release_key 請求的 canonical JSON 驗簽
 
 # ============================================================
 # 常數設定
@@ -45,6 +50,7 @@ KEYS_DIR    = os.path.join(SERVICE_DIR, "keys")
 DB_PATH     = os.path.join(SERVICE_DIR, "ta.db")
 TA_ID       = "TA"
 CA_URL      = os.environ.get("CA_URL", "http://localhost:5001")
+DELTA_T     = int(os.environ.get("DELTA_T", str(get_delta_t())))  # <3 release_key 請求時間戳檢查用
 
 # 選舉狀態由資料庫管理：standby（待命）→ running（進行中）
 # 截止時間在管理員手動啟動選舉後才計算，啟動前不倒數
@@ -424,25 +430,25 @@ def api_deadline():
 @app.route('/api/release_key', methods=['POST'])
 def api_release_key():
     """
-    [POST] 釋放 SK_TA（v2.0 Sprint 2：需驗證請求方身分）
-    
+    [POST] 釋放 SK_TA（v2.0 修正：欄位結構對齊規格書 §18.3.3）
+
     Body: {
-        "auth": {
-            "sender_id": "CC",
-            "receiver_id": "TA",
-            "timestamp": <Unix ts>,
-            "nonce": <hex>,
-            "cert_pem": <PEM>,
-            "signature": <hex>
-        }
+        "payload": {
+            "requester_id": "CC",
+            "timestamp":    <Unix ts>,
+            "nonce":        "<32 hex chars>",
+            "purpose":      "tally"
+        },
+        "signature": "<base64 Sig_CC(canonical_json(payload))>",
+        "cert_pem":  "-----BEGIN CERTIFICATE-----..."
     }
-    
+
     驗證流程：
       1. 檢查是否已截止
-      2. 驗證認證封包（憑證、簽章、時間戳、nonce）
-      3. 檢查請求方是否為 CC
+      2. 驗證 cert_pem 由 CA 簽發、且 Subject CN 為 "CC"
+      3. 驗證 payload 簽章、時間戳（ΔT）、nonce（必要且未使用過）、purpose
       4. 釋放 SK_TA
-    
+
     回傳：{"status": "released", "private_key_pem": ..., "d_hex": ..., "n_hex": ..., "released_at": <Unix ts>}
     """
     now = int(time.time())
@@ -478,27 +484,32 @@ def api_release_key():
             "server_time":       now,
         }), 403
 
-    # 步驟 2：驗證認證封包（v2.0 Sprint 2）
-    auth_packet = data.get('auth')
-    if not auth_packet:
+    # v2.0 修正：欄位結構改為規格書 §18.3.3 頂層 payload/signature/cert_pem，
+    # 不再套用通用 Auth_Packet（sender_id/receiver_id、cert_pem 包在 payload
+    # 內）格式 —— release_key 請求本來就沒有 receiver_id，cert_pem 也不屬於
+    # payload 的一部分，硬套通用格式反而跟規格書不符。 <3
+    payload       = data.get('payload')
+    signature_b64 = data.get('signature')
+    cert_pem      = data.get('cert_pem')
+
+    if not payload or not signature_b64 or not cert_pem:
         db.execute(
             "INSERT INTO key_release_log (requested_at, requester_id, status, reason) VALUES (?, ?, ?, ?)",
-            (now, 'UNKNOWN', 'rejected', '缺少認證封包'),
+            (now, (payload or {}).get('requester_id'), 'rejected', '缺少 payload/signature/cert_pem'),
         )
         return jsonify({
             "status":  "error",
-            "code":    "AUTH_REQUIRED",
-            "message": "需要認證封包（必須提供 auth 欄位）",
-        }), 403
+            "code":    "MISSING_FIELDS",
+            "message": "需要 payload、signature、cert_pem 三個欄位",
+        }), 400  # <3
 
-    # auth_packet 結構：{"payload": {...}, "signature": "base64..."}
-    auth_payload = auth_packet.get('payload', {})
+    requester_id = payload.get('requester_id', '')
 
-    # 驗證認證封包
+    # 步驟 2：cert_pem 須由 CA 簽發
     if not _ca_cert_pem:
         db.execute(
             "INSERT INTO key_release_log (requested_at, requester_id, status, reason) VALUES (?, ?, ?, ?)",
-            (now, auth_payload.get('sender_id'), 'rejected', 'TA 無 CA 憑證，無法驗證'),
+            (now, requester_id, 'rejected', 'TA 無 CA 憑證，無法驗證'),
         )
         return jsonify({
             "status": "error",
@@ -506,91 +517,109 @@ def api_release_key():
             "message": "TA 無法取得 CA 憑證，無法驗證請求方身分"
         }), 500
 
+    if not verify_cert_with_ca(cert_pem, _ca_cert_pem):
+        db.execute(
+            "INSERT INTO key_release_log (requested_at, requester_id, status, reason) VALUES (?, ?, ?, ?)",
+            (now, requester_id, 'rejected', 'cert_pem 未由合法 CA 簽發或已過期'),
+        )
+        return jsonify({"status": "error", "code": "CERT_INVALID",
+                        "message": "cert_pem 未由合法 CA 簽發或已過期"}), 403  # <3
+
+    # v2.0 修正：只驗證憑證合法性還不夠 —— 任何合法選民的憑證也是 CA 簽的。
+    # 必須核對憑證本身的 Subject CN 是否真的是 "CC"，並要求 payload 自報的
+    # requester_id 與憑證身分一致，兩者缺一不可，把身分主張綁回 PKI 身分鏈。 <3
     try:
-        _ca_pub = None
-        if _ca_cert_pem:
-            try:
-                _ca_cert_obj = x509.load_pem_x509_certificate(_ca_cert_pem.encode('utf-8'))
-                _ca_pub = _ca_cert_obj.public_key()
-            except Exception:
-                pass
+        _requester_cert = x509.load_pem_x509_certificate(cert_pem.encode('utf-8'))
+        _cert_cn = _requester_cert.subject.get_attributes_for_oid(NameOID.COMMON_NAME)[0].value
+        _requester_pub = _requester_cert.public_key()
+    except Exception:
+        _cert_cn = None
+        _requester_pub = None  # <3
 
-        verify_auth_component(
-            expected_receiver_id=TA_ID,
-            sender_id=auth_payload.get('sender_id'),
-            packet_receiver_id=auth_payload.get('receiver_id'),
-            packet_timestamp=auth_payload.get('timestamp'),
-            packet_cert_pem=auth_payload.get('cert_pem'),
-            packet_signature=base64.b64decode(auth_packet.get('signature', '')),
-            packet_nonce=auth_payload.get('nonce'),
-            ca_public_key=_ca_pub,
-        )
-        sender_id = auth_payload.get('sender_id', 'UNKNOWN')
-        print(f"[TA] 認證封包驗證通過（請求方：{sender_id}）")
-    except Exception as e:
-        error_msg = str(e)
+    if requester_id != 'CC' or _cert_cn != 'CC':
         db.execute(
             "INSERT INTO key_release_log (requested_at, requester_id, status, reason) VALUES (?, ?, ?, ?)",
-            (now, auth_payload.get('sender_id'), 'rejected', f'認證失敗：{error_msg}'),
-        )
-
-        # 判斷錯誤類型並回傳對應的錯誤代碼
-        if "CERT_INVALID" in error_msg:
-            code = "CERT_INVALID"
-        elif "SIGNATURE_INVALID" in error_msg:
-            code = "SIGNATURE_INVALID"
-        elif "TIMESTAMP_OUT_OF_RANGE" in error_msg:
-            code = "TIMESTAMP_OUT_OF_RANGE"
-        elif "RECEIVER_ID_MISMATCH" in error_msg:
-            code = "RECEIVER_ID_MISMATCH"
-        elif "NONCE_REPLAY" in error_msg:
-            code = "NONCE_REPLAY"
-        else:
-            code = "AUTH_FAILED"
-
-        return jsonify({
-            "status": "error",
-            "code": code,
-            "message": f"認證封包驗證失敗：{error_msg}"
-        }), 403
-
-    # 步驟 3：檢查請求方是否為 CC
-    sender_id = auth_payload.get('sender_id', '')
-    if sender_id != 'CC':
-        db.execute(
-            "INSERT INTO key_release_log (requested_at, requester_id, status, reason) VALUES (?, ?, ?, ?)",
-            (now, sender_id, 'rejected', f'請求方非 CC（實際：{sender_id}）'),
+            (now, requester_id, 'rejected', f'請求方非 CC（requester_id={requester_id}, cert_cn={_cert_cn}）'),
         )
         return jsonify({
             "status": "error",
             "code": "UNAUTHORIZED_REQUESTER",
-            "message": f"僅允許 CC 請求 SK_TA（實際請求方：{sender_id}）"
+            "message": f"僅允許 CC 請求 SK_TA（實際請求方：{requester_id}，憑證 CN：{_cert_cn}）"
         }), 403
 
-    # 步驟 4：檢查 nonce 是否已使用（防重放攻擊）
-    nonce = auth_payload.get('nonce', '')
-    if nonce:
-        existing = db.fetchone("SELECT nonce FROM used_nonces WHERE nonce = ?", (nonce,))
-        if existing:
-            db.execute(
-                "INSERT INTO key_release_log (requested_at, requester_id, status, reason) VALUES (?, ?, ?, ?)",
-                (now, sender_id, 'rejected', 'NONCE_REPLAY'),
-            )
-            return jsonify({
-                "status": "error",
-                "code": "NONCE_REPLAY",
-                "message": "nonce 已使用過（重放攻擊）"
-            }), 403
-        
-        # 記錄 nonce
-        db.execute("INSERT INTO used_nonces (nonce, used_at) VALUES (?, ?)", (nonce, now))
+    # 步驟 3：purpose 必須為 "tally"（規格書 §18.3.3，防止把其他用途的簽章封包拿來重放）
+    if payload.get('purpose') != 'tally':
+        db.execute(
+            "INSERT INTO key_release_log (requested_at, requester_id, status, reason) VALUES (?, ?, ?, ?)",
+            (now, requester_id, 'rejected', f"purpose 不符：{payload.get('purpose')}"),
+        )
+        return jsonify({"status": "error", "code": "PURPOSE_INVALID",
+                        "message": "purpose 必須為 'tally'"}), 403  # <3
 
-    # 步驟 5：釋放 SK_TA
+    # 步驟 4：時間戳（雙向 ΔT）
+    timestamp = payload.get('timestamp', 0)
+    time_diff = abs(now - timestamp)
+    if time_diff > DELTA_T:
+        db.execute(
+            "INSERT INTO key_release_log (requested_at, requester_id, status, reason) VALUES (?, ?, ?, ?)",
+            (now, requester_id, 'rejected', f'時間誤差超過容許範圍：{time_diff} 秒'),
+        )
+        return jsonify({"status": "error", "code": "TIMESTAMP_OUT_OF_RANGE",
+                        "message": f"時間誤差超過容許範圍：{time_diff} 秒 > {DELTA_T} 秒"}), 403  # <3
+
+    # 步驟 5：nonce 必須存在且未使用過
+    # v2.0 修正：先前用 `if nonce:` 做真值判斷，nonce 為空字串時會整段跳過
+    # 防重放檢查；現在缺少 nonce 直接視為錯誤拒絕。 <3
+    nonce = payload.get('nonce', '')
+    if not nonce:
+        db.execute(
+            "INSERT INTO key_release_log (requested_at, requester_id, status, reason) VALUES (?, ?, ?, ?)",
+            (now, requester_id, 'rejected', 'nonce 缺漏'),
+        )
+        return jsonify({"status": "error", "code": "NONCE_MISSING",
+                        "message": "缺少 nonce，無法防重放"}), 403  # <3
+
+    existing = db.fetchone("SELECT nonce FROM used_nonces WHERE nonce = ?", (nonce,))
+    if existing:
+        db.execute(
+            "INSERT INTO key_release_log (requested_at, requester_id, status, reason) VALUES (?, ?, ?, ?)",
+            (now, requester_id, 'rejected', 'NONCE_REPLAY'),
+        )
+        return jsonify({
+            "status": "error",
+            "code": "NONCE_REPLAY",
+            "message": "nonce 已使用過（重放攻擊）"
+        }), 403
+
+    # 步驟 6：驗證簽章（canonical JSON，規格書 §18.6）
+    try:
+        if _requester_pub is None:
+            raise ValueError("無法從憑證取得公鑰")
+        payload_bytes = json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
+        _requester_pub.verify(
+            base64.b64decode(signature_b64),
+            payload_bytes,
+            _ta_padding.PSS(mgf=_ta_padding.MGF1(_ta_hashes.SHA256()), salt_length=_ta_padding.PSS.MAX_LENGTH),
+            _ta_hashes.SHA256(),
+        )
+    except Exception as e:
+        db.execute(
+            "INSERT INTO key_release_log (requested_at, requester_id, status, reason) VALUES (?, ?, ?, ?)",
+            (now, requester_id, 'rejected', f'簽章驗證失敗：{e}'),
+        )
+        return jsonify({"status": "error", "code": "SIGNATURE_INVALID",
+                        "message": "release_key 請求簽章驗證失敗"}), 403  # <3
+
+    # 記錄 nonce（防重放）
+    db.execute("INSERT INTO used_nonces (nonce, used_at) VALUES (?, ?)", (nonce, now))
+    print(f"[TA] release_key 請求驗證通過（請求方：{requester_id}）")
+
+    # 步驟 7：釋放 SK_TA
     db.execute(
         "INSERT INTO key_release_log (requested_at, requester_id, status, reason) VALUES (?, ?, ?, ?)",
-        (now, sender_id, 'released', None),
+        (now, requester_id, 'released', None),
     )
-    print(f"[TA] ✅ SK_TA 已釋放給 {sender_id}（Unix ts：{now}  →  {ts_to_human(now)}）")
+    print(f"[TA] ✅ SK_TA 已釋放給 {requester_id}（Unix ts：{now}  →  {ts_to_human(now)}）")
 
     return jsonify({
         "status":          "released",

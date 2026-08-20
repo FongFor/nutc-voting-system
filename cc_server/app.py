@@ -24,6 +24,7 @@ import time
 import json
 import secrets
 import datetime
+import sqlite3  # <3 新增：用於捕捉 token_hash UNIQUE 約束衝突，做原子化去重
 
 # 確保 shared/ 可被 import
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -97,11 +98,18 @@ db.execute("""
     CREATE TABLE IF NOT EXISTS valid_votes (
         id          INTEGER PRIMARY KEY AUTOINCREMENT,
         vote        TEXT NOT NULL,
-        m_hex       TEXT NOT NULL,
+        m_hex       TEXT NOT NULL UNIQUE,
         leaf_hash   TEXT,
+        shuffle_seq INTEGER,
         verified_at INTEGER NOT NULL
     )
 """)
+# m_hex 需要唯一索引才能擋重複選票（見 _do_tally 的 IntegrityError 處理）；
+# 對於在此欄位改動前就已建立的舊資料庫，用獨立的 CREATE UNIQUE INDEX 補上。 <3
+try:
+    db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_valid_votes_m_hex ON valid_votes (m_hex)")
+except Exception:
+    pass  # <3 舊資料庫內已有重複 m_hex 資料時，索引建立會失敗，此為已知遷移限制
 db.execute("""
     CREATE TABLE IF NOT EXISTS tally_state (
         key         TEXT PRIMARY KEY,
@@ -115,11 +123,12 @@ db.execute("""
         recorded_at INTEGER NOT NULL
     )
 """)
-# 為舊有 envelopes 表新增 v2.0 欄位（若不存在）
+# 為舊有 envelopes / valid_votes 表新增 v2.0 欄位（若不存在） <3
 for _col_sql in [
     "ALTER TABLE envelopes ADD COLUMN tag        TEXT NOT NULL DEFAULT ''",
     "ALTER TABLE envelopes ADD COLUMN aad        TEXT NOT NULL DEFAULT ''",
     "ALTER TABLE envelopes ADD COLUMN token_hash TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE valid_votes ADD COLUMN shuffle_seq INTEGER",  # <3
 ]:
     try:
         db.execute(_col_sql)
@@ -574,35 +583,49 @@ def api_receive_envelope():
 
     now = int(time.time())
 
-    # ── b. 防止 token_hash 重複（Phase 3 Step 3.10b） ───────
+    # ── b. token_hash 為必要欄位（Phase 3 Step 3.10b）
+    # v2.0 修正：之前 token_hash 缺漏時（例如 voter_client 送空字串）會被
+    # `if token_hash:` 判為 falsy 而整段跳過去重檢查，等於一人一票防線
+    # 對所有信封都失效。現在強制要求非空。 <3
     token_hash = data.get('token_hash', '')
-    if token_hash:
-        if db.exists("SELECT 1 FROM used_token_hashes WHERE token_hash = ?", (token_hash,)):
-            return jsonify({
-                "status":  "error",
-                "code":    "TOKEN_HASH_REUSED",
-                "message": "此 Token 已用於提交信封，不可重複使用",
-            }), 403
+    if not token_hash:
+        return jsonify({
+            "status":  "error",
+            "code":    "TOKEN_HASH_REQUIRED",
+            "message": "缺少 token_hash，無法驗證一人一票",
+        }), 403  # <3
 
     try:
         pending = open_envelope_layer1(data, _private_key)
-        db.execute(
-            "INSERT INTO envelopes (c_data, iv, tag, aad, k, token_hash, received_at, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                pending['c_data'], pending['iv'],
-                pending.get('tag', ''), pending.get('aad', ''),
-                pending['k'], token_hash, now, 'pending',
-            ),
-        )
-        if token_hash:
-            db.execute(
-                "INSERT INTO used_token_hashes (token_hash, recorded_at) VALUES (?, ?)",
-                (token_hash, now),
-            )
-        print(f"[CC] 收到數位信封（Unix ts：{now}  →  {ts_to_human(now)}）")
-        return jsonify({"status": "success", "message": "信封已接收"}), 200
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
+
+    # v2.0 修正：去重原本是「先 SELECT 查是否存在、再 INSERT」，兩步之間
+    # 有 TOCTOU 競態視窗，併發請求可能讓同一 token_hash 通過兩次。現在改
+    # 成直接 INSERT，靠 used_token_hashes.token_hash 的 UNIQUE 約束在資料庫
+    # 層級原子化擋下重複，用 IntegrityError 判斷是否搶佔成功。 <3
+    try:
+        db.execute(
+            "INSERT INTO used_token_hashes (token_hash, recorded_at) VALUES (?, ?)",
+            (token_hash, now),
+        )
+    except sqlite3.IntegrityError:
+        return jsonify({
+            "status":  "error",
+            "code":    "TOKEN_HASH_REUSED",
+            "message": "此 Token 已用於提交信封，不可重複使用",
+        }), 403  # <3
+
+    db.execute(
+        "INSERT INTO envelopes (c_data, iv, tag, aad, k, token_hash, received_at, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            pending['c_data'], pending['iv'],
+            pending.get('tag', ''), pending.get('aad', ''),
+            pending['k'], token_hash, now, 'pending',
+        ),
+    )
+    print(f"[CC] 收到數位信封（Unix ts：{now}  →  {ts_to_human(now)}）")
+    return jsonify({"status": "success", "message": "信封已接收"}), 200
 
 
 @app.route('/api/tally', methods=['POST'])
@@ -631,22 +654,31 @@ def api_results():
 
     root_row = db.fetchone("SELECT value FROM tally_state WHERE key = 'merkle_root'")
     tally_json_row = db.fetchone("SELECT value FROM tally_state WHERE key = 'tally_json'")
-    valid_votes = db.fetchall("SELECT vote, m_hex FROM valid_votes ORDER BY id")
+    # v2.0 修正：
+    #  1. 排序改用 shuffle_seq，跟簽章推送給 BB 的 root_official 用同一份
+    #     順序重建 Merkle Tree，否則這個公開端點自己給的資料會跟官方結果對不上。
+    #  2. 不再回傳 vote 與 m_hex 的一一對應（valid_votes），只給 m_hex 清單，
+    #     跟 result_bundle 對 BB 的隱私原則一致（規格書 §19.5）。 <3
+    valid_votes = db.fetchall("SELECT vote, m_hex FROM valid_votes ORDER BY shuffle_seq")
+    m_hex_list  = [v['m_hex'] for v in valid_votes]  # <3
 
     return jsonify({
-        "status":        "success",
-        "merkle_root":   root_row['value'] if root_row else "",
-        "tally":         json.loads(tally_json_row['value']) if tally_json_row else {},
-        "valid_votes":   valid_votes,
-        "tpa_e":         _get_state('tpa_e'),
-        "tpa_n":         _get_state('tpa_n'),
+        "status":            "success",
+        "merkle_root":       root_row['value'] if root_row else "",
+        "tally":             json.loads(tally_json_row['value']) if tally_json_row else {},
+        "valid_m_hex_list":  m_hex_list,  # <3 之前是 valid_votes（含 vote），現在只給 m_hex
+        "merkle_leaf_count": len(m_hex_list),  # <3
+        "tpa_e":             _get_state('tpa_e'),
+        "tpa_n":             _get_state('tpa_n'),
     }), 200
 
 
 @app.route('/api/merkle_proof/<int:index>', methods=['GET'])
 def api_merkle_proof(index: int):
     """[GET] 取得指定葉節點的 Merkle Proof"""
-    valid_votes = db.fetchall("SELECT m_hex FROM valid_votes ORDER BY id")
+    # v2.0 修正：改用 shuffle_seq 排序，與 _do_tally 建構並簽章的
+    # root_official 使用同一份洗牌後順序，proof 才驗證得過。 <3
+    valid_votes = db.fetchall("SELECT m_hex FROM valid_votes ORDER BY shuffle_seq")
     if not valid_votes:
         return jsonify({"status": "error", "message": "尚無合法選票"}), 404
     if index < 0 or index >= len(valid_votes):
@@ -760,10 +792,23 @@ def _do_tally() -> dict:
         }
         try:
             result = open_envelope_layer2(pending, ta_private_key, tpa_e, tpa_n)
-            db.execute(
-                "INSERT INTO valid_votes (vote, m_hex, verified_at) VALUES (?, ?, ?)",
-                (result['vote'], result['m_hex'], now),
-            )
+
+            # v2.0 修正：原本沒有做 m_hex（選票流水號雜湊）去重，重放同一張
+            # 已簽章選票的最後一道防線是空的。現在靠 valid_votes.m_hex 的
+            # UNIQUE 索引在資料庫層原子化擋下重複，用 IntegrityError 判斷。 <3
+            try:
+                db.execute(
+                    "INSERT INTO valid_votes (vote, m_hex, verified_at) VALUES (?, ?, ?)",
+                    (result['vote'], result['m_hex'], now),
+                )
+            except sqlite3.IntegrityError:
+                db.execute(
+                    "UPDATE envelopes SET status = 'm_duplicate' WHERE id = ?",
+                    (env['id'],),
+                )
+                print(f"[CC] 選票重複（m_hex 已存在，視為非法）：{result['m_hex'][:16]}...")
+                continue  # <3
+
             db.execute(
                 "UPDATE envelopes SET status = 'verified' WHERE id = ?",
                 (env['id'],),
@@ -780,13 +825,21 @@ def _do_tally() -> dict:
 
     # 步驟 5：Secure Shuffle + 建構 Merkle Tree
     # 將合法選票以密碼學安全隨機順序洗牌，斷絕「提交順序 → 選民」關聯
-    valid_votes_raw = db.fetchall("SELECT vote, m_hex FROM valid_votes ORDER BY id")
+    valid_votes_raw = db.fetchall("SELECT id, vote, m_hex FROM valid_votes ORDER BY id")
 
     # Fisher-Yates shuffle（使用 secrets CSPRNG）
     valid_votes = list(valid_votes_raw)
     for i in range(len(valid_votes) - 1, 0, -1):
         j = secrets.randbelow(i + 1)
         valid_votes[i], valid_votes[j] = valid_votes[j], valid_votes[i]
+
+    # v2.0 修正：洗牌結果原本只存在這次執行的記憶體裡，算完 root 就丟了，
+    # valid_votes 表沒有記錄洗牌後的順序。之後 /api/results、
+    # /api/merkle_proof/<index> 又是用未洗牌的 id 順序重建 Merkle Tree，
+    # 算出來的 root 會跟這裡簽章、推送給 BB 的 root_official 對不上，
+    # 選民拿 CC 給的 proof 去驗證會失敗。現在把洗牌後的順序寫回 shuffle_seq。 <3
+    for seq, v in enumerate(valid_votes):
+        db.execute("UPDATE valid_votes SET shuffle_seq = ? WHERE id = ?", (seq, v['id']))  # <3
 
     m_hex_list = [v['m_hex'] for v in valid_votes]
 
@@ -812,12 +865,16 @@ def _do_tally() -> dict:
 
     # 步驟 6：對開票結果簽章並推送至 BB (v2.0 Sprint 2)
     try:
-        # 構造結果包（不含簽章）
+        # v2.0 修正：規格書 §19.5 明確要求推送給 BB 的結果只能含
+        # valid_m_hex_list（純 m_hex 清單），不可含 vote 與 m_hex 的
+        # 一一對應，否則任何人都能從公告結果反推「哪一張葉節點對應哪一
+        # 票」。個別選票內容只保留在 tally 的候選人加總裡，不逐票公開。 <3
         result_bundle = {
-            "root_official": merkle_root,
-            "tally":         tally,
-            "valid_votes":   valid_votes,
-            "tallied_at":    now,
+            "root_official":     merkle_root,
+            "tally":             tally,
+            "valid_m_hex_list":  m_hex_list,   # <3 只給 m_hex，不含 vote
+            "merkle_leaf_count": len(m_hex_list),  # <3
+            "tallied_at":        now,
         }
         
         # 對結果包進行 RSA-PSS 簽章

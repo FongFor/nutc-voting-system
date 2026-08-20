@@ -710,6 +710,10 @@ async function doVote() {
     });
     const authData = await authResp.json();
     if (authData.status !== 'success') throw new Error('TPA 認證失敗：' + (authData.message || authData.code || ''));
+    // v2.0 修正：之前這裡拿到 authData.voting_token 後從未使用，導致 Phase 3
+    // 盲簽章請求沒有帶 Token，Phase 2 的身分驗證與 Phase 3 的取簽完全脫鉤。 <3
+    const votingToken = authData.voting_token;
+    if (!votingToken) throw new Error('TPA 未核發 Voting Token，無法繼續投票流程');  // <3
     addStep('TPA 認證成功', true);
 
     // Step 3: 計算選票雜湊 m（FDH 預處理）
@@ -734,7 +738,7 @@ async function doVote() {
     addStep('向 TPA 請求盲簽章...');
     const signResp = await fetch('/api/proxy/tpa/blind_sign', {
       method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ m_prime_hex }),
+      body: JSON.stringify({ m_prime_hex, voting_token: votingToken }),  // <3 附上 Phase 2 取得的 Voting Token
     });
     const signData = await signResp.json();
     if (signData.status !== 'success') throw new Error('盲簽章失敗：' + (signData.message || signData.code || ''));
@@ -756,7 +760,10 @@ async function doVote() {
     const aad_str       = 'voting-system-v2|' + _voterId + '|' + sn;
     const { k, iv, c_data, tag, aad } = await aesGcmEncrypt(aes_pt, aad_str);
     const c_key  = await rsaOaepEncrypt(cc_pub_pem, k);
-    const envelope = { c_data, iv, tag, aad, c_key, token_hash: '' };
+    // v2.0 修正：之前 token_hash 寫死空字串，CC 端的一人一票去重機制對所有
+    // 選票永遠不會生效。規格書 §3.4：token_hash = H(Token.payload.token_id)。 <3
+    const token_hash = await sha256Hex(votingToken.payload.token_id);  // <3
+    const envelope = { c_data, iv, tag, aad, c_key, token_hash };
     addStep('信封封裝完成', true);
 
     // Step 8: 傳送至 CC

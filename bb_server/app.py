@@ -36,6 +36,7 @@ from shared.config_loader import make_reload_endpoint
 from shared.crypto_utils import verify_signature
 from shared.key_manager import load_or_fetch_ca_cert
 from cryptography import x509
+from cryptography.x509.oid import NameOID  # <3 新增：用於核對憑證 Subject CN，防止冒充 CC
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 
@@ -61,11 +62,13 @@ db.execute("""
 db.execute("""
     CREATE TABLE IF NOT EXISTS published_votes (
         id          INTEGER PRIMARY KEY AUTOINCREMENT,
-        vote        TEXT NOT NULL,
         m_hex       TEXT NOT NULL,
         leaf_hash   TEXT NOT NULL
     )
 """)
+# v2.0 修正：規格書 §19.5 明定 BB 不得儲存 vote 對 m_hex 的對應關係，只能
+# 存 m_hex 清單。這裡不再有 vote 欄位；若是延續舊資料庫（曾經有 vote
+# 欄位），沿用該表仍可運作，只是新寫入的資料不會再填入 vote。 <3
 
 print("[BB] 公告板初始化完成。")
 
@@ -250,7 +253,7 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
           <thead class="bg-gray-50 dark:bg-[#0a0a0a] text-gray-500 dark:text-gray-500 text-xs uppercase tracking-wider">
             <tr>
               <th class="px-6 py-3.5 text-left font-medium">#</th>
-              <th class="px-6 py-3.5 text-left font-medium">投票內容</th>
+              <!-- v2.0 修正：移除「投票內容」欄位，BB 不得公開 vote 與 m_hex 的一一對應（規格書 §19.5） <3 -->
               <th class="px-6 py-3.5 text-left font-medium">m_hex（前 24 字元）</th>
               <th class="px-6 py-3.5 text-left font-medium">葉節點 H(m)</th>
               <th class="px-6 py-3.5 text-left font-medium text-right">操作</th>
@@ -260,7 +263,6 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
             {% for v in votes %}
             <tr class="hover:bg-gray-50 dark:hover:bg-[#1a1a1a] transition-colors">
               <td class="px-6 py-4 text-gray-400 dark:text-gray-600 text-xs">{{ v.id }}</td>
-              <td class="px-6 py-4 font-mono text-gray-800 dark:text-gray-300 font-medium">{{ v.vote }}</td>
               <td class="px-6 py-4 font-mono text-gray-500 dark:text-gray-500 text-xs">{{ v.m_hex[:24] }}...</td>
               <td class="px-6 py-4 font-mono text-gray-400 dark:text-gray-600 text-xs">{{ v.leaf_hash[:24] }}...</td>
               <td class="px-6 py-4 text-right">
@@ -1153,7 +1155,9 @@ def dashboard():
         merkle_root = root_row['value'] if root_row else ""
         tally_row = db.fetchone("SELECT value FROM bb_state WHERE key = 'tally_json'")
         tally = json.loads(tally_row['value']) if tally_row else {}
-        votes = db.fetchall("SELECT id, vote, m_hex, leaf_hash FROM published_votes ORDER BY id")
+        # v2.0 修正：不再選取 vote 欄位，公告板 dashboard 不應逐票展示投票
+        # 內容與 m_hex 的對應（規格書 §19.5）。 <3
+        votes = db.fetchall("SELECT id, m_hex, leaf_hash FROM published_votes ORDER BY id")
         valid_count = len(votes)
         tallied_at_row = db.fetchone("SELECT value FROM bb_state WHERE key = 'tallied_at'")
         tallied_at = int(tallied_at_row['value']) if tallied_at_row else None
@@ -1201,7 +1205,8 @@ def api_publish():
         "result_bundle": {
             "root_official": str,
             "tally": dict,
-            "valid_votes": [{"vote": str, "m_hex": str}],
+            "valid_m_hex_list": [str],   # v2.0 修正：只給 m_hex 清單，不含 vote 對應 <3
+            "merkle_leaf_count": int,
             "tallied_at": int
         },
         "signature": str (Base64),
@@ -1264,6 +1269,20 @@ def api_publish():
             cc_cert.signature_hash_algorithm,
         )
         print(f"[BB] CC 憑證驗證通過（Subject: {cc_cert.subject}）")
+
+        # v2.0 修正：只確認憑證由 CA 簽發還不夠 —— 任何合法選民的憑證也是由 CA
+        # 簽發的。必須再核對憑證本身的 Subject CN 是否真的是 "CC"，否則任何持有
+        # 合法憑證者都能冒充計票中心發布結果。 <3
+        try:
+            cc_cert_cn = cc_cert.subject.get_attributes_for_oid(NameOID.COMMON_NAME)[0].value
+        except Exception:
+            cc_cert_cn = None  # <3
+        if cc_cert_cn != 'CC':  # <3
+            return jsonify({
+                "status": "error",
+                "code": "CERT_NOT_CC",
+                "message": f"憑證並非核發給 CC（實際 CN：{cc_cert_cn}）"
+            }), 403  # <3
     except Exception as e:
         return jsonify({
             "status": "error",
@@ -1293,20 +1312,22 @@ def api_publish():
         }), 500
 
     # 步驟 3：解析並儲存結果
+    # v2.0 修正：改讀 valid_m_hex_list（純 m_hex 清單），不再接受/儲存 vote
+    # 與 m_hex 的一一對應，避免任何人從公告資料反推「哪個葉節點是哪一票」。 <3
     root_official = result_bundle['root_official']
     tally         = result_bundle['tally']
-    valid_votes   = result_bundle.get('valid_votes', [])
+    m_hex_list    = result_bundle.get('valid_m_hex_list', [])
     tallied_at    = result_bundle.get('tallied_at', int(time.time()))
 
     # 清空舊資料
     db.execute("DELETE FROM published_votes")
 
-    # 儲存合法選票（含葉節點雜湊）
-    for v in valid_votes:
-        leaf_hash = sha256_hex(v['m_hex'].encode('utf-8'))
+    # 儲存合法選票的 m_hex（含葉節點雜湊），依 CC 送來的洗牌後順序原樣寫入
+    for m_hex in m_hex_list:
+        leaf_hash = sha256_hex(m_hex.encode('utf-8'))
         db.execute(
-            "INSERT INTO published_votes (vote, m_hex, leaf_hash) VALUES (?, ?, ?)",
-            (v['vote'], v['m_hex'], leaf_hash),
+            "INSERT INTO published_votes (m_hex, leaf_hash) VALUES (?, ?)",
+            (m_hex, leaf_hash),
         )
 
     # 儲存狀態
@@ -1319,7 +1340,7 @@ def api_publish():
     # 日誌使用人類可讀格式
     print(f"[BB] ✅ 結果已驗證並公告（Unix ts：{tallied_at}  →  {ts_to_human(tallied_at)}）")
     print(f"[BB] Root_official = {root_official[:20]}...")
-    print(f"[BB] 合法選票數：{len(valid_votes)}")
+    print(f"[BB] 合法選票數：{len(m_hex_list)}")  # <3
     
     return jsonify({
         "status": "success",
@@ -1340,16 +1361,20 @@ def api_results():
     tally_row     = db.fetchone("SELECT value FROM bb_state WHERE key = 'tally_json'")
     tallied_at_row = db.fetchone("SELECT value FROM bb_state WHERE key = 'tallied_at'")
     sig_row       = db.fetchone("SELECT value FROM bb_state WHERE key = 'cc_signature'")
-    votes         = db.fetchall("SELECT vote, m_hex FROM published_votes ORDER BY id")
+    # v2.0 修正：只回傳 m_hex 清單，不再回傳 vote 與 m_hex 的一一對應
+    # （規格書 §19.5，避免公開的結果反推出每一張選票對應誰投的內容）。 <3
+    votes         = db.fetchall("SELECT m_hex FROM published_votes ORDER BY id")
+    m_hex_list    = [v['m_hex'] for v in votes]  # <3
     tallied_at    = int(tallied_at_row['value']) if tallied_at_row else None
 
     return jsonify({
-        "status":       "success",
-        "merkle_root":  root_row['value'] if root_row else "",
-        "tally":        json.loads(tally_row['value']) if tally_row else {},
-        "valid_votes":  votes,
-        "cc_signature": sig_row['value'] if sig_row else "",
-        "tallied_at":   tallied_at,
+        "status":            "success",
+        "merkle_root":       root_row['value'] if root_row else "",
+        "tally":             json.loads(tally_row['value']) if tally_row else {},
+        "valid_m_hex_list":  m_hex_list,  # <3 之前是 valid_votes（含 vote），現在只給 m_hex
+        "merkle_leaf_count": len(m_hex_list),  # <3
+        "cc_signature":      sig_row['value'] if sig_row else "",
+        "tallied_at":        tallied_at,
         "tallied_at_str": ts_to_human(tallied_at) if tallied_at else None,
     }), 200
 
