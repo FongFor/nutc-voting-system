@@ -41,8 +41,9 @@ from shared.crypto_utils import open_envelope_layer1, open_envelope_layer2, sign
 from shared.merkle_tree import MerkleTree
 from shared.format_utils import int_to_hex, hex_to_int, ts_to_human, bytes_to_b64
 from shared.db_utils import Database
-from shared.config_loader import make_reload_endpoint
-from shared.auth_component import create_auth_packet
+from shared.config_loader import make_reload_endpoint, get_service_registration_token
+from shared.admin_auth import is_internal_ip, check_admin_token, admin_auth_error  # <3 /api/tally 存取控制
+# v2.0 修正：release_key 改用專用格式簽章（見 _do_tally），不再需要 create_auth_packet <3
 from cryptography.hazmat.primitives import serialization
 
 # ============================================================
@@ -151,7 +152,12 @@ except Exception as ex:
     _ca_cert_pem = None
 
 try:
-    _cert_pem = load_or_request_certificate(KEYS_DIR, CC_ID, _public_key_pem, CA_URL)
+    # v2.0 修正：附上一次性 SERVICE_REGISTRATION_TOKEN，避免任何人單靠
+    # entity_id 字串就能向 CA 換發合法服務憑證。 <3
+    _cert_pem = load_or_request_certificate(
+        KEYS_DIR, CC_ID, _public_key_pem, CA_URL,
+        registration_token=get_service_registration_token(),
+    )  # <3
 except Exception as ex:
     print(f"[CC] 警告：無法取得憑證（{ex}）")
     _cert_pem = ""
@@ -550,7 +556,13 @@ def dashboard():
 
 @app.route('/ui/tally', methods=['POST'])
 def ui_tally():
-    """Web UI 觸發開票按鈕"""
+    """
+    Web UI 觸發開票按鈕。
+    v2.0 修正：補上內部 IP 白名單檢查（規格書 §18.4.4），瀏覽器表單提交
+    無法附加 Bearer Token，因此僅套用 IP 白名單這一層。 <3
+    """
+    if not is_internal_ip(request.remote_addr):
+        return jsonify(admin_auth_error()), 403  # <3
     _do_tally()
     return redirect('/')
 
@@ -637,7 +649,12 @@ def api_tally():
     3. 解密驗證所有暫存信封
     4. 建構 Merkle Tree
     5. 推送結果至 BB
+
+    存取控制（v2.0 修正，規格書 §18.4.4）：僅限內部 IP + Admin Bearer Token。
+    先前此端點任何人都能呼叫觸發開票。 <3
     """
+    if not is_internal_ip(request.remote_addr) or not check_admin_token():
+        return jsonify(admin_auth_error()), 403  # <3
     result = _do_tally()
     if result.get('status') == 'success':
         return jsonify(result), 200
@@ -724,23 +741,34 @@ def _do_tally() -> dict:
     if _get_state('done') == '1':
         return {"status": "already_done", "message": "已完成開票"}
 
-    # 步驟 1：向 TA 請求 SK_TA（v2.0 Sprint 2：附帶認證封包）
+    # 步驟 1：向 TA 請求 SK_TA
+    # v2.0 修正：改用規格書 §18.3.3 定義的 release_key 專用格式（頂層
+    # payload/signature/cert_pem，payload 含 requester_id/timestamp/nonce/
+    # purpose），不再套用通用 Auth_Packet 格式（那個格式沒有 purpose 欄位，
+    # 且 cert_pem 是包在 payload 內，與 TA 端現在的驗證邏輯對不上）。 <3
     try:
-        # 創建認證封包
         if _cert_pem and _private_key:
-            auth_packet = create_auth_packet(
-                sender_id=CC_ID,
-                receiver_id="TA",
-                sender_private_key=_private_key,
-                certificate_pem=_cert_pem
-            )
-            request_payload = {"auth": auth_packet}
-            print(f"[CC] 向 TA 請求 SK_TA（含認證封包，nonce: {auth_packet['payload']['nonce'][:16]}...）")
+            release_payload = {
+                "requester_id": CC_ID,
+                "timestamp":    int(time.time()),
+                "nonce":        secrets.token_hex(16),
+                "purpose":      "tally",
+            }
+            release_payload_bytes = json.dumps(
+                release_payload, sort_keys=True, ensure_ascii=False, separators=(',', ':')
+            ).encode('utf-8')  # <3 canonical JSON
+            release_signature = sign_data(release_payload_bytes, _private_key)
+            request_payload = {
+                "payload":   release_payload,
+                "signature": bytes_to_b64(release_signature),
+                "cert_pem":  _cert_pem,
+            }  # <3
+            print(f"[CC] 向 TA 請求 SK_TA（nonce: {release_payload['nonce'][:16]}...）")
         else:
             # 向後兼容：若無憑證，則不附帶認證封包
             request_payload = {}
             print(f"[CC] 警告：無憑證，向 TA 請求 SK_TA（無認證封包）")
-        
+
         resp = http_requests.post(f"{TA_URL}/api/release_key", json=request_payload, timeout=10)
         sk_ta_data = resp.json()
         
@@ -869,17 +897,23 @@ def _do_tally() -> dict:
         # valid_m_hex_list（純 m_hex 清單），不可含 vote 與 m_hex 的
         # 一一對應，否則任何人都能從公告結果反推「哪一張葉節點對應哪一
         # 票」。個別選票內容只保留在 tally 的候選人加總裡，不逐票公開。 <3
+        # v2.0 修正：補上 deadline、cc_id 兩個規格書 §18.5.1/§20.4 要求的
+        # 欄位，供 BB 做結構一致性檢查（BUNDLE_INCONSISTENT）與稽核追溯。 <3
         result_bundle = {
             "root_official":     merkle_root,
             "tally":             tally,
             "valid_m_hex_list":  m_hex_list,   # <3 只給 m_hex，不含 vote
             "merkle_leaf_count": len(m_hex_list),  # <3
+            "deadline":          _get_deadline(),  # <3
+            "cc_id":             CC_ID,  # <3
             "tallied_at":        now,
         }
-        
+
         # 對結果包進行 RSA-PSS 簽章
-        # 簽章內容：JSON 字串的 UTF-8 編碼
-        bundle_json = json.dumps(result_bundle, sort_keys=True, ensure_ascii=False)
+        # v2.0 修正：補上 separators=(',', ':') 做 canonical JSON（規格書
+        # §18.6）。先前缺少此參數，CC/BB 雙方雖能自洽驗章，但外部稽核工具
+        # 照規格重建 canonical JSON 後會因序列化結果不同而驗章失敗。 <3
+        bundle_json = json.dumps(result_bundle, sort_keys=True, ensure_ascii=False, separators=(',', ':'))  # <3
         bundle_bytes = bundle_json.encode('utf-8')
         signature = sign_data(bundle_bytes, _private_key)
         

@@ -46,7 +46,7 @@ from shared.auth_component import create_auth_packet, verify_auth_component
 from shared.blind_signature import blind_sign
 from shared.format_utils import int_to_hex, hex_to_int, ts_to_human
 from shared.db_utils import Database
-from shared.config_loader import make_reload_endpoint, get_delta_t
+from shared.config_loader import make_reload_endpoint, get_delta_t, get_service_registration_token
 
 # ============================================================
 # 常數設定
@@ -146,7 +146,12 @@ except Exception as ex:
 
 # 向 CA 申請憑證
 try:
-    _cert_pem = load_or_request_certificate(KEYS_DIR, TPA_ID, _public_key_pem, CA_URL)
+    # v2.0 修正：附上一次性 SERVICE_REGISTRATION_TOKEN，避免任何人單靠
+    # entity_id 字串就能向 CA 換發合法服務憑證。 <3
+    _cert_pem = load_or_request_certificate(
+        KEYS_DIR, TPA_ID, _public_key_pem, CA_URL,
+        registration_token=get_service_registration_token(),
+    )  # <3
 except Exception as ex:
     print(f"[TPA] 警告：無法取得憑證（{ex}），認證回應功能將受限。")
     _cert_pem = ""

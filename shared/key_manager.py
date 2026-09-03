@@ -96,9 +96,13 @@ def load_or_request_certificate(
     entity_id: str,
     public_key_pem: str,
     ca_url: str,
+    registration_token: str = None,
 ) -> str:
     """
     從 keys_dir 載入憑證；若不存在則向 CA 申請並儲存。
+
+    registration_token：服務帳號（TPA/TA/CC）申請憑證時需附帶的一次性
+    SERVICE_REGISTRATION_TOKEN（規格書 §0.5 Step 0.5、§1.4 Step 1.3）。 <3
 
     回傳：certificate PEM 字串
     """
@@ -111,9 +115,12 @@ def load_or_request_certificate(
 
     # 向 CA 申請憑證
     try:
+        payload = {"entity_id": entity_id, "public_key": public_key_pem}
+        if registration_token:
+            payload["registration_token"] = registration_token  # <3
         resp = requests.post(
             f"{ca_url}/api/issue_cert",
-            json={"entity_id": entity_id, "public_key": public_key_pem},
+            json=payload,
             timeout=10,
         )
         resp.raise_for_status()

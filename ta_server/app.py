@@ -34,7 +34,7 @@ from shared.key_manager import (
 )
 from shared.format_utils import int_to_hex, ts_to_human
 from shared.db_utils import Database
-from shared.config_loader import make_reload_endpoint, get_vote_duration, get_delta_t
+from shared.config_loader import make_reload_endpoint, get_vote_duration, get_delta_t, get_service_registration_token
 # v2.0 修正：release_key 改用專用驗證邏輯（見下方），不再需要通用 verify_auth_component <3
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes as _ta_hashes  # <3 用於驗證 release_key 請求簽章
@@ -110,7 +110,12 @@ except Exception as ex:
     _ca_cert_pem = None
 
 try:
-    _cert_pem = load_or_request_certificate(KEYS_DIR, TA_ID, _public_key_pem, CA_URL)
+    # v2.0 修正：附上一次性 SERVICE_REGISTRATION_TOKEN，避免任何人單靠
+    # entity_id 字串就能向 CA 換發合法服務憑證。 <3
+    _cert_pem = load_or_request_certificate(
+        KEYS_DIR, TA_ID, _public_key_pem, CA_URL,
+        registration_token=get_service_registration_token(),
+    )  # <3
 except Exception as ex:
     print(f"[TA] 警告：無法取得憑證（{ex}）")
     _cert_pem = ""

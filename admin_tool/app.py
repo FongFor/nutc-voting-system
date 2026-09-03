@@ -29,6 +29,7 @@ from flask import Flask, request, jsonify, render_template_string
 import requests as http_requests
 
 from shared.db_utils import Database
+from shared.config_loader import get_admin_api_token  # <3 呼叫 CA/CC 的 Admin 端點需要帶 Bearer Token
 
 # ============================================================
 # 常數設定
@@ -40,6 +41,11 @@ DB_PATH     = os.path.join(DATA_DIR, "admin.db")
 CA_URL    = os.environ.get("CA_URL",    "http://localhost:5001")
 TA_URL    = os.environ.get("TA_URL",    "http://localhost:5002")
 CC_URL    = os.environ.get("CC_URL",    "http://localhost:5003")
+
+
+def _admin_headers() -> dict:
+    """呼叫 CA /api/admin/* 或 CC /api/tally 時附上的 Admin Bearer Token 標頭。 <3"""
+    return {"Authorization": f"Bearer {get_admin_api_token()}"}
 BB_URL    = os.environ.get("BB_URL",    "http://localhost:5004")
 VOTER_URL = os.environ.get("VOTER_URL", "http://localhost:5005")
 
@@ -80,6 +86,7 @@ def _register_to_ca(voter_id: str, otp_hash: str) -> dict:
     resp = http_requests.post(
         f"{CA_URL}/api/admin/register_voter",
         json={"voter_id": voter_id, "otp_hash": otp_hash},
+        headers=_admin_headers(),  # <3
         timeout=10,
     )
     resp.raise_for_status()
@@ -583,7 +590,7 @@ def dashboard():
 
     # 從 CA 同步選民認證狀態（把 CA 端已完成的 registered 狀態寫回本地）
     try:
-        ca_resp = http_requests.get(f"{CA_URL}/api/admin/voter_registry", timeout=3)
+        ca_resp = http_requests.get(f"{CA_URL}/api/admin/voter_registry", headers=_admin_headers(), timeout=3)  # <3
         ca_data = ca_resp.json()
         if ca_data.get("status") == "success":
             for row in ca_data.get("voters", []):
@@ -745,7 +752,7 @@ def api_new_round():
 
     # 2. 清除 CA 選民名冊
     try:
-        resp = http_requests.post(f"{CA_URL}/api/admin/reset_voter_registry", json={}, timeout=10)
+        resp = http_requests.post(f"{CA_URL}/api/admin/reset_voter_registry", json={}, headers=_admin_headers(), timeout=10)  # <3
         results['ca'] = resp.json()
     except Exception as e:
         results['ca'] = {"status": "error", "message": str(e)}
@@ -803,7 +810,7 @@ def api_export():
 
     # 3. CA 選民名冊狀態
     try:
-        r = http_requests.get(f"{CA_URL}/api/admin/voter_registry", timeout=5)
+        r = http_requests.get(f"{CA_URL}/api/admin/voter_registry", headers=_admin_headers(), timeout=5)  # <3
         export["sections"]["ca_voter_registry"] = r.json().get("voters", [])
     except Exception as e:
         export["sections"]["ca_voter_registry"] = {"error": str(e)}

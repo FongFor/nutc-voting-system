@@ -10,7 +10,9 @@ ca_server/app.py  —  憑證授權中心 (CA)
 端點：
   GET  /api/ca_cert       取得 CA 根憑證（PEM 格式）
   POST /api/issue_cert    申請憑證（提供公鑰和 ID）
-  POST /api/verify_cert   驗證憑證是否由本 CA 簽發
+
+注意：本檔案沒有 /api/verify_cert 端點；各服務改用
+shared/key_manager.py 的 verify_cert_with_ca() 在本地驗證憑證。
 """
 
 import os
@@ -30,6 +32,8 @@ from cryptography.x509.oid import NameOID
 from cryptography import x509
 
 from shared.db_utils import Database
+from shared.admin_auth import check_admin_token, admin_auth_error  # <3 Admin 端點認證
+from shared.config_loader import get_service_registration_token  # <3 服務憑證一次性驗證
 
 # ============================================================
 # 常數設定
@@ -47,23 +51,61 @@ db.execute("""
         id          INTEGER PRIMARY KEY AUTOINCREMENT,
         entity_id   TEXT NOT NULL,
         cert_pem    TEXT NOT NULL,
-        issued_at   TEXT NOT NULL
+        issued_at   TEXT NOT NULL,
+        cert_serial TEXT,
+        revoked_at  INTEGER
     )
 """)
+# v2.0 修正：為舊資料庫補上憑證撤銷所需欄位（規格書 §19.1）。 <3
+for _cert_col_sql in [
+    "ALTER TABLE issued_certs ADD COLUMN cert_serial TEXT",
+    "ALTER TABLE issued_certs ADD COLUMN revoked_at  INTEGER",
+]:
+    try:
+        db.execute(_cert_col_sql)
+    except Exception:
+        pass  # 欄位已存在
 db.execute("""
     CREATE TABLE IF NOT EXISTS voter_registry (
         voter_id            TEXT PRIMARY KEY,
         otp_hash            TEXT NOT NULL,
         status              TEXT NOT NULL DEFAULT 'pending',
         registered_at       INTEGER NOT NULL,
-        issued_cert_serial  TEXT
+        issued_cert_serial  TEXT,
+        fail_count          INTEGER NOT NULL DEFAULT 0,
+        locked_until        INTEGER,
+        expires_at          INTEGER
+    )
+""")
+# v2.0 修正：為舊資料庫（本欄位加入前就存在的 voter_registry）補上新欄位。 <3
+for _voter_col_sql in [
+    "ALTER TABLE voter_registry ADD COLUMN fail_count   INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE voter_registry ADD COLUMN locked_until INTEGER",
+    "ALTER TABLE voter_registry ADD COLUMN expires_at   INTEGER",
+]:
+    try:
+        db.execute(_voter_col_sql)
+    except Exception:
+        pass  # 欄位已存在
+# v2.0 修正：服務帳號（TPA/TA/CC）憑證核發原本只檢查 entity_id 是否在
+# 硬編碼的 _SERVICE_IDS 集合中，任何人知道服務 ID 字串就能換發憑證。
+# 新增 service_registrations 表記錄每個服務帳號是否已兌換過一次性
+# SERVICE_REGISTRATION_TOKEN（規格書 §0.5 Step 0.5、§1.4 Step 1.3）。 <3
+db.execute("""
+    CREATE TABLE IF NOT EXISTS service_registrations (
+        entity_id     TEXT PRIMARY KEY,
+        registered_at INTEGER NOT NULL
     )
 """)
 
-# 服務帳號（不需 OTP 驗證）
+# 服務帳號（不需 OTP 驗證，改用 SERVICE_REGISTRATION_TOKEN 一次性驗證）
 _SERVICE_IDS = {'TPA', 'TA', 'CC', 'BB', 'CA', 'ADMIN'}
 # 時間誤差容許值（秒）
 _DELTA_T = int(os.environ.get("DELTA_T", "300"))
+# v2.0 修正：OTP 連續失敗鎖定與過期時間（規格書 §0.5、§0.6 S-0.2） <3
+_OTP_MAX_ATTEMPTS    = 3
+_OTP_LOCKOUT_SECONDS = 86400       # 24 小時
+_OTP_EXPIRY_SECONDS  = 7 * 86400   # 7 天
 
 
 def _hash_otp(otp: str) -> str:
@@ -141,23 +183,26 @@ def issue_certificate(entity_id: str, public_key_pem: str) -> str:
         x509.NameAttribute(NameOID.COMMON_NAME, entity_id),
     ])
     now = datetime.datetime.now(datetime.timezone.utc)
+    serial = x509.random_serial_number()
     cert = (
         x509.CertificateBuilder()
         .subject_name(subject)
         .issuer_name(_ca_root_cert.subject)
         .public_key(entity_public_key)
-        .serial_number(x509.random_serial_number())
+        .serial_number(serial)
         .not_valid_before(now)
-        .not_valid_after(now + datetime.timedelta(days=30))
+        # v2.0 修正：規格書 §0.4 Step 0.4 訂為 365 天，先前寫死 30 天，
+        # 教學/測試環境放著超過一個月沒重建就會出現「憑證已過期」的假性失敗。 <3
+        .not_valid_after(now + datetime.timedelta(days=365))
         .sign(_ca_private_key, hashes.SHA256())
     )
     cert_pem = cert.public_bytes(serialization.Encoding.PEM).decode('utf-8')
 
-    # 記錄至資料庫
+    # 記錄至資料庫（含序號，供後續撤銷查詢用；規格書 §19.1）
     db.execute(
-        "INSERT INTO issued_certs (entity_id, cert_pem, issued_at) VALUES (?, ?, ?)",
-        (entity_id, cert_pem, now.isoformat()),
-    )
+        "INSERT INTO issued_certs (entity_id, cert_pem, issued_at, cert_serial) VALUES (?, ?, ?, ?)",
+        (entity_id, cert_pem, now.isoformat(), str(serial)),
+    )  # <3
     print(f"[CA] 已核發憑證給 {entity_id}")
     return cert_pem
 
@@ -354,7 +399,13 @@ def api_admin_register_voter():
 
     若 voter_id 已存在且 status='registered' 則回傳 409。
     若 voter_id 存在但 status='pending' 則允許重新派發 OTP。
+
+    v2.0 修正：需要 Admin Bearer Token（規格書 §18.1.3）。先前此端點完全
+    沒有驗證，任何能連到 CA port 的人都能任意新增選民名冊。 <3
     """
+    if not check_admin_token():
+        return jsonify(admin_auth_error()), 401  # <3
+
     data = request.get_json()
     if not data or 'voter_id' not in data:
         return jsonify({"status": "error", "message": "缺少 voter_id"}), 400
@@ -382,15 +433,22 @@ def api_admin_register_voter():
         otp_plain = secrets.token_urlsafe(24)
         otp_hash  = _hash_otp(otp_plain)
 
+    # v2.0 修正：OTP 過期時間（規格書 §0.6 S-0.2 建議 7 天），可由 Admin
+    # 指定 expires_at，否則預設 now + 7 天。重新派發 OTP 時一併清除鎖定
+    # 狀態與失敗次數，讓選民能重新開始嘗試。 <3
+    expires_at = data.get('expires_at') or (now + _OTP_EXPIRY_SECONDS)
+
     if existing:
         db.execute(
-            "UPDATE voter_registry SET otp_hash = ?, registered_at = ? WHERE voter_id = ?",
-            (otp_hash, now, voter_id),
+            "UPDATE voter_registry SET otp_hash = ?, registered_at = ?, expires_at = ?, "
+            "fail_count = 0, locked_until = NULL WHERE voter_id = ?",
+            (otp_hash, now, expires_at, voter_id),
         )
     else:
         db.execute(
-            "INSERT INTO voter_registry (voter_id, otp_hash, status, registered_at) VALUES (?, ?, 'pending', ?)",
-            (voter_id, otp_hash, now),
+            "INSERT INTO voter_registry (voter_id, otp_hash, status, registered_at, expires_at) "
+            "VALUES (?, ?, 'pending', ?, ?)",
+            (voter_id, otp_hash, now, expires_at),
         )
 
     mode = "zero-knowledge" if external_otp_hash else "legacy"
@@ -418,10 +476,35 @@ def api_issue_cert():
 
     entity_id = data['entity_id']
 
-    # 服務帳號：跳過 OTP/PoP 驗證
+    # 服務帳號：跳過 OTP/PoP 驗證，改用一次性 SERVICE_REGISTRATION_TOKEN
+    # v2.0 修正：先前只檢查 entity_id 是否在硬編碼白名單中，任何人知道
+    # 服務 ID 字串（例如 "CC"）就能換發合法憑證，等同重現 v1.0「CA 對任意
+    # entity_id 都簽發憑證」的根本性漏洞。現在要求提供正確的
+    # registration_token，且每個 entity_id 只能成功兌換一次。 <3
     if entity_id in _SERVICE_IDS:
+        registration_token = data.get('registration_token', '')
+        expected_token = get_service_registration_token()
+
+        if db.exists("SELECT 1 FROM service_registrations WHERE entity_id = ?", (entity_id,)):
+            return jsonify({
+                "status": "error",
+                "code": "ALREADY_REGISTERED",
+                "message": f"{entity_id} 已核發過服務憑證，registration_token 已失效",
+            }), 403  # <3
+
+        if not expected_token or registration_token != expected_token:
+            return jsonify({
+                "status": "error",
+                "code": "SERVICE_TOKEN_INVALID",
+                "message": "SERVICE_REGISTRATION_TOKEN 無效或缺漏",
+            }), 403  # <3
+
         try:
             cert_pem = issue_certificate(entity_id, data['public_key'])
+            db.execute(
+                "INSERT INTO service_registrations (entity_id, registered_at) VALUES (?, ?)",
+                (entity_id, int(time.time())),
+            )  # <3 標記此服務帳號的 token 已使用，防止重複兌換
             return jsonify({
                 "status":      "success",
                 "message":     f"憑證核發成功 ({entity_id})",
@@ -443,7 +526,11 @@ def api_issue_cert():
         }), 400
 
     # 1. 檢查 voter_registry
-    row = db.fetchone("SELECT otp_hash, status FROM voter_registry WHERE voter_id = ?", (entity_id,))
+    row = db.fetchone(
+        "SELECT otp_hash, status, fail_count, locked_until, expires_at "
+        "FROM voter_registry WHERE voter_id = ?",
+        (entity_id,)
+    )
     if not row:
         return jsonify({"status": "error", "code": "ENTITY_NOT_REGISTERED",
                         "message": f"{entity_id} 尚未在系統中預先註冊"}), 403
@@ -452,13 +539,47 @@ def api_issue_cert():
         return jsonify({"status": "error", "code": "ALREADY_REGISTERED",
                         "message": f"{entity_id} 已申請過憑證"}), 403
 
+    now = int(time.time())
+
+    # v2.0 修正：帳號鎖定檢查（規格書 §0.5：連續 3 次 OTP 失敗鎖定 24 小時）。
+    # 先前完全沒有此機制，OTP 可以無限次嘗試。 <3
+    locked_until = row['locked_until']
+    if locked_until and now < locked_until:
+        return jsonify({
+            "status":  "error",
+            "code":    "ACCOUNT_LOCKED",
+            "message": f"OTP 連續錯誤次數過多，帳號已鎖定，請於 {locked_until - now} 秒後再試",
+        }), 403  # <3
+
+    # v2.0 修正：OTP 過期檢查（規格書 §0.6 S-0.2：建議 7 天）。先前 OTP
+    # 派發後永久有效。 <3
+    otp_expires_at = row['expires_at']
+    if otp_expires_at and now > otp_expires_at:
+        return jsonify({
+            "status":  "error",
+            "code":    "OTP_EXPIRED",
+            "message": "OTP 已過期，請聯繫管理員重新派發",
+        }), 403  # <3
+
     # 2. 驗證 OTP 雜湊
     if _hash_otp(otp) != row['otp_hash']:
+        # v2.0 修正：累計失敗次數，達到上限就鎖定 24 小時。 <3
+        new_fail_count = row['fail_count'] + 1
+        if new_fail_count >= _OTP_MAX_ATTEMPTS:
+            db.execute(
+                "UPDATE voter_registry SET fail_count = 0, locked_until = ? WHERE voter_id = ?",
+                (now + _OTP_LOCKOUT_SECONDS, entity_id),
+            )
+            print(f"[CA] {entity_id} OTP 連續錯誤 {_OTP_MAX_ATTEMPTS} 次，帳號已鎖定 24 小時")
+        else:
+            db.execute(
+                "UPDATE voter_registry SET fail_count = ? WHERE voter_id = ?",
+                (new_fail_count, entity_id),
+            )
         return jsonify({"status": "error", "code": "OTP_INVALID",
                         "message": "OTP 不正確"}), 403
 
     # 3. 驗證時間誤差（雙向）
-    now = int(time.time())
     if abs(now - int(timestamp)) > _DELTA_T:
         return jsonify({"status": "error", "code": "TIMESTAMP_OUT_OF_RANGE",
                         "message": f"時間偏差超過 {_DELTA_T} 秒"}), 403
@@ -501,7 +622,12 @@ def api_issue_cert():
 
 @app.route('/api/admin/voter_registry', methods=['GET'])
 def api_admin_voter_registry():
-    """[GET] 回傳全部選民的註冊狀態（供 admin_tool 同步 ca_status）。"""
+    """
+    [GET] 回傳全部選民的註冊狀態（供 admin_tool 同步 ca_status）。
+    v2.0 修正：需要 Admin Bearer Token（規格書 §18.1.3）。 <3
+    """
+    if not check_admin_token():
+        return jsonify(admin_auth_error()), 401  # <3
     rows = db.fetchall(
         "SELECT voter_id, status, registered_at, issued_cert_serial FROM voter_registry ORDER BY registered_at"
     )
@@ -522,11 +648,78 @@ def api_voter_status():
 
 @app.route('/api/admin/reset_voter_registry', methods=['POST'])
 def api_admin_reset_voter_registry():
-    """[POST] 清除 CA 選民名冊（新一輪前使用）。刪除全部 voter_registry 記錄。"""
+    """
+    [POST] 清除 CA 選民名冊（新一輪前使用）。刪除全部 voter_registry 記錄。
+    v2.0 修正：需要 Admin Bearer Token（規格書 §18.1.3）。先前任何人都能
+    清空選民名冊。 <3
+    """
+    if not check_admin_token():
+        return jsonify(admin_auth_error()), 401  # <3
     count = db.count("voter_registry")
     db.execute("DELETE FROM voter_registry")
     print(f"[CA] 選民名冊已清除（共 {count} 筆）。")
     return jsonify({"status": "success", "deleted_count": count}), 200
+
+
+@app.route('/api/admin/revoke_cert', methods=['POST'])
+def api_admin_revoke_cert():
+    """
+    [POST] 撤銷指定選民已核發之憑證（規格書 §19.1：voter_registry.status
+    允許轉為 'revoked'）。
+
+    Body: {"voter_id": str, "reason": str (optional)}
+
+    需要 Admin Bearer Token。 <3
+
+    注意：本端點只負責記錄撤銷狀態（voter_registry.status = 'revoked'、
+    issued_certs.revoked_at），不會即時讓其他服務停止接受該憑證 ——
+    即時撤銷查詢（OCSP/CRL）是規格書 §22.2 列為 v3.0 候選議題的未來工作，
+    本次僅落實資料模型與撤銷動作本身。
+    """
+    if not check_admin_token():
+        return jsonify(admin_auth_error()), 401  # <3
+
+    data = request.get_json() or {}
+    voter_id = str(data.get('voter_id', '')).strip()
+    if not voter_id:
+        return jsonify({"status": "error", "code": "MISSING_FIELDS",
+                        "message": "缺少 voter_id"}), 400
+
+    row = db.fetchone("SELECT status, issued_cert_serial FROM voter_registry WHERE voter_id = ?", (voter_id,))
+    if not row:
+        return jsonify({"status": "error", "code": "ENTITY_NOT_REGISTERED",
+                        "message": f"{voter_id} 不在選民名冊中"}), 404
+
+    if row['status'] != 'registered':
+        return jsonify({"status": "error", "code": "NOT_REGISTERED_YET",
+                        "message": f"{voter_id} 尚未核發過憑證，無需撤銷"}), 409
+
+    now = int(time.time())
+    db.execute("UPDATE voter_registry SET status = 'revoked' WHERE voter_id = ?", (voter_id,))
+    db.execute(
+        "UPDATE issued_certs SET revoked_at = ? WHERE entity_id = ? AND revoked_at IS NULL",
+        (now, voter_id),
+    )
+    print(f"[CA] 已撤銷 {voter_id} 的憑證（序號：{row['issued_cert_serial']}）")
+    return jsonify({
+        "status":      "success",
+        "voter_id":    voter_id,
+        "revoked_at":  now,
+        "cert_serial": row['issued_cert_serial'],
+    }), 200
+
+
+@app.route('/api/revocation_list', methods=['GET'])
+def api_revocation_list():
+    """
+    [GET] 公開撤銷清單（簡化版 CRL）。任何人可查詢已撤銷之憑證序號，
+    供未來 OCSP/CRL 整合使用（規格書 §22.2）。
+    """
+    rows = db.fetchall(
+        "SELECT entity_id, cert_serial, revoked_at FROM issued_certs "
+        "WHERE revoked_at IS NOT NULL ORDER BY revoked_at DESC"
+    )
+    return jsonify({"status": "success", "revoked": rows}), 200
 
 
 if __name__ == '__main__':

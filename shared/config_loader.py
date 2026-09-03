@@ -150,6 +150,20 @@ class _HotReloadConfig:
         """快速取得 timing 區塊的值。"""
         return self.raw.get("timing", {}).get(key, default)
 
+    def get_admin_api_token(self) -> str:
+        """取得 Admin API Bearer Token，優先讀取環境變數 ADMIN_API_TOKEN。"""
+        env_val = os.environ.get("ADMIN_API_TOKEN")
+        if env_val:
+            return env_val
+        return str(self.raw.get("security", {}).get("admin_api_token", ""))
+
+    def get_service_registration_token(self) -> str:
+        """取得服務憑證一次性註冊權杖，優先讀取環境變數 SERVICE_REGISTRATION_TOKEN。"""
+        env_val = os.environ.get("SERVICE_REGISTRATION_TOKEN")
+        if env_val:
+            return env_val
+        return str(self.raw.get("security", {}).get("service_registration_token", ""))
+
     def svc_url(self, service: str) -> str:
         """
         回傳容器內部服務 URL（Docker 網路名稱解析）。
@@ -256,6 +270,16 @@ def get_delta_t() -> int:
 def get_candidates() -> list:
     """取得候選人清單，優先讀取環境變數 CANDIDATES（逗號分隔）。"""
     return _hot_config.get_candidates()
+
+
+def get_admin_api_token() -> str:
+    """取得 Admin API Bearer Token，優先讀取環境變數 ADMIN_API_TOKEN。"""
+    return _hot_config.get_admin_api_token()
+
+
+def get_service_registration_token() -> str:
+    """取得服務憑證一次性註冊權杖，優先讀取環境變數 SERVICE_REGISTRATION_TOKEN。"""
+    return _hot_config.get_service_registration_token()
 
 
 # ── Flask Hot-Reload API 端點輔助 ────────────────────────────

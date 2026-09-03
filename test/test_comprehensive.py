@@ -61,7 +61,7 @@ from shared.blind_signature import (
 from shared.crypto_utils import encapsulate_vote, sign_data, verify_signature
 from shared.merkle_tree import MerkleTree
 from shared.format_utils import int_to_hex, hex_to_int, sha256_hex, bytes_to_b64
-from shared.config_loader import local_url, get_candidates
+from shared.config_loader import local_url, get_candidates, get_admin_api_token
 
 # ── 服務 URL ─────────────────────────────────────────────────
 CA_URL  = local_url("ca")
@@ -130,8 +130,11 @@ def register_voter(voter_id: str) -> Tuple[object, str, str]:
     ).decode()
 
     # Step 0.1：Admin 預先登記 → 取得 OTP
+    # v2.0 修正：CA /api/admin/register_voter 現在需要 Admin Bearer Token（規格書 §18.1.3）。 <3
     r = requests.post(f"{CA_URL}/api/admin/register_voter",
-                      json={"voter_id": voter_id}, timeout=TIMEOUT)
+                      json={"voter_id": voter_id},
+                      headers={"Authorization": f"Bearer {get_admin_api_token()}"},
+                      timeout=TIMEOUT)
     r.raise_for_status()
     data = r.json()
     if data.get("status") != "success":
@@ -274,7 +277,9 @@ def wait_for_deadline(margin_seconds: int = 2, verbose: bool = False):
 
 def trigger_tally(verbose: bool = False) -> Optional[dict]:
     """觸發開票（Phase 4+5），回傳開票結果。若已開票則取回現有結果。"""
-    r = requests.post(f"{CC_URL}/api/tally", json={}, timeout=120)
+    # v2.0 修正：CC /api/tally 現在需要 Admin Bearer Token（規格書 §18.4.4）。 <3
+    headers = {"Authorization": f"Bearer {get_admin_api_token()}"}
+    r = requests.post(f"{CC_URL}/api/tally", json={}, headers=headers, timeout=120)
     if r.status_code == 200:
         result = r.json()
         if result.get('status') == 'success':
@@ -805,17 +810,18 @@ class VotingSystemTestSuite:
                          f"AT-03 ✗ 無認證取 SK_TA 未被拒（{r.status_code}）")
 
             # 嘗試用自簽憑證偽冒 CC（應被拒：CA 鏈驗證失敗）
+            # v2.0 修正：TA /api/release_key 的請求格式已改為規格書 §18.3.3
+            # 定義的頂層 payload/signature/cert_pem（payload 含 requester_id/
+            # timestamp/nonce/purpose），不再是通用 Auth_Packet 格式。 <3
             fake_priv = rsa.generate_private_key(public_exponent=65537, key_size=2048)
             fake_cert = self._gen_self_signed_cert(fake_priv, "CC")
-            # 構造符合 TA 期望的認證封包格式（cert_pem 在 payload 內）
             fake_payload = {
-                "sender_id":   "CC",
-                "receiver_id": "TA",
-                "timestamp":   int(time.time()),
-                "nonce":       secrets.token_hex(16),
-                "cert_pem":    fake_cert,
+                "requester_id": "CC",
+                "timestamp":    int(time.time()),
+                "nonce":        secrets.token_hex(16),
+                "purpose":      "tally",
             }
-            payload_bytes = json.dumps(fake_payload, sort_keys=True, ensure_ascii=False).encode()
+            payload_bytes = json.dumps(fake_payload, sort_keys=True, ensure_ascii=False, separators=(',', ':')).encode()
             fake_sig = fake_priv.sign(
                 payload_bytes,
                 asym_padding.PSS(mgf=asym_padding.MGF1(crypto_hashes.SHA256()),
@@ -823,10 +829,9 @@ class VotingSystemTestSuite:
                 crypto_hashes.SHA256(),
             )
             r = requests.post(f"{TA_URL}/api/release_key", json={
-                "auth": {
-                    "payload":   fake_payload,
-                    "signature": base64.b64encode(fake_sig).decode(),
-                },
+                "payload":   fake_payload,
+                "signature": base64.b64encode(fake_sig).decode(),
+                "cert_pem":  fake_cert,
             }, timeout=TIMEOUT)
             self._assert(r.status_code == 403,
                          "AT-03 ✓ 偽冒 CC 取 SK_TA 被拒（403）[S-4.1]",

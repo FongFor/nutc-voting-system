@@ -1292,7 +1292,9 @@ def api_publish():
 
     # 步驟 2：驗證 CC 對 result_bundle 的 RSA-PSS 簽章
     try:
-        bundle_json = json.dumps(result_bundle, sort_keys=True, ensure_ascii=False)
+        # v2.0 修正：補上 separators=(',', ':') 做 canonical JSON（規格書
+        # §18.6），須與 CC 端簽章時的序列化方式完全一致，否則驗章必定失敗。 <3
+        bundle_json = json.dumps(result_bundle, sort_keys=True, ensure_ascii=False, separators=(',', ':'))  # <3
         bundle_bytes = bundle_json.encode('utf-8')
         signature = b64_to_bytes(signature_b64)
         
@@ -1314,10 +1316,26 @@ def api_publish():
     # 步驟 3：解析並儲存結果
     # v2.0 修正：改讀 valid_m_hex_list（純 m_hex 清單），不再接受/儲存 vote
     # 與 m_hex 的一一對應，避免任何人從公告資料反推「哪個葉節點是哪一票」。 <3
-    root_official = result_bundle['root_official']
-    tally         = result_bundle['tally']
-    m_hex_list    = result_bundle.get('valid_m_hex_list', [])
-    tallied_at    = result_bundle.get('tallied_at', int(time.time()))
+    root_official      = result_bundle['root_official']
+    tally              = result_bundle['tally']
+    m_hex_list         = result_bundle.get('valid_m_hex_list', [])
+    merkle_leaf_count  = result_bundle.get('merkle_leaf_count')
+    tallied_at         = result_bundle.get('tallied_at', int(time.time()))
+
+    # v2.0 修正：新增結構一致性檢查（規格書 §18.5.1 BUNDLE_INCONSISTENT）。
+    # 只驗證簽章代表「CC 確實簽了這包資料」，並不代表資料本身內部自洽；
+    # 這裡額外核對 merkle_leaf_count 與 m_hex 清單長度、tally 加總是否一致，
+    # 防止 CC 端邏輯錯誤或惡意建構出自相矛盾的結果包被 BB 照單全收。 <3
+    tally_sum = sum(tally.values()) if isinstance(tally, dict) else -1
+    if merkle_leaf_count != len(m_hex_list) or tally_sum != len(m_hex_list):
+        return jsonify({
+            "status": "error",
+            "code": "BUNDLE_INCONSISTENT",
+            "message": (
+                f"結果包內部不一致：merkle_leaf_count={merkle_leaf_count}, "
+                f"len(valid_m_hex_list)={len(m_hex_list)}, sum(tally)={tally_sum}"
+            ),
+        }), 403  # <3
 
     # 清空舊資料
     db.execute("DELETE FROM published_votes")
@@ -1331,11 +1349,15 @@ def api_publish():
         )
 
     # 儲存狀態
+    # v2.0 修正：補存 cc_cert_pem，讓選民端 Phase 6 Step 6.2a 可以獨立驗證
+    # 「簽章公鑰本身是否合法」，而不是單方面信任 BB 的驗證結果（規格書
+    # §6.3 Step 6.1、§18.5.2；先前 BB 只存 cc_signature，沒存 cc_cert_pem）。 <3
     db.execute("INSERT OR REPLACE INTO bb_state (key, value) VALUES ('published', '1')")
     db.execute("INSERT OR REPLACE INTO bb_state (key, value) VALUES ('merkle_root', ?)", (root_official,))
     db.execute("INSERT OR REPLACE INTO bb_state (key, value) VALUES ('tally_json', ?)", (json.dumps(tally),))
     db.execute("INSERT OR REPLACE INTO bb_state (key, value) VALUES ('tallied_at', ?)", (str(tallied_at),))
     db.execute("INSERT OR REPLACE INTO bb_state (key, value) VALUES ('cc_signature', ?)", (signature_b64,))
+    db.execute("INSERT OR REPLACE INTO bb_state (key, value) VALUES ('cc_cert_pem', ?)", (cert_pem,))  # <3
 
     # 日誌使用人類可讀格式
     print(f"[BB] ✅ 結果已驗證並公告（Unix ts：{tallied_at}  →  {ts_to_human(tallied_at)}）")
@@ -1361,6 +1383,7 @@ def api_results():
     tally_row     = db.fetchone("SELECT value FROM bb_state WHERE key = 'tally_json'")
     tallied_at_row = db.fetchone("SELECT value FROM bb_state WHERE key = 'tallied_at'")
     sig_row       = db.fetchone("SELECT value FROM bb_state WHERE key = 'cc_signature'")
+    cc_cert_row   = db.fetchone("SELECT value FROM bb_state WHERE key = 'cc_cert_pem'")  # <3
     # v2.0 修正：只回傳 m_hex 清單，不再回傳 vote 與 m_hex 的一一對應
     # （規格書 §19.5，避免公開的結果反推出每一張選票對應誰投的內容）。 <3
     votes         = db.fetchall("SELECT m_hex FROM published_votes ORDER BY id")
@@ -1374,6 +1397,7 @@ def api_results():
         "valid_m_hex_list":  m_hex_list,  # <3 之前是 valid_votes（含 vote），現在只給 m_hex
         "merkle_leaf_count": len(m_hex_list),  # <3
         "cc_signature":      sig_row['value'] if sig_row else "",
+        "cc_cert_pem":       cc_cert_row['value'] if cc_cert_row else "",  # <3 讓選民端可獨立驗證簽章公鑰身分鏈
         "tallied_at":        tallied_at,
         "tallied_at_str": ts_to_human(tallied_at) if tallied_at else None,
     }), 200
