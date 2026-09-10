@@ -573,7 +573,11 @@ def api_auth():
     print(f"[TPA] 認證成功：{sender_id}（Unix ts：{now}  →  {ts_to_human(now)}）")
 
     # ── 生成 TPA 認證回應封包 ────────────────────────────
-    response_packet = create_auth_packet(TPA_ID, sender_id, _private_key, _cert_pem)
+    # v3.0 修正：原本呼叫 create_auth_packet() 沒帶 nonce_echo，回應封包
+    # 裡從未包含選民這次送出的 NVoter，跟規格書「TPA 回應 NVoter 以建立
+    # 本次認證之雙向關聯」的設計不符——就算選民端之後要驗證雙向關聯，
+    # TPA 自己這端也從未真的把值放進去過。 <3
+    response_packet = create_auth_packet(TPA_ID, sender_id, _private_key, _cert_pem, nonce_echo=si)  # <3
 
     # ── 簽發 Voting Token（Phase 2 Step 2.3） ────────────
     deadline = _get_deadline()

@@ -656,6 +656,16 @@ async function doVote() {
     });
     const authData = await authResp.json();
     if (authData.status !== 'success') throw new Error('TPA 認證失敗：' + (authData.message || authData.code || ''));
+    // 已知限制（v3.0 評估後刻意不做）：這裡沒有驗證 authData.response_packet
+    // 的簽章與 nonce_echo，即未做雙向認證裡「選民驗證 TPA」的那一半。原因：
+    //   1. 要驗證需要從 authData.tpa_cert_pem 解析出公鑰，但 Web Crypto API
+    //      沒有 X.509 憑證解析器，得自己刻一段 ASN.1 解析，成本不小。
+    //   2. 這個檢查要防的是「攻擊者竄改選民瀏覽器 ↔ voter_client 之間的
+    //      回應」，但這段路徑現在已經走 HTTPS（見 Caddy），攻擊門檻已經
+    //      被 TLS 拉高很多；就算真的被偽造，偽造的 Token 一樣會在
+    //      /api/blind_sign 因簽章驗證失敗被真正的 TPA 擋下，頂多造成這
+    //      次認證失敗，不會產生偽造選票。
+    // 綜合效益成本後判斷不值得實作，非疏漏。
     // v2.0 修正：之前這裡拿到 authData.voting_token 後從未使用，導致 Phase 3
     // 盲簽章請求沒有帶 Token，Phase 2 的身分驗證與 Phase 3 的取簽完全脫鉤。 <3
     const votingToken = authData.voting_token;
