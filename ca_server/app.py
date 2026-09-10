@@ -18,7 +18,6 @@ shared/key_manager.py 的 verify_cert_with_ca() 在本地驗證憑證。
 import os
 import sys
 import hashlib
-import secrets
 import time
 import datetime
 
@@ -387,21 +386,23 @@ def api_admin_register_voter():
     """
     [POST] 管理員預先註冊選民（Phase 0 Step 0.1）。
 
-    Zero-knowledge 模式（推薦）：
+    Zero-knowledge 模式（唯一支援的模式）：
         Body: {"voter_id": str, "otp_hash": str}
-        管理員自行生成 OTP，僅傳入 H(OTP)；CA 永不接觸 OTP 明文。
+        呼叫端（管理者工具或其他自動化腳本）自行在本地生成 OTP，僅傳入
+        H(OTP)；CA 永不接觸 OTP 明文。
         回傳: {"status", "voter_id"}（不含 otp）
-
-    Legacy 模式（向後相容，測試用）：
-        Body: {"voter_id": str}
-        CA 自行生成 OTP 並回傳明文（CA 端有短暫明文）。
-        回傳: {"status", "voter_id", "otp"}
 
     若 voter_id 已存在且 status='registered' 則回傳 409。
     若 voter_id 存在但 status='pending' 則允許重新派發 OTP。
 
     v2.0 修正：需要 Admin Bearer Token（規格書 §18.1.3）。先前此端點完全
     沒有驗證，任何能連到 CA port 的人都能任意新增選民名冊。 <3
+
+    v3.0 修正：拿掉原本「缺少 otp_hash 就退回 Legacy 模式、由 CA 自己生成
+    明文 OTP 並在回應中直接回傳」的相容路徑。這條路徑等於 CA 本身仍保留
+    一條會經手明文 OTP 的後門，跟「CA 永不接觸 OTP 明文」的零知識設計互
+    相矛盾——而且不是假設情境，測試套件過去就是圖方便一路走這條路徑。
+    現在強制要求 otp_hash，呼叫端必須自行生成 OTP、只送雜湊值過來。 <3
     """
     if not check_admin_token():
         return jsonify(admin_auth_error()), 401  # <3
@@ -423,15 +424,15 @@ def api_admin_register_voter():
             "message": f"{voter_id} 已完成憑證申請",
         }), 409
 
-    # ── Zero-knowledge 模式：管理員提供 H(OTP)，CA 永不知曉明文 ──
-    external_otp_hash = data.get('otp_hash', '').strip()
-    if external_otp_hash:
-        otp_hash    = external_otp_hash
-        otp_plain   = None  # CA 端完全無明文
-    else:
-        # Legacy 模式：CA 自行生成（測試用）
-        otp_plain = secrets.token_urlsafe(24)
-        otp_hash  = _hash_otp(otp_plain)
+    # ── Zero-knowledge 模式：呼叫端提供 H(OTP)，CA 永不知曉明文 ──
+    otp_hash = data.get('otp_hash', '').strip()
+    if not otp_hash:
+        return jsonify({
+            "status":  "error",
+            "code":    "MISSING_OTP_HASH",
+            "message": "缺少 otp_hash：CA 不再接受由自己生成明文 OTP 的請求，"
+                       "請於呼叫端本地生成 OTP 並只提交其雜湊值",
+        }), 400  # <3
 
     # v2.0 修正：OTP 過期時間（規格書 §0.6 S-0.2 建議 7 天），可由 Admin
     # 指定 expires_at，否則預設 now + 7 天。重新派發 OTP 時一併清除鎖定
@@ -451,13 +452,8 @@ def api_admin_register_voter():
             (voter_id, otp_hash, now, expires_at),
         )
 
-    mode = "zero-knowledge" if external_otp_hash else "legacy"
-    print(f"[CA] 已預先註冊選民：{voter_id}（{mode} 模式）")
-
-    resp = {"status": "success", "voter_id": voter_id}
-    if otp_plain:
-        resp["otp"] = otp_plain  # 僅 legacy 模式回傳明文
-    return jsonify(resp), 200
+    print(f"[CA] 已預先註冊選民：{voter_id}（zero-knowledge 模式）")
+    return jsonify({"status": "success", "voter_id": voter_id}), 200
 
 
 @app.route('/api/issue_cert', methods=['POST'])

@@ -580,13 +580,18 @@ def api_auth():
     token_lifetime = 600  # 10 分鐘
     expires_at = min(deadline, now + token_lifetime) if deadline > 0 else now + token_lifetime
 
+    # v3.0 修正：拿掉 nonce_bind 欄位。它原本存的是核發這張票那次認證用
+    # 的 si，立意是把「這張票」跟「當初是哪次認證產生的」綁在一起，但
+    # /api/blind_sign 兌換時從未讀取或比對過這個欄位——它不是秘密（票本
+    # 身一旦交付選民就完整持有這個值），要求兌換時「回傳」它也證明不了
+    # 額外的事，純粹是簽了章但沒有人檢查的裝飾欄位，拿掉不影響任何現行
+    # 邏輯，避免讓人誤以為這裡有一層實際生效的防線。 <3
     token_id = secrets.token_hex(32)
     token_payload = {
         "token_id":   token_id,
         "voter_id":   sender_id,
         "issued_at":  now,
         "expires_at": expires_at,
-        "nonce_bind": si,
     }
     # v2.0 修正：補上 separators=(',', ':') 做 canonical JSON（規格書 §18.6）。
     # 先前缺少此參數，TPA 自簽自驗雖能自洽，但外部稽核工具照規格重建

@@ -131,15 +131,19 @@ def register_voter(voter_id: str) -> Tuple[object, str, str]:
 
     # Step 0.1：Admin 預先登記 → 取得 OTP
     # v2.0 修正：CA /api/admin/register_voter 現在需要 Admin Bearer Token（規格書 §18.1.3）。 <3
+    # v3.0 修正：CA 已拿掉「缺 otp_hash 就自己生成明文 OTP」的 Legacy 模式，
+    # 這裡改成跟 admin_tool 一致的零知識流程——測試腳本本地生成 OTP，只把
+    # 雜湊值送給 CA，明文自己留著（模擬 Admin 派發給選民的角色）。 <3
+    otp = secrets.token_urlsafe(24)
+    otp_hash = hashlib.sha256(otp.encode('utf-8')).hexdigest()
     r = requests.post(f"{CA_URL}/api/admin/register_voter",
-                      json={"voter_id": voter_id},
+                      json={"voter_id": voter_id, "otp_hash": otp_hash},
                       headers={"Authorization": f"Bearer {get_admin_api_token()}"},
                       timeout=TIMEOUT)
     r.raise_for_status()
     data = r.json()
     if data.get("status") != "success":
         raise RuntimeError(f"register_voter 失敗：{data}")
-    otp = data["otp"]
 
     # Step 0.3：PoP 簽章
     ts = int(time.time())
