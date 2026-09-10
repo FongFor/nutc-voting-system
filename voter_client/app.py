@@ -86,25 +86,49 @@ db.execute("""
 
 
 def _flush_pending(rows):
-    """打亂順序後逐一送給 CC。不論 CC 接受或拒絕，都從佇列移除——
-    被拒絕的信封（例如 token_hash 重複）本來就不可能靠重試變成功。"""
+    """打亂順序後逐一送給 CC。
+
+    v3.0 修正：原本不論成功或失敗一律從佇列刪除，理由是「反正拒絕了
+    重試也不會成功」——但這個推論只對 CC「明確拒絕」（如 token_hash
+    重複、截止時間已過，皆回傳 403）成立，對「網路暫時連不上、CC 短暫
+    無回應、CC 內部錯誤」這類暫時性失敗完全不成立。原本的寫法會讓
+    選民的票在這類暫時性狀況下被永久靜默丟棄、不會重試，選民卻已經
+    看過「已收到」的訊息，完全不知道自己的票消失了。
+    現在改成：只有明確成功（200）或 CC 明確拒絕（403，代表不管重試
+    幾次都不會成功）才移除；連線例外或其他非預期狀態碼一律保留在
+    佇列裡，留給下一輪排程重試。 <3
+    """
     rows = list(rows)
     random.SystemRandom().shuffle(rows)
     for row in rows:
         envelope = {k: row[k] for k in ('c_data', 'iv', 'tag', 'aad', 'c_key', 'token_hash')}
         try:
             r = http_requests.post(f"{CC_URL}/api/receive_envelope", json=envelope, timeout=10)
-            if r.status_code == 200:
-                print(f"[Voter] 批次送出信封成功（token_hash={row['token_hash'][:16]}...）")
-            else:
-                print(f"[Voter] 批次送出信封被 CC 拒絕（{r.status_code}）：{r.text[:200]}")
         except Exception as e:
-            print(f"[Voter] 批次送出信封失敗（連線錯誤）：{e}")
-        db.execute("DELETE FROM pending_envelope WHERE id = ?", (row['id'],))
+            print(f"[Voter] 批次送出信封失敗（連線錯誤，保留於佇列待重試）：{e}")  # <3
+            continue  # <3 不刪除，留待下一輪重試
+
+        if r.status_code == 200:
+            print(f"[Voter] 批次送出信封成功（token_hash={row['token_hash'][:16]}...）")
+            db.execute("DELETE FROM pending_envelope WHERE id = ?", (row['id'],))
+        elif r.status_code == 403:
+            # CC 明確拒絕（token_hash 重複、選舉已截止等），重試也不會
+            # 成功，才允許移除。 <3
+            print(f"[Voter] 批次送出信封被 CC 明確拒絕（403，從佇列移除）：{r.text[:200]}")  # <3
+            db.execute("DELETE FROM pending_envelope WHERE id = ?", (row['id'],))
+        else:
+            # 非預期狀態碼（例如 CC 內部錯誤 500），保留待重試。 <3
+            print(f"[Voter] 批次送出信封收到非預期狀態碼 {r.status_code}（保留於佇列待重試）：{r.text[:200]}")  # <3
 
 
 def _remaining_seconds():
-    """查詢投票剩餘秒數；選舉尚未開始或查詢失敗回傳 None。"""
+    """查詢投票剩餘秒數；選舉尚未開始、查詢失敗、或投票時間不限制
+    （TA 的 deadline<=0）皆回傳 None。只用於「距截止還有多久、是否該
+    提早強制 flush」這種需要具體秒數的場景——deadline 不限制時本來就
+    沒有「快到期」這回事，回傳 None 讓呼叫端跳過強制 flush 判斷是正確
+    的；但這不代表選舉沒有在進行中，判斷「現在能不能投票」請改用
+    _voting_open()，不要直接把這裡的 None 當成「已截止」。 <3
+    """
     try:
         r = http_requests.get(f"{TA_URL}/api/deadline", timeout=5)
         d = r.json()
@@ -113,6 +137,28 @@ def _remaining_seconds():
         return d.get("remaining_seconds")
     except Exception:
         return None
+
+
+def _voting_open():
+    """確認選舉目前是否真的還能接受投票。
+
+    v3.0 修正：submit_envelope() 原本直接用 `_remaining_seconds() is
+    None` 判斷「已截止」，但 TA 對「投票時間不限制」（deadline<=0）的
+    合法運行狀態，remaining_seconds 欄位本來就是 None——導致啟用不限
+    時投票模式時，每一筆信封提交都會被誤判成截止而拒收。這裡改成直接
+    採信 TA 自己算好的 is_expired 欄位（TA 內部已正確處理 deadline<=0
+    代表不限制、永遠不算過期的邏輯），不要自己用 remaining_seconds
+    重新推導一次容易出錯的等價判斷。查詢失敗一律 fail-secure 視為
+    不能投票。 <3
+    """
+    try:
+        r = http_requests.get(f"{TA_URL}/api/deadline", timeout=5)
+        d = r.json()
+    except Exception:
+        return False  # <3 查不到就 fail-secure 拒絕，不要樂觀放行
+    if d.get("election_state") != "running":
+        return False
+    return not d.get("is_expired", True)
 
 
 def _batch_scheduler_loop():
@@ -252,9 +298,12 @@ def submit_envelope():
 
     # 先確認選舉確實還在進行中，避免快截止前收進佇列的信封，稍後送給 CC
     # 時才被默默拒絕，選民卻已經看到「已收到」的誤導訊息。查不到（TA
-    # 連不上）也一併拒絕，維持 fail-secure。 <3
-    remaining = _remaining_seconds()
-    if remaining is None or remaining <= 0:
+    # 連不上）也一併拒絕，維持 fail-secure。
+    # v3.0 修正：原本用 `_remaining_seconds() is None` 判斷已截止，但
+    # 「投票時間不限制」的合法運行狀態下 remaining_seconds 本來就是
+    # None，會讓每一筆提交都被誤判成截止而拒收；改用 _voting_open()
+    # 正確處理這個情況。 <3
+    if not _voting_open():
         return jsonify({
             "status":  "error",
             "code":    "DEADLINE_PASSED",
@@ -422,6 +471,12 @@ function modinv(a, m) {
   }
   return ((s0 % m) + m) % m;
 }
+function bigintGcd(a, b) {
+  a = a < 0n ? -a : a;
+  b = b < 0n ? -b : b;
+  while (b) { [a, b] = [b, a % b]; }
+  return a;
+}
 
 /* ---------- FDH (MGF1-SHA256)  ---------- */
 async function fdh(mBytes, nBits) {
@@ -442,12 +497,17 @@ async function fdh(mBytes, nBits) {
 
 /* ---------- 盲化 / 去盲化 ---------- */
 function generateBlindingFactor(n) {
+  // v3.0 修正：原本只檢查 r > 1，沒檢查 gcd(r,n)==1，跟 Python 版
+  // shared/blind_signature.py 的 generate_blinding_factor() 不一致——
+  // 若 r 剛好跟 n 不互質（RSA-2048 下機率微乎其微，但不是不可能），
+  // modinv(r, n) 會靜默算出錯誤結果，導致去盲化失敗且錯誤訊息完全
+  //看不出原因。補上跟 Python 版一致的互質檢查。 <3
   const bytes = new Uint8Array(Math.ceil(n.toString(16).length / 2) + 4);
   let r;
   do {
     crypto.getRandomValues(bytes);
     r = hexToBigInt(bytesToHex(bytes)) % n;
-  } while (r <= 1n);
+  } while (r <= 1n || bigintGcd(r, n) !== 1n);  // <3
   return r;
 }
 function blindMessage(mu, r, e, n)   { return (mu * modpow(r, e, n)) % n; }
