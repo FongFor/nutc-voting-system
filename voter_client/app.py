@@ -246,6 +246,12 @@ def proxy_ca_voter_status():
     voter_id = request.args.get('voter_id', '')
     return _proxy("GET", f"{CA_URL}/api/voter_status", params={'voter_id': voter_id})
 
+@app.route('/api/proxy/ca/ca_cert', methods=['GET'])
+def proxy_ca_ca_cert():
+    """v3.0 新增：讓選民端瀏覽器能拿到 CA 根憑證，作為驗證 TA/CC/TPA
+    憑證鏈的信任錨點。"""
+    return _proxy("GET", f"{CA_URL}/api/ca_cert")
+
 @app.route('/api/proxy/tpa/public_key', methods=['GET'])
 def proxy_tpa_pk():
     return _proxy("GET", f"{TPA_URL}/api/public_key")
@@ -402,6 +408,130 @@ function b64encode(bytes) {
   return btoa(String.fromCharCode(...bytes));
 }
 
+/* ---------- 最小 DER/ASN.1 解析器 ---------------------------------------
+   v3.0 新增：這份設計的重點之一是降低所有實體之間的信任感——過去 TA/CC/
+   TPA 的 /api/public_key 只回傳裸公鑰，選民瀏覽器完全沒有材料能驗證這把
+   公鑰真的是 CA 認證過的那一把，中間人只要偽造一次回應、替換掉公鑰，就
+   能在不被發現的情況下竊聽或竄改選票內容。Web Crypto API 沒有內建 X.509
+   解析器，這裡手刻一個最小、只服務本系統固定憑證結構的 DER TLV 解析器：
+   只支援 definite-length 編碼（DER 恆定如此），足以走完
+   Certificate → tbsCertificate/signatureValue、
+   tbsCertificate → subject/subjectPublicKeyInfo，
+   以及從 subjectPublicKeyInfo 內的 RSAPublicKey 直接解出 n、e。 <3
+   ------------------------------------------------------------------- */
+function derReadTLV(bytes, offset) {
+  const tag = bytes[offset];
+  const lenByte = bytes[offset + 1];
+  let lenOfLen = 0, length;
+  if (lenByte & 0x80) {
+    lenOfLen = lenByte & 0x7f;
+    length = 0;
+    for (let i = 0; i < lenOfLen; i++) length = (length << 8) | bytes[offset + 2 + i];
+  } else {
+    length = lenByte;
+  }
+  const headerLen     = 2 + lenOfLen;
+  const contentStart  = offset + headerLen;
+  const contentEnd    = contentStart + length;
+  return { tag, start: offset, end: contentEnd, contentStart, contentEnd };
+}
+function derChildren(bytes, start, end) {
+  const out = [];
+  for (let o = start; o < end;) {
+    const tlv = derReadTLV(bytes, o);
+    out.push(tlv);
+    o = tlv.end;
+  }
+  return out;
+}
+function derFindOid(bytes, oidValueBytes, start, end) {
+  /* 在 [start,end) 範圍內找 tag=0x06(OBJECT IDENTIFIER) 且值等於 oidValueBytes
+     的 TLV，回傳其「緊接在後」的 TLV（即該 RDN AttributeTypeAndValue 的值）。
+     用位元組樣式搜尋取代完整 RDN/SET 結構解析——本系統 CA 核發的憑證 subject
+     恆為固定的 [organizationName, commonName] 兩個屬性，足夠安全地簡化。 */
+  search:
+  for (let i = start; i + 2 + oidValueBytes.length <= end; i++) {
+    if (bytes[i] !== 0x06 || bytes[i + 1] !== oidValueBytes.length) continue;
+    for (let j = 0; j < oidValueBytes.length; j++) {
+      if (bytes[i + 2 + j] !== oidValueBytes[j]) continue search;
+    }
+    return derReadTLV(bytes, derReadTLV(bytes, i).end);
+  }
+  return null;
+}
+function parseCertificate(certPem) {
+  const der = new Uint8Array(pemToDer(certPem));
+  const top = derReadTLV(der, 0);
+  const [tbs, , sigValTlv] = derChildren(der, top.contentStart, top.contentEnd);
+
+  // signatureValue 是 BIT STRING，內容第一個位元組是 unused-bits 計數
+  // （RSA 簽章恆為 0x00），要跳過它才是真正的簽章 bytes。
+  const sigValue = der.slice(sigValTlv.contentStart + 1, sigValTlv.contentEnd);
+  // 簽章驗證對象是 tbsCertificate「完整的 DER 編碼」（含自己的 tag/length）
+  const tbsBytes = der.slice(tbs.start, tbs.end);
+
+  let tbsChildren = derChildren(der, tbs.contentStart, tbs.contentEnd);
+  if (tbsChildren[0].tag === 0xa0) tbsChildren = tbsChildren.slice(1);  // 跳過可選的 [0] version
+  // 剩餘依序：serialNumber, signature(AlgId), issuer, validity, subject, subjectPublicKeyInfo
+  const subjectTlv = tbsChildren[4];
+  const spkiTlv    = tbsChildren[5];
+  const spkiBytes  = der.slice(spkiTlv.start, spkiTlv.end);
+
+  const cnTlv = derFindOid(der, [0x55, 0x04, 0x03], subjectTlv.contentStart, subjectTlv.contentEnd);
+  const commonName = cnTlv ? new TextDecoder().decode(der.slice(cnTlv.contentStart, cnTlv.contentEnd)) : null;
+
+  return { tbsBytes, sigValue, spkiBytes, commonName };
+}
+function parseRsaPublicKeyFromSpki(spkiBytes) {
+  const top = derReadTLV(spkiBytes, 0);                       // SubjectPublicKeyInfo SEQUENCE
+  const [, bitStrTlv] = derChildren(spkiBytes, top.contentStart, top.contentEnd);
+  // BIT STRING 內容跳過 unused-bits 位元組後，就是 RSAPublicKey SEQUENCE { n, e }
+  const rsaPkBytes = spkiBytes.slice(bitStrTlv.contentStart + 1, bitStrTlv.contentEnd);
+  const rsaTop = derReadTLV(rsaPkBytes, 0);
+  const [nTlv, eTlv] = derChildren(rsaPkBytes, rsaTop.contentStart, rsaTop.contentEnd);
+  return {
+    n: hexToBigInt(bytesToHex(rsaPkBytes.slice(nTlv.contentStart, nTlv.contentEnd))),
+    e: hexToBigInt(bytesToHex(rsaPkBytes.slice(eTlv.contentStart, eTlv.contentEnd))),
+  };
+}
+async function importOaepKeyFromSpki(spkiBytes) {
+  return crypto.subtle.importKey('spki', spkiBytes, { name: 'RSA-OAEP', hash: 'SHA-256' }, false, ['encrypt']);
+}
+async function rsaOaepEncryptWithKey(key, plaintext) {
+  const data = plaintext instanceof Uint8Array ? plaintext : new TextEncoder().encode(plaintext);
+  return b64encode(new Uint8Array(await crypto.subtle.encrypt({ name: 'RSA-OAEP' }, key, data)));
+}
+
+/* CA 根憑證是信任錨點（trust anchor），本身不需要（也無法有意義地）驗證
+   自己的簽章，只需要從中取出 SPKI 作為驗證其他實體憑證用的公鑰。整個頁面
+   生命週期內只需抓取一次，故做簡單快取。 */
+let _caPublicKeyPromise = null;
+function getCaPublicKey() {
+  if (!_caPublicKeyPromise) {
+    _caPublicKeyPromise = (async () => {
+      const r = await fetch('/api/proxy/ca/ca_cert').then(x => x.json());
+      if (r.status !== 'success' || !r.ca_certificate) throw new Error('無法取得 CA 根憑證：' + (r.message || ''));
+      const { spkiBytes } = parseCertificate(r.ca_certificate);
+      return crypto.subtle.importKey('spki', spkiBytes, { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' }, false, ['verify']);
+    })();
+  }
+  return _caPublicKeyPromise;
+}
+/* 用 CA 根公鑰驗證某實體憑證的簽章，並檢查 Subject CommonName 是否為預期
+   實體名稱；驗證通過才回傳該憑證內的 subjectPublicKeyInfo bytes 供後續
+   匯入使用——確保實際拿去加密/驗證盲簽章的公鑰，是「通過憑證鏈驗證」的
+   那一把，而不是伺服器回應中未受保護、可被中間人竄改的裸公鑰欄位。 */
+async function verifyCertChain(certPem, expectedCN, caPublicKey) {
+  if (!certPem) throw new Error(`伺服器未提供 ${expectedCN} 的憑證，無法驗證公鑰來源`);
+  const { tbsBytes, sigValue, spkiBytes, commonName } = parseCertificate(certPem);
+  if (commonName !== expectedCN) {
+    throw new Error(`憑證主體 CN 不符（預期 ${expectedCN}，實際 ${commonName}），拒絕信任此公鑰`);
+  }
+  const ok = await crypto.subtle.verify({ name: 'RSASSA-PKCS1-v1_5' }, caPublicKey, sigValue, tbsBytes);
+  if (!ok) throw new Error(`${expectedCN} 憑證簽章驗證失敗，可能遭偽造或竄改，拒絕信任此公鑰`);
+  return spkiBytes;
+}
+
 /* ---------- SHA-256 ---------- */
 async function sha256Bytes(input) {
   const data = typeof input === 'string' ? new TextEncoder().encode(input) : input;
@@ -427,13 +557,6 @@ async function rsaPssSign(privateKey, data) {
   const bytes = typeof data === 'string' ? new TextEncoder().encode(data) : data;
   const sig   = await crypto.subtle.sign({ name: 'RSA-PSS', saltLength: 32 }, privateKey, bytes);
   return b64encode(new Uint8Array(sig));
-}
-
-/* ---------- RSA-OAEP 加密 ---------- */
-async function rsaOaepEncrypt(publicKeyPEM, plaintext) {
-  const key  = await crypto.subtle.importKey('spki', pemToDer(publicKeyPEM), { name: 'RSA-OAEP', hash: 'SHA-256' }, false, ['encrypt']);
-  const data = plaintext instanceof Uint8Array ? plaintext : new TextEncoder().encode(plaintext);
-  return b64encode(new Uint8Array(await crypto.subtle.encrypt({ name: 'RSA-OAEP' }, key, data)));
 }
 
 /* ---------- AES-256-GCM 加密 ---------- */
@@ -863,17 +986,30 @@ async function doVote() {
   try {
     const candidate = _selectedCandidate;
 
-    // Step 1: 取得公鑰
-    addStep('取得 TPA / CC / TA 公鑰...');
+    // Step 1: 取得公鑰 + 憑證
+    addStep('取得 TPA / CC / TA 公鑰與憑證...');
     const [tpaR, ccR, taR] = await Promise.all([
       fetch('/api/proxy/tpa/public_key').then(r=>r.json()),
       fetch('/api/proxy/cc/public_key').then(r=>r.json()),
       fetch('/api/proxy/ta/public_key').then(r=>r.json()),
     ]);
     if (tpaR.status !== 'success') throw new Error('無法取得 TPA 公鑰：' + (tpaR.message || ''));
-    const tpa_e = hexToBigInt(tpaR.e), tpa_n = hexToBigInt(tpaR.n);
-    const cc_pub_pem = ccR.public_key_pem, ta_pub_pem = taR.public_key_pem;
-    addStep('公鑰取得完成', true);
+    if (ccR.status  !== 'success') throw new Error('無法取得 CC 公鑰：'  + (ccR.message  || ''));
+    if (taR.status  !== 'success') throw new Error('無法取得 TA 公鑰：'  + (taR.message  || ''));
+    addStep('公鑰取得完成，驗證憑證鏈...');
+
+    // v3.0 新增：不再盲目信任各實體回應中的裸公鑰欄位（public_key_pem /
+    // e / n），改為用 CA 根憑證驗證 TPA/CC/TA 各自憑證的簽章與 Subject
+    // CommonName，之後一律使用「從已驗證憑證解出的公鑰」——避免中間人偽
+    // 造回應、替換公鑰後竊聽選票內容或偽造盲簽章結果。 <3
+    const caPubKey = await getCaPublicKey();
+    const tpaSpki  = await verifyCertChain(tpaR.cert_pem, 'TPA', caPubKey);
+    const ccSpki   = await verifyCertChain(ccR.cert_pem,  'CC',  caPubKey);
+    const taSpki   = await verifyCertChain(taR.cert_pem,  'TA',  caPubKey);
+    const { e: tpa_e, n: tpa_n } = parseRsaPublicKeyFromSpki(tpaSpki);
+    const cc_key = await importOaepKeyFromSpki(ccSpki);
+    const ta_key = await importOaepKeyFromSpki(taSpki);
+    addStep('憑證鏈驗證通過', true);
 
     // Step 2: TPA 身分認證
     addStep('向 TPA 進行雙向認證...');
@@ -939,11 +1075,11 @@ async function doVote() {
 
     // Step 7: 封裝數位信封
     addStep('封裝 AES-GCM + RSA-OAEP 數位信封...');
-    const inner_enc_b64 = await rsaOaepEncrypt(ta_pub_pem, innerHash + '|' + candidate);
+    const inner_enc_b64 = await rsaOaepEncryptWithKey(ta_key, innerHash + '|' + candidate);
     const aes_pt        = inner_enc_b64 + '|' + s_prime_hex + '|' + m_hex;
     const aad_str       = 'voting-system-v2|' + _voterId + '|' + sn;
     const { k, iv, c_data, tag, aad } = await aesGcmEncrypt(aes_pt, aad_str);
-    const c_key  = await rsaOaepEncrypt(cc_pub_pem, k);
+    const c_key  = await rsaOaepEncryptWithKey(cc_key, k);
     // v2.0 修正：之前 token_hash 寫死空字串，CC 端的一人一票去重機制對所有
     // 選票永遠不會生效。規格書 §3.4：token_hash = H(Token.payload.token_id)。 <3
     const token_hash = await sha256Hex(votingToken.payload.token_id);  // <3

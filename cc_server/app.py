@@ -36,7 +36,10 @@ from shared.key_manager import (
     load_or_generate_keypair,
     load_or_request_certificate,
     load_or_fetch_ca_cert,
+    verify_cert_with_ca,  # <3 用於交叉驗證 TA 釋放的私鑰是否真的對應其認證公鑰
 )
+from cryptography import x509  # <3
+from cryptography.x509.oid import NameOID  # <3
 from shared.crypto_utils import open_envelope_layer1, open_envelope_layer2, sign_data
 from shared.merkle_tree import MerkleTree
 from shared.format_utils import int_to_hex, hex_to_int, ts_to_human, bytes_to_b64
@@ -569,10 +572,14 @@ def ui_tally():
 
 @app.route('/api/public_key', methods=['GET'])
 def api_public_key():
-    """[GET] 回傳 CC 公鑰 PEM"""
+    """[GET] 回傳 CC 公鑰 PEM 與憑證。
+    v3.0 修正：補上 cert_pem，讓呼叫端（選民）能對這把公鑰做憑證鏈驗證，
+    不再只能盲目信任裸公鑰。 <3
+    """
     return jsonify({
         "status":         "success",
         "public_key_pem": _public_key_pem,
+        "cert_pem":       _cert_pem,  # <3
     }), 200
 
 
@@ -797,11 +804,53 @@ def _do_tally() -> dict:
     except Exception as e:
         return {"status": "error", "message": f"無法取得 TPA 公鑰：{e}"}
 
+    # 步驟 2.5：交叉驗證 TA 釋放的私鑰，是否真的對應其 CA 認證過的公鑰
+    # v3.0 修正：原本收到 /api/release_key 回應後直接載入使用，完全沒有
+    # 驗證這把私鑰是否真的屬於 TA——如果 CC 連到 TA_URL 這條路徑上被人
+    # 動了手腳（例如 Docker 內部網路裡插入一個假冒的 TA），CC 會照單全
+    # 收一把來路不明的私鑰，雖然這把假私鑰解不開真正用「真 TA 公鑰」加
+    # 密的選票內容（RSA-OAEP 解密會直接失敗），但足以讓全部選票被誤判
+    # 為非法、整場開票直接歸零，等同一次「讓選舉作廢」的攻擊。
+    # 修法不是另外跑一次即時雙向握手，而是重複利用 Phase 1 已經建立好
+    # 的信任：直接向 TA 要它自己 CA 簽發的公鑰憑證，驗證憑證鏈、核對
+    # Subject CN 真的是 "TA"，再拿憑證裡的公鑰模數，跟這次釋放的私鑰
+    # 反推出的模數比對是否一致——一致才代表這把私鑰在數學上不可能是
+    # 別人偽造的（要偽造就等於要破解 RSA）。 <3
+    try:
+        ta_pubkey_resp = http_requests.get(f"{TA_URL}/api/public_key", timeout=10)
+        ta_pubkey_data = ta_pubkey_resp.json()
+        ta_cert_pem = ta_pubkey_data.get('cert_pem', '')
+    except Exception as e:
+        return {"status": "error", "message": f"無法取得 TA 憑證以進行交叉驗證：{e}"}  # <3
+
+    if not _ca_cert_pem or not ta_cert_pem or not verify_cert_with_ca(ta_cert_pem, _ca_cert_pem):
+        return {"status": "error", "code": "TA_CERT_INVALID",
+                "message": "無法驗證 TA 憑證，拒絕使用本次釋放的私鑰"}  # <3
+
+    try:
+        ta_cert_obj = x509.load_pem_x509_certificate(ta_cert_pem.encode('utf-8'))
+        ta_cert_cn = ta_cert_obj.subject.get_attributes_for_oid(NameOID.COMMON_NAME)[0].value
+    except Exception:
+        ta_cert_cn = None  # <3
+    if ta_cert_cn != 'TA':
+        return {"status": "error", "code": "TA_CERT_CN_MISMATCH",
+                "message": f"TA 憑證主體不是 TA（實際：{ta_cert_cn}），拒絕使用本次釋放的私鑰"}  # <3
+
+    certified_ta_n = ta_cert_obj.public_key().public_numbers().n  # <3
+
     # 步驟 3：載入 TA 私鑰
     ta_private_key = serialization.load_pem_private_key(
         sk_ta_data['private_key_pem'].encode('utf-8'),
         password=None,
     )
+    released_n = ta_private_key.private_numbers().public_numbers.n  # <3
+
+    if released_n != certified_ta_n:
+        # <3 私鑰的模數跟已認證公鑰的模數對不上——這把私鑰不是真的 TA 的，
+        # 不管是誰給的、透過什麼管道給的，一律拒絕使用，不進行任何解密。
+        print("[CC] 嚴重警告：TA 釋放的私鑰與其 CA 認證公鑰不匹配，可能遭偽冒攻擊！")
+        return {"status": "error", "code": "TA_KEY_MISMATCH",
+                "message": "TA 釋放的私鑰與其認證公鑰不匹配，拒絕使用（可能遭偽冒攻擊）"}  # <3
 
     # 步驟 4：解密驗證所有暫存信封
     pending_envelopes = db.fetchall(

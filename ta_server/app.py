@@ -401,10 +401,15 @@ def dashboard():
 
 @app.route('/api/public_key', methods=['GET'])
 def api_public_key():
-    """[GET] 回傳 TA 公鑰 PEM"""
+    """[GET] 回傳 TA 公鑰 PEM 與憑證。
+    v3.0 修正：補上 cert_pem，讓呼叫端（選民、CC）能對這把公鑰做憑證鏈
+    驗證，不再只能盲目信任裸公鑰——原本這裡沒有 cert_pem，就算呼叫端
+    想驗證也無材料可驗。 <3
+    """
     return jsonify({
         "status":         "success",
         "public_key_pem": _public_key_pem,
+        "cert_pem":       _cert_pem,  # <3
     }), 200
 
 

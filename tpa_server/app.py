@@ -439,12 +439,17 @@ def dashboard():
 
 @app.route('/api/public_key', methods=['GET'])
 def api_public_key():
-    """[GET] 回傳 TPA 公鑰 PEM 與大整數 (e, n)，供 Voter 盲化使用。"""
+    """[GET] 回傳 TPA 公鑰 PEM 與大整數 (e, n)，供 Voter 盲化使用。
+    v3.0 修正：補上 cert_pem，讓呼叫端（選民）能對這把公鑰做憑證鏈驗證，
+    不再只能盲目信任裸公鑰、裸 e/n——選民應該從驗證過的憑證裡自己解出
+    e/n 來用，而不是分開信任這裡另外給的 e/n 欄位。 <3
+    """
     return jsonify({
         "status":         "success",
         "public_key_pem": _public_key_pem,
         "e":              int_to_hex(_e),
         "n":              int_to_hex(_n),
+        "cert_pem":       _cert_pem,  # <3
     }), 200
 
 
