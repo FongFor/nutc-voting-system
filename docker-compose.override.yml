@@ -1,0 +1,36 @@
+# ============================================================
+# docker-compose.override.yml — 本機開發／測試專用
+#
+# `docker compose up` 預設會自動讀取並疊加這份檔案（不需要加任何
+# 參數），把 docker-compose.yml 裡拿掉的 localhost:<port> 直連
+# 補回來，讓每個服務的行為跟加 Caddy 之前完全一樣——
+# test/test_comprehensive.py、curl 手動測試等直接打各服務 local
+# port 的工具都不用改。
+#
+# 正式部署時「不要」帶到這份檔案，改用：
+#   docker compose -f docker-compose.yml up -d --build
+# 這樣就只有 Caddy 對外開 80/443，CA/TPA/TA/CC/Admin 完全連不到。
+# ============================================================
+
+services:
+  ca:
+    ports:
+      - "5001:5001"
+  tpa:
+    ports:
+      - "5000:5000"
+  ta:
+    ports:
+      - "5002:5002"
+  cc:
+    ports:
+      - "5003:5003"
+  bb:
+    ports:
+      - "5004:5004"
+  voter:
+    ports:
+      - "5005:5005"
+  admin:
+    ports:
+      - "5010:5010"

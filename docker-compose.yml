@@ -5,6 +5,20 @@
 # 此檔案僅負責容器編排；業務參數由各服務啟動時自動從
 # config.json 讀取，無需在此重複設定。
 #
+# 網路曝露策略（重要）：
+#   本檔案本身「不」對外發布 ca/tpa/ta/cc/admin/voter/bb 的 port，
+#   只有 caddy（reverse proxy，見 Caddyfile）對外開 80/443，統一
+#   做 TLS termination，並只把請求轉給 voter（選民端）跟 bb（公告
+#   板）——CA/TPA/TA/CC/Admin 只能透過 Docker 內部網路被其他容器
+#   呼叫，外部連不到。這是「正式部署」的安全預設值：
+#     docker compose -f docker-compose.yml up -d --build
+#
+#   本機開發／測試時，docker-compose.override.yml 會被自動疊加
+#   （不需加任何參數，直接 `docker compose up` 就會套用），把每個
+#   服務原本的 localhost:<port> 都補回來，行為與加 Caddy 之前完全
+#   一樣，測試腳本（test/test_comprehensive.py 等直接打 local port
+#   的工具）不需要修改。
+#
 # Config Hot-Reload：
 #   config.json 以唯讀方式掛載進所有容器（/app/config.json）。
 #   各服務透過 shared/config_loader.py 的 _HotReloadConfig 機制，
@@ -16,7 +30,8 @@
 #   DISPLAY_TIMEZONE_OFFSET=8 作為備援，供 ts_to_human() 使用。
 #
 # 快速指令：
-#   啟動：  docker compose up --build
+#   本機測試（含直連 port）：  docker compose up --build
+#   正式部署（僅 Caddy 對外）：docker compose -f docker-compose.yml up -d --build
 #   重置：  python reset.py
 #   模擬：  python simulate_voters.py
 # ============================================================
@@ -52,8 +67,6 @@ services:
     volumes:
       - ca_keys:/app/ca_server/keys
       - ./config.json:/app/config.json:ro
-    ports:
-      - "5001:5001"
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c",
@@ -78,8 +91,6 @@ services:
     volumes:
       - tpa_keys:/app/tpa_server/keys
       - ./config.json:/app/config.json:ro
-    ports:
-      - "5000:5000"
     depends_on:
       ca:
         condition: service_healthy
@@ -107,8 +118,6 @@ services:
     volumes:
       - ta_keys:/app/ta_server/keys
       - ./config.json:/app/config.json:ro
-    ports:
-      - "5002:5002"
     depends_on:
       ca:
         condition: service_healthy
@@ -133,8 +142,6 @@ services:
     volumes:
       - cc_keys:/app/cc_server/keys
       - ./config.json:/app/config.json:ro
-    ports:
-      - "5003:5003"
     depends_on:
       ca:
         condition: service_healthy
@@ -160,8 +167,6 @@ services:
       CC_URL: http://cc:5003
     volumes:
       - ./config.json:/app/config.json:ro
-    ports:
-      - "5004:5004"
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c",
@@ -182,8 +187,6 @@ services:
       <<: [*common-env, *service-urls]
     volumes:
       - ./config.json:/app/config.json:ro
-    ports:
-      - "5005:5005"
     depends_on:
       ca:
         condition: service_healthy
@@ -211,8 +214,6 @@ services:
       VOTER_URL: http://voter:5005
     volumes:
       - ./config.json:/app/config.json:ro
-    ports:
-      - "5010:5010"
     depends_on:
       ca:
         condition: service_healthy
@@ -227,9 +228,36 @@ services:
       retries: 5
       start_period: 10s
 
+  # ── 10. Reverse Proxy / TLS Termination (Caddy) ──────────
+  # 唯一對外開 80/443 的容器。本地測試用內建本地 CA 自動簽發憑證，
+  # 未來設定 SITE_ADDRESS / BB_ADDRESS 為真實網域後，會自動改申請
+  # Let's Encrypt 正式憑證，Caddyfile 不需要再改。
+  caddy:
+    image: caddy:2-alpine
+    container_name: voting_caddy
+    environment:
+      SITE_ADDRESS: ${SITE_ADDRESS:-localhost}
+      BB_ADDRESS:   ${BB_ADDRESS:-bb.localhost}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    depends_on:
+      voter:
+        condition: service_started
+      bb:
+        condition: service_healthy
+    restart: unless-stopped
+
 # ── Named Volumes（只保留金鑰，資料庫隨容器生滅）────────────
 volumes:
   ca_keys:
   tpa_keys:
   ta_keys:
   cc_keys:
+  caddy_data:
+  caddy_config:

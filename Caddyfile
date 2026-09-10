@@ -1,0 +1,30 @@
+# ============================================================
+# NUTC Voting System — Caddy reverse proxy
+#
+# 只有這個 Caddy 容器對外開 80/443；CA/TPA/TA/CC/Admin 這些內部
+# 服務不再對外發布 port（見 docker-compose.yml），只有選民端
+# (voter) 與公告板 (BB) 透過這裡對外提供服務，全部走 HTTPS。
+#
+# 本地測試（預設，不用改任何設定）：
+#   docker compose up --build
+#   瀏覽器開 https://localhost        → 選民端
+#   瀏覽器開 https://bb.localhost     → 公告板
+#   Caddy 會用內建的本地 CA 自動簽發憑證，第一次連線瀏覽器會顯示
+#   「不受信任」警告，這是正常的（本地測試用的憑證不是公開 CA 簽的）。
+#
+# 正式上線（未來有網域之後）：
+#   在 .env 設定：
+#     SITE_ADDRESS=vote.your-domain.tld
+#     BB_ADDRESS=bb.your-domain.tld
+#   並確保該網域 DNS 已指向這台主機、80/443 對外可連通（Let's
+#   Encrypt ACME 驗證需要），Caddy 會自動申請並持續更新正式憑證，
+#   不需要再改這份 Caddyfile。
+# ============================================================
+
+{$SITE_ADDRESS:localhost} {
+	reverse_proxy voter:5005
+}
+
+{$BB_ADDRESS:bb.localhost} {
+	reverse_proxy bb:5004
+}
