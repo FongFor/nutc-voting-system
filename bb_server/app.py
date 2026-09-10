@@ -1562,24 +1562,38 @@ def _build_tree_data(m_hex: str) -> dict:
     root  = tree.get_root()
 
     # 建構 proof_path：標記每層每個節點的角色
+    #
+    # v3.0 修正：原本用 `enumerate(proof)` 假設 proof 陣列第 i 筆就是第 i
+    # 層——但 MerkleTree.get_proof() 遇到奇數層、目標節點沒有兄弟被直接
+    # 上提時，那一層完全不會產生 proof 項目（見 shared/merkle_tree.py
+    # get_proof()），使 proof 陣列長度可能小於實際走過的層數。任何一次
+    # 上提發生後，後面所有 proof 項目對應到的真實層數都會被少算一層，
+    # 導致視覺化樹狀圖標錯顏色（雖然不影響 MerkleTree.verify_proof 本身
+    # 的密碼學正確性，但畫面上高亮的節點是錯的）。
+    # 改成完全比照 get_proof() 內部走訪邏輯，自己重新逐層判斷「這一層
+    # 目標節點有沒有兄弟」，只有真的有兄弟時才消耗 proof 陣列裡的下一筆、
+    # 才畫 sibling；上提的那一層不畫 sibling，但 path 節點仍正確標在
+    # 它實際落腳的那一層。 <3
     proof_path = []
     current_index = index
 
     # 葉節點層（layer 0）：目標節點
     proof_path.append({"layer": 0, "index": current_index, "role": "target"})
 
-    for step_i, step in enumerate(proof):
-        layer_idx = step_i  # 當前層索引（0 = 葉節點層）
+    proof_i = 0  # <3 指向 proof 陣列的游標，只有真的有兄弟節點時才前進
+    for layer_idx, layer in enumerate(tree.tree[:-1]):  # <3 比照 get_proof()，排除 root 層
+        has_sibling = (
+            (current_index % 2 == 0 and current_index + 1 < len(layer)) or
+            (current_index % 2 == 1)
+        )  # <3
+        if has_sibling:
+            step = proof[proof_i]
+            proof_i += 1  # <3
+            sibling_index = current_index + 1 if step['position'] == 'right' else current_index - 1
+            proof_path.append({"layer": layer_idx, "index": sibling_index, "role": "sibling"})
+        # else：此節點在這一層被上提，沒有兄弟，不產生 sibling 標記 <3
 
-        # Sibling 節點
-        if step['position'] == 'right':
-            sibling_index = current_index + 1
-        else:
-            sibling_index = current_index - 1
-
-        proof_path.append({"layer": layer_idx, "index": sibling_index, "role": "sibling"})
-
-        # 下一層的路徑節點
+        # 下一層的路徑節點（不論是否上提，目標的軌跡都會出現在這裡）
         next_index = current_index // 2
         proof_path.append({"layer": layer_idx + 1, "index": next_index, "role": "path"})
         current_index = next_index
