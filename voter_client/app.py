@@ -143,6 +143,39 @@ threading.Thread(target=_batch_scheduler_loop, daemon=True).start()
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", os.urandom(32))
 
+# v3.0 新增：voter_client 現在是唯一對外開放的服務（見 Caddyfile），前面
+# 有 Caddy 這個反向代理擋著。Flask 預設 request.remote_addr 抓到的是
+# 「直接跟它建立 TCP 連線的那一端」，加了反向代理之後那會是 Caddy 自己
+# 的容器 IP，不是選民的真實來源 IP，限流會把所有人誤判成同一個來源。
+# ProxyFix 讓 Flask 改讀 Caddy 轉發過來的 X-Forwarded-For 表頭（Caddy
+# 的 reverse_proxy 預設就會加這個表頭），還原出真正的來源 IP。 <3
+from werkzeug.middleware.proxy_fix import ProxyFix
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)  # <3
+
+# v3.0 新增：投票截止前的流量管制。防的不是精密攻擊，是最單純的「灌爆
+# 流量讓還沒投票的真選民卡住投不進去」——選舉截止時間是硬性的，投票期
+# 間被灌爆而延誤，沒有辦法事後補救。單一選民一次完整投票流程（認證、
+# 取簽章、提交信封）加起來也就個位數次請求，這裡的門檻對正常使用完全
+# 不構成阻礙。 <3
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
+
+limiter = Limiter(
+    get_remote_address,
+    app=app,
+    default_limits=[os.environ.get("RATE_LIMIT_DEFAULT", "30 per minute")],
+    storage_uri="memory://",
+)  # <3
+
+
+@app.errorhandler(429)
+def _rate_limit_exceeded(e):
+    return jsonify({
+        "status":  "error",
+        "code":    "RATE_LIMITED",
+        "message": "請求過於頻繁，請稍後再試",
+    }), 429  # <3
+
 # ── 代理工具 ──────────────────────────────────────────────────
 
 def _proxy(method, url, data=None, params=None):
@@ -158,6 +191,7 @@ def _proxy(method, url, data=None, params=None):
 # ── API 代理路由 ────────────────────────────────────────────
 
 @app.route('/api/proxy/ca/issue_cert', methods=['POST'])
+@limiter.limit(os.environ.get("RATE_LIMIT_ISSUE_CERT", "10 per minute"))  # <3
 def proxy_ca_issue_cert():
     return _proxy("POST", f"{CA_URL}/api/issue_cert", request.get_json())
 
@@ -171,10 +205,12 @@ def proxy_tpa_pk():
     return _proxy("GET", f"{TPA_URL}/api/public_key")
 
 @app.route('/api/proxy/tpa/auth', methods=['POST'])
+@limiter.limit(os.environ.get("RATE_LIMIT_AUTH", "10 per minute"))  # <3
 def proxy_tpa_auth():
     return _proxy("POST", f"{TPA_URL}/api/auth", request.get_json())
 
 @app.route('/api/proxy/tpa/blind_sign', methods=['POST'])
+@limiter.limit(os.environ.get("RATE_LIMIT_AUTH", "10 per minute"))  # <3
 def proxy_tpa_blind_sign():
     return _proxy("POST", f"{TPA_URL}/api/blind_sign", request.get_json())
 
@@ -201,6 +237,7 @@ def api_candidates():
     return jsonify({"status": "success", "candidates": _get_candidates()}), 200
 
 @app.route('/api/submit_envelope', methods=['POST'])
+@limiter.limit(os.environ.get("RATE_LIMIT_AUTH", "10 per minute"))  # <3
 def submit_envelope():
     """
     [POST] 選民提交數位信封（v3.0 改為批次混合，不再即時轉送給 CC）。
