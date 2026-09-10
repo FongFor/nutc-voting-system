@@ -627,7 +627,10 @@ def dashboard():
 def api_add_voter():
     """新增單一選民：本地端生成 OTP，只送 H(OTP) 至 CA（零知識）。"""
     data = request.get_json()
-    if not data or not data.get('voter_id', '').strip():
+    # v3.0 修正：`data.get('voter_id', '')` 遇到明確傳 `"voter_id": null`
+    # 時會拿到 None（預設值只在完全沒有這個 key 時才生效），對 None 呼叫
+    # .strip() 會丟 AttributeError 變成沒處理過的 500。改用 `or ''`。 <3
+    if not data or not (data.get('voter_id') or '').strip():  # <3
         return jsonify({"status": "error", "message": "缺少 voter_id"}), 400
 
     voter_id = str(data['voter_id']).strip()
