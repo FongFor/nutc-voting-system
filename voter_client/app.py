@@ -14,31 +14,25 @@ voter_client/app.py  —  選民端
 Flask 伺服器只做：
   1. 提供 HTML 頁面與 /voter-crypto.js
   2. 代理請求至 CA / TPA / CC / TA / BB
-  3. 接收並儲存投票回執（m_hex、SN）
+
+投票回執（voter_id、SN、投票內容、m_hex）僅存於選民瀏覽器本地的
+IndexedDB（跟私鑰放在一起），伺服器端不保存、也查詢不到任何一筆
+「選民身分 ↔ 投票內容」的對應關係。
 """
 
 import os
 import sys
-import time
-import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from flask import Flask, request, jsonify, render_template_string
 import requests as http_requests
 
-from shared.db_utils import Database
 from shared.config_loader import get_candidates as cfg_get_candidates, make_reload_endpoint
-from shared.format_utils import ts_to_human
 
 # ============================================================
 # 常數設定
 # ============================================================
-SERVICE_DIR = os.path.dirname(os.path.abspath(__file__))
-DATA_DIR    = os.path.join(SERVICE_DIR, "data")
-os.makedirs(DATA_DIR, exist_ok=True)
-DB_PATH     = os.path.join(DATA_DIR, "voter.db")
-
 VOTER_ID = os.environ.get("VOTER_ID", "")   # 僅作表單預設值，不強制
 CA_URL   = os.environ.get("CA_URL",  "http://localhost:5001")
 TPA_URL  = os.environ.get("TPA_URL", "http://localhost:5000")
@@ -51,22 +45,6 @@ def _get_candidates():
     if env_val:
         return [c.strip() for c in env_val.split(",") if c.strip()]
     return cfg_get_candidates()
-
-# ============================================================
-# 資料庫初始化（只保留回執記錄，crypto 在 browser 端）
-# ============================================================
-db = Database(DB_PATH)
-db.execute("""
-    CREATE TABLE IF NOT EXISTS vote_record (
-        id          INTEGER PRIMARY KEY AUTOINCREMENT,
-        voter_id    TEXT NOT NULL,
-        sn          TEXT NOT NULL UNIQUE,
-        vote        TEXT NOT NULL,
-        m_hex       TEXT NOT NULL,
-        s_prime_hex TEXT NOT NULL,
-        voted_at    INTEGER NOT NULL
-    )
-""")
 
 # ============================================================
 # Flask App
@@ -135,46 +113,13 @@ def proxy_bb_results():
 def api_candidates():
     return jsonify({"status": "success", "candidates": _get_candidates()}), 200
 
-@app.route('/api/all_receipts', methods=['GET'])
-def api_all_receipts():
-    """回傳本輪所有投票回執（供 Admin 匯出使用）。"""
-    rows = db.fetchall(
-        "SELECT voter_id, sn, vote, m_hex, voted_at FROM vote_record ORDER BY voted_at"
-    )
-    for r in rows:
-        r['voted_at_str'] = ts_to_human(r['voted_at'])
-    return jsonify({"status": "success", "receipts": rows, "count": len(rows)}), 200
-
-@app.route('/api/vote_status', methods=['GET'])
-def api_vote_status():
-    voter_id = request.args.get('voter_id', '')
-    if not voter_id:
-        return jsonify({"status": "not_voted"}), 200
-    rec = db.fetchone(
-        "SELECT voter_id, sn, vote, m_hex, voted_at FROM vote_record WHERE voter_id = ? ORDER BY id DESC LIMIT 1",
-        (voter_id,)
-    )
-    if rec:
-        return jsonify({"status": "voted", **rec, "voted_at_str": ts_to_human(rec['voted_at'])}), 200
-    return jsonify({"status": "not_voted", "voter_id": voter_id}), 200
-
-@app.route('/api/save_vote_receipt', methods=['POST'])
-def api_save_vote_receipt():
-    """瀏覽器完成投票流程後，上傳回執儲存於 DB 供查詢。"""
-    d = request.get_json() or {}
-    required = ['voter_id', 'sn', 'vote', 'm_hex', 's_prime_hex']
-    if not all(k in d for k in required):
-        return jsonify({"status": "error", "message": "缺少必要欄位"}), 400
-    now = int(time.time())
-    try:
-        db.execute(
-            "INSERT OR IGNORE INTO vote_record (voter_id, sn, vote, m_hex, s_prime_hex, voted_at) VALUES (?,?,?,?,?,?)",
-            (d['voter_id'], d['sn'], d['vote'], d['m_hex'], d['s_prime_hex'], now),
-        )
-        print(f"[Voter:{d['voter_id']}] 投票回執已儲存  sn={d['sn']}  m={d['m_hex'][:16]}...")
-    except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
-    return jsonify({"status": "success"}), 200
+# v3.0 修正：/api/all_receipts、/api/vote_status、/api/save_vote_receipt
+# 三個端點已移除。這三個端點原本讓伺服器端保存 voter_id 與 vote 的明文
+# 一一對應（vote_record 表），其中 /api/all_receipts 甚至完全沒有任何
+# 存取控制，任何人一個未驗證的 GET 請求就能匯出全體選民「誰投給誰」的
+# 完整明細——直接繞過本系統以盲簽章、Merkle Tree 建立的所有匿名性保護。
+# 投票回執改為僅存放於選民瀏覽器本地的 IndexedDB（見下方 idbSave），
+# 伺服器端不再持有、也查詢不到任何一筆「身分 ↔ 選票內容」的對應關係。 <3
 
 # ── 共用 JS（瀏覽器端密碼學工具集） ─────────────────────────────
 
@@ -610,12 +555,13 @@ async function init() {
     }
   } catch(_) {}
 
-  // 2. 確認未重複投票
-  const statusResp = await fetch(`/api/vote_status?voter_id=${encodeURIComponent(_voterId)}`);
-  const statusData = await statusResp.json();
-  if (statusData.status === 'voted') {
+  // 2. 確認未重複投票（v3.0 修正：回執只存在本機 IndexedDB，不再問伺服器；
+  //    這裡查得到的只是「這台裝置」是否投過票，真正防重複投票的關卡在
+  //    TPA /api/auth 的 ALREADY_VOTED 檢查，跟這個本地提示無關） <3
+  const voteReceipt = await idbLoad('voteReceipt');
+  if (voteReceipt) {
     document.getElementById('votedBanner').classList.remove('hidden');
-    document.getElementById('votedMhex').textContent = statusData.m_hex;
+    document.getElementById('votedMhex').textContent = voteReceipt.m_hex;
     document.getElementById('voteForm').classList.add('hidden');
     return;
   }
@@ -776,10 +722,14 @@ async function doVote() {
     if (ccData.status !== 'success') throw new Error('CC 拒絕信封：' + (ccData.message || ccData.code || ''));
     addStep('CC 已接收信封', true);
 
-    // Step 9: 上傳回執
-    await fetch('/api/save_vote_receipt', {
-      method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ voter_id: _voterId, sn, vote: candidate, m_hex, s_prime_hex }),
+    // Step 9: 儲存回執（v3.0 修正：只存本機 IndexedDB，伺服器端完全不接觸
+    // 「voter_id ↔ vote」的對應關係，避免留下一份能直接匯出全體選民投票
+    // 明細的伺服器端資料。 <3
+    await idbSave({
+      voteReceipt: {
+        voter_id: _voterId, sn, vote: candidate, m_hex, s_prime_hex,
+        voted_at: Math.floor(Date.now() / 1000),
+      },
     });
 
     document.getElementById('successCard').classList.remove('hidden');
@@ -833,30 +783,51 @@ _STATUS_HTML = """<!DOCTYPE html>
     </button>
   </div>
 
-  {% if record %}
-  <div class="bg-white/70 dark:bg-cardblack/80 rounded-xl border border-gray-200 dark:border-gray-800 shadow-md p-6 space-y-4">
+  <div id="recordCard" class="hidden bg-white/70 dark:bg-cardblack/80 rounded-xl border border-gray-200 dark:border-gray-800 shadow-md p-6 space-y-4">
     <div class="flex items-center gap-2 mb-2">
       <span class="px-2.5 py-1 rounded-full text-xs font-medium bg-green-50 dark:bg-green-900/20 text-green-700 dark:text-green-400 border border-green-200 dark:border-green-800/50">已投票</span>
-      <span class="text-xs text-gray-400">{{ record.voted_at | ts_to_str }}</span>
+      <span id="recVotedAt" class="text-xs text-gray-400"></span>
     </div>
-    {% for label, val in [('選民 ID', record.voter_id), ('SN', record.sn), ('投票對象', record.vote)] %}
     <div>
-      <p class="text-xs text-gray-400 uppercase tracking-wider mb-1">{{ label }}</p>
-      <p class="font-mono text-sm text-gray-800 dark:text-gray-200">{{ val }}</p>
+      <p class="text-xs text-gray-400 uppercase tracking-wider mb-1">選民 ID</p>
+      <p id="recVoterId" class="font-mono text-sm text-gray-800 dark:text-gray-200"></p>
     </div>
-    {% endfor %}
+    <div>
+      <p class="text-xs text-gray-400 uppercase tracking-wider mb-1">SN</p>
+      <p id="recSn" class="font-mono text-sm text-gray-800 dark:text-gray-200"></p>
+    </div>
+    <div>
+      <p class="text-xs text-gray-400 uppercase tracking-wider mb-1">投票對象</p>
+      <p id="recVote" class="font-mono text-sm text-gray-800 dark:text-gray-200"></p>
+    </div>
     <div>
       <p class="text-xs text-gray-400 uppercase tracking-wider mb-1">m_hex（可至 BB 驗證）</p>
-      <code class="block bg-gray-50 dark:bg-[#050505] rounded-lg p-3 text-xs font-mono break-all text-gray-700 dark:text-gray-300 border border-gray-100 dark:border-gray-800/80">{{ record.m_hex }}</code>
+      <code id="recMhex" class="block bg-gray-50 dark:bg-[#050505] rounded-lg p-3 text-xs font-mono break-all text-gray-700 dark:text-gray-300 border border-gray-100 dark:border-gray-800/80"></code>
     </div>
   </div>
-  {% else %}
-  <div class="text-center py-16 text-gray-400">
+  <div id="emptyCard" class="hidden text-center py-16 text-gray-400">
     <p>尚未找到投票記錄。</p>
     <a href="/" class="mt-3 inline-block text-sm text-msblue hover:underline">前往投票</a>
   </div>
-  {% endif %}
 </div>
+<script>
+// v3.0 修正：回執只存在本機 IndexedDB，這裡直接讀本機資料渲染，
+// 伺服器端完全不參與、也看不到任何一筆「身分 ↔ 投票內容」的對應。 <3
+(async function () {
+  const rec = await idbLoad('voteReceipt');
+  if (rec) {
+    document.getElementById('recVotedAt').textContent = rec.voted_at
+      ? new Date(rec.voted_at * 1000).toLocaleString() : '';
+    document.getElementById('recVoterId').textContent = rec.voter_id || '';
+    document.getElementById('recSn').textContent = rec.sn || '';
+    document.getElementById('recVote').textContent = rec.vote || '';
+    document.getElementById('recMhex').textContent = rec.m_hex || '';
+    document.getElementById('recordCard').classList.remove('hidden');
+  } else {
+    document.getElementById('emptyCard').classList.remove('hidden');
+  }
+})();
+</script>
 </body>
 </html>"""
 
@@ -872,18 +843,7 @@ def register_page():
 
 @app.route('/status')
 def status():
-    voter_id = request.args.get('voter_id', '')
-    record   = None
-    if voter_id:
-        record = db.fetchone(
-            "SELECT voter_id, sn, vote, m_hex, voted_at FROM vote_record WHERE voter_id = ? ORDER BY id DESC LIMIT 1",
-            (voter_id,)
-        )
-    else:
-        record = db.fetchone("SELECT voter_id, sn, vote, m_hex, voted_at FROM vote_record ORDER BY id DESC LIMIT 1")
-
-    app.jinja_env.filters['ts_to_str'] = lambda ts: datetime.datetime.fromtimestamp(int(ts)).strftime('%Y-%m-%d %H:%M:%S') if ts else ''
-    return render_template_string(_STATUS_HTML, record=record)
+    return render_template_string(_STATUS_HTML)
 
 make_reload_endpoint(app)
 
