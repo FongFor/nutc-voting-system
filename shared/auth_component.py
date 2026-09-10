@@ -139,6 +139,7 @@ def verify_auth_component(
       2. 檢查時間戳記（雙向 Delta T）
       3. 驗證 nonce_echo（如果是回應封包）
       4. 從 CA 憑證驗證發送方憑證合法性
+      4.5. 核對憑證 Subject CN 是否與宣稱的 sender_id 一致（防止身分冒用）
       5. 從憑證提取發送方公鑰，驗證數位簽章
 
     v2.0 規範 §2.4, §2.5
@@ -178,6 +179,23 @@ def verify_auth_component(
             )
         except Exception:
             raise Exception("CERT_INVALID: 憑證未由合法 CA 簽發")
+
+    # 步驟 4.5：核對憑證 Subject CN 是否與宣稱的 sender_id 一致
+    # 只驗證憑證合法性與簽章正確性還不夠——任何合法選民（或服務帳號）的憑證
+    # 都是 CA 簽的。sender_id 只是 payload 裡的一個自由文字欄位，簽章驗證本身
+    # 完全不會檢查這個欄位「講的是不是實話」，只證明「payload（不論內容為何）
+    # 確實是這張憑證對應私鑰的持有人簽的」。若不額外核對憑證的 Subject CN 是
+    # 否等於 sender_id，任何持有合法憑證者都能自稱是別人，冒用他人身分取得
+    # 投票授權票。
+    from cryptography.x509.oid import NameOID
+    try:
+        cert_cn = cert.subject.get_attributes_for_oid(NameOID.COMMON_NAME)[0].value
+    except Exception:
+        cert_cn = None
+    if cert_cn != sender_id:
+        raise Exception(
+            f"SENDER_ID_CERT_MISMATCH: 憑證身分（{cert_cn}）與宣稱之 sender_id（{sender_id}）不符"
+        )
 
     # 步驟 5：重建 payload 並驗證簽章
     payload = {

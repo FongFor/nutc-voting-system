@@ -95,12 +95,6 @@ db.execute("""
     )
 """)
 db.execute("""
-    CREATE TABLE IF NOT EXISTS voted_users (
-        sender_id   TEXT PRIMARY KEY,
-        voted_at    INTEGER NOT NULL
-    )
-""")
-db.execute("""
     CREATE TABLE IF NOT EXISTS auth_log (
         id          INTEGER PRIMARY KEY AUTOINCREMENT,
         sender_id   TEXT NOT NULL,
@@ -124,9 +118,16 @@ db.execute("""
         voter_id    TEXT NOT NULL,
         issued_at   INTEGER NOT NULL,
         expires_at  INTEGER NOT NULL,
-        used        INTEGER NOT NULL DEFAULT 0
+        used        INTEGER NOT NULL DEFAULT 0,
+        used_at     INTEGER
     )
 """)
+# v2.0 修正：為舊資料庫補上 used_at 欄位（記錄票何時被真正消耗，取代
+# 已移除的 voted_users 表）。 <3
+try:
+    db.execute("ALTER TABLE issued_tokens ADD COLUMN used_at INTEGER")
+except Exception:
+    pass  # 欄位已存在
 
 # ============================================================
 # 金鑰初始化（啟動時執行）
@@ -398,11 +399,16 @@ def dashboard():
     )
     sign_count    = db.count("blind_sign_log")
 
-    voted_users   = db.fetchall("SELECT sender_id, voted_at FROM voted_users ORDER BY voted_at DESC")
+    # v2.0 修正：voted_users 表已移除，「已投票」現在等同於「已消耗一張
+    # Voting Token」，直接從 issued_tokens 衍生，不再需要獨立的表。 <3
+    voted_users   = db.fetchall(
+        "SELECT voter_id AS sender_id, used_at AS voted_at FROM issued_tokens "
+        "WHERE used = 1 ORDER BY used_at DESC"
+    )  # <3
     total_auth    = db.count("auth_log")
     success_auth  = db.count("auth_log", "status = 'success'")
     rejected_auth = db.count("auth_log", "status = 'rejected'")
-    voted_count   = db.count("voted_users")
+    voted_count   = db.count("issued_tokens", "used = 1")  # <3
 
     deadline = _get_deadline()
     now = int(time.time())
@@ -487,9 +493,17 @@ def api_auth():
         return jsonify({"status": "error", "code": "NONCE_REPLAY",
                         "message": "重放攻擊：nonce 已使用"}), 403  # <3
 
-    # ── 防重複投票：檢查 sender_id ───────────────────────
-    if db.exists("SELECT 1 FROM voted_users WHERE sender_id = ?", (sender_id,)):
-        _log('rejected', f'重複投票：{sender_id} 已投票')
+    # ── 防重複投票：檢查此選民是否已「消耗過」一張 Voting Token ──────
+    # v2.0 修正：原本在此處（Phase 2 認證成功當下）就直接標記已投票，
+    # 但這時候選民其實還沒拿到、更沒用掉任何盲簽章授權——如果選民端在
+    # 認證成功後、實際送出信封前的任何一步失敗（斷線、關分頁、重新整
+    # 理），就會被永久鎖死，即使他從未真正投出任何一票。
+    # 改成直接查 issued_tokens：只有當某張票被「真正兌換成盲簽章」
+    # （used=1）時，才代表這位選民已經拿到一張可用的合法選票，此時才
+    # 鎖定不可再認證。這裡不需要另外維護一張 voted_users 表——
+    # issued_tokens 本來就以 voter_id 記錄每一張票的核發與使用狀態。 <3
+    if db.exists("SELECT 1 FROM issued_tokens WHERE voter_id = ? AND used = 1", (sender_id,)):
+        _log('rejected', f'重複投票：{sender_id} 已使用過 Voting Token')
         return jsonify({"status": "error", "code": "ALREADY_VOTED",
                         "message": f"{sender_id} 已投票，不可重複投票"}), 403  # <3
 
@@ -540,6 +554,10 @@ def api_auth():
             _code = "TIMESTAMP_OUT_OF_RANGE"
         elif "nonce_echo 不符" in _error_msg:
             _code = "NONCE_ECHO_MISMATCH"
+        elif "SENDER_ID_CERT_MISMATCH" in _error_msg:
+            # <3 新增：憑證 Subject CN 與宣稱的 sender_id 不符——防止任何持有
+            # 合法憑證者冒用他人 sender_id 騙取投票授權票。
+            _code = "SENDER_ID_CERT_MISMATCH"
         else:
             _code = "SIGNATURE_INVALID"  # <3
         return jsonify({"status": "error", "code": _code,
@@ -549,12 +567,6 @@ def api_auth():
     db.execute(
         "INSERT INTO used_nonces (si, sender_id, used_at) VALUES (?, ?, ?)",
         (si, sender_id, now),
-    )
-
-    # ── 標記已投票（防重複投票）─────────────────────────
-    db.execute(
-        "INSERT INTO voted_users (sender_id, voted_at) VALUES (?, ?)",
-        (sender_id, now),
     )
 
     _log('success')
@@ -592,6 +604,13 @@ def api_auth():
         "payload":   token_payload,
         "signature": base64.b64encode(token_sig).decode('utf-8'),
     }
+
+    # v2.0 修正：核發新票之前，先作廢這位選民名下所有「還沒用掉」的舊票。
+    # 如果不這麼做，選民可以在票過期前反覆重新認證、囤積多張同時有效
+    # 的未使用票，再一次全部拿去換簽章，湊出多張合法選票——這正是移除
+    # 「認證當下就鎖定」之後必須補上的防線，否則會重新開一個一人多票
+    # 的漏洞。同一時間每位選民最多只能有一張尚未使用的有效票。 <3
+    db.execute("DELETE FROM issued_tokens WHERE voter_id = ? AND used = 0", (sender_id,))  # <3
 
     db.execute(
         "INSERT INTO issued_tokens (token_id, voter_id, issued_at, expires_at, used) VALUES (?, ?, ?, ?, 0)",
@@ -674,8 +693,8 @@ def api_blind_sign():
                         "message": "Token 不存在（可能由非本 TPA 簽發）"}), 403
 
     claimed = db.execute(
-        "UPDATE issued_tokens SET used = 1 WHERE token_id = ? AND used = 0", (token_id,)
-    )  # <3 rowcount==0 代表已被搶先使用（即使剛剛的 SELECT 顯示未使用）
+        "UPDATE issued_tokens SET used = 1, used_at = ? WHERE token_id = ? AND used = 0", (now, token_id)
+    )  # <3 rowcount==0 代表已被搶先使用（即使剛剛的 SELECT 顯示未使用）；used_at 記錄真正消耗的時間點
     if claimed == 0:
         return jsonify({"status": "error", "code": "TOKEN_ALREADY_USED",
                         "message": "Voting Token 已使用"}), 403  # <3
