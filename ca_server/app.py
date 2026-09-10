@@ -18,6 +18,7 @@ shared/key_manager.py 的 verify_cert_with_ca() 在本地驗證憑證。
 import os
 import sys
 import hashlib
+import hmac
 import time
 import datetime
 
@@ -425,7 +426,12 @@ def api_admin_register_voter():
         }), 409
 
     # ── Zero-knowledge 模式：呼叫端提供 H(OTP)，CA 永不知曉明文 ──
-    otp_hash = data.get('otp_hash', '').strip()
+    # v3.0 修正：`data.get('otp_hash', '')` 只有在完全沒有這個 key 時
+    # 才會用預設值 ''；若呼叫端明確傳 `"otp_hash": null`，get() 會拿到
+    # 貨真價實的 None，對 None 呼叫 .strip() 會丟 AttributeError，變成
+    # 沒處理過的 500，而不是原本設計要給的 400 MISSING_OTP_HASH。改用
+    # `or ''` 讓「缺欄位」和「欄位是 null」兩種情況都正確落到空字串。 <3
+    otp_hash = (data.get('otp_hash') or '').strip()  # <3
     if not otp_hash:
         return jsonify({
             "status":  "error",
@@ -488,7 +494,9 @@ def api_issue_cert():
                 "message": f"{entity_id} 已核發過服務憑證，registration_token 已失效",
             }), 403  # <3
 
-        if not expected_token or registration_token != expected_token:
+        # v3.0 修正：改用固定時間比較，避免時序側通道洩漏
+        # SERVICE_REGISTRATION_TOKEN。 <3
+        if not expected_token or not hmac.compare_digest(registration_token, expected_token):  # <3
             return jsonify({
                 "status": "error",
                 "code": "SERVICE_TOKEN_INVALID",

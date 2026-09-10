@@ -8,6 +8,7 @@ v2.0 規格書 §18.1.3（CA Admin 端點）、§18.4.4（CC /api/tally 內部�
 §23.3（ADMIN_API_TOKEN 環境變數：適用於 ca, cc）。
 """
 
+import hmac
 import ipaddress
 from flask import request
 
@@ -55,7 +56,10 @@ def check_admin_token() -> bool:
         return False
 
     token = auth_header[len("Bearer "):]
-    return token == expected
+    # v3.0 修正：改用固定時間比較，避免 `==` 因為字串比較「比到第一個
+    # 不同字元就停」而產生時序側通道，讓攻擊者靠量測回應時間差異逐字元
+    # 猜出 ADMIN_API_TOKEN。 <3
+    return hmac.compare_digest(token, expected)  # <3
 
 
 def admin_auth_error():
