@@ -18,21 +18,37 @@ Flask 伺服器只做：
 投票回執（voter_id、SN、投票內容、m_hex）僅存於選民瀏覽器本地的
 IndexedDB（跟私鑰放在一起），伺服器端不保存、也查詢不到任何一筆
 「選民身分 ↔ 投票內容」的對應關係。
+
+批次混合（v3.0 新增）：
+  信封不再收到就立刻轉送給 CC，而是先進本地佇列（pending_envelope
+  表），等湊到 ENVELOPE_BATCH_SIZE 封或快到截止時間才打亂順序一次
+  送出，降低「送出時間點」洩漏投票行為的風險。這張表本身仍會短暫
+  存放 AAD（其中的 voter_id 只是 Base64，不是加密），是這個設計已
+  知、且經過討論後接受的取捨，不對外提供任何讀取這張表的 API。
 """
 
 import os
 import sys
+import time
+import random
+import threading
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from flask import Flask, request, jsonify, render_template_string
 import requests as http_requests
 
+from shared.db_utils import Database
 from shared.config_loader import get_candidates as cfg_get_candidates, make_reload_endpoint
 
 # ============================================================
 # 常數設定
 # ============================================================
+SERVICE_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR    = os.path.join(SERVICE_DIR, "data")
+os.makedirs(DATA_DIR, exist_ok=True)
+DB_PATH     = os.path.join(DATA_DIR, "voter_queue.db")
+
 VOTER_ID = os.environ.get("VOTER_ID", "")   # 僅作表單預設值，不強制
 CA_URL   = os.environ.get("CA_URL",  "http://localhost:5001")
 TPA_URL  = os.environ.get("TPA_URL", "http://localhost:5000")
@@ -40,11 +56,86 @@ TA_URL   = os.environ.get("TA_URL",  "http://localhost:5002")
 CC_URL   = os.environ.get("CC_URL",  "http://localhost:5003")
 BB_URL   = os.environ.get("BB_URL",  "http://localhost:5004")
 
+# 批次混合參數：湊滿 K 封就送；否則距截止只剩安全緩衝時間就強制全送。
+ENVELOPE_BATCH_SIZE            = int(os.environ.get("ENVELOPE_BATCH_SIZE", "10"))
+ENVELOPE_FLUSH_SAFETY_MARGIN_S = int(os.environ.get("ENVELOPE_FLUSH_SAFETY_MARGIN_SECONDS", "30"))
+ENVELOPE_FLUSH_POLL_S          = int(os.environ.get("ENVELOPE_FLUSH_POLL_SECONDS", "3"))
+
 def _get_candidates():
     env_val = os.environ.get("CANDIDATES")
     if env_val:
         return [c.strip() for c in env_val.split(",") if c.strip()]
     return cfg_get_candidates()
+
+# ============================================================
+# 待送信封佇列（批次混合用）
+# ============================================================
+db = Database(DB_PATH)
+db.execute("""
+    CREATE TABLE IF NOT EXISTS pending_envelope (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        c_data      TEXT NOT NULL,
+        iv          TEXT NOT NULL,
+        tag         TEXT NOT NULL,
+        aad         TEXT NOT NULL,
+        c_key       TEXT NOT NULL,
+        token_hash  TEXT NOT NULL UNIQUE,
+        queued_at   INTEGER NOT NULL
+    )
+""")
+
+
+def _flush_pending(rows):
+    """打亂順序後逐一送給 CC。不論 CC 接受或拒絕，都從佇列移除——
+    被拒絕的信封（例如 token_hash 重複）本來就不可能靠重試變成功。"""
+    rows = list(rows)
+    random.SystemRandom().shuffle(rows)
+    for row in rows:
+        envelope = {k: row[k] for k in ('c_data', 'iv', 'tag', 'aad', 'c_key', 'token_hash')}
+        try:
+            r = http_requests.post(f"{CC_URL}/api/receive_envelope", json=envelope, timeout=10)
+            if r.status_code == 200:
+                print(f"[Voter] 批次送出信封成功（token_hash={row['token_hash'][:16]}...）")
+            else:
+                print(f"[Voter] 批次送出信封被 CC 拒絕（{r.status_code}）：{r.text[:200]}")
+        except Exception as e:
+            print(f"[Voter] 批次送出信封失敗（連線錯誤）：{e}")
+        db.execute("DELETE FROM pending_envelope WHERE id = ?", (row['id'],))
+
+
+def _remaining_seconds():
+    """查詢投票剩餘秒數；選舉尚未開始或查詢失敗回傳 None。"""
+    try:
+        r = http_requests.get(f"{TA_URL}/api/deadline", timeout=5)
+        d = r.json()
+        if d.get("election_state") != "running":
+            return None
+        return d.get("remaining_seconds")
+    except Exception:
+        return None
+
+
+def _batch_scheduler_loop():
+    """背景排程：湊滿 K 封就送；否則距截止進入安全緩衝時間就強制全送。"""
+    while True:
+        try:
+            count = db.count("pending_envelope")
+            if count >= ENVELOPE_BATCH_SIZE:
+                rows = db.fetchall("SELECT * FROM pending_envelope ORDER BY id")
+                print(f"[Voter] 批次池達到 {count} 封（門檻 {ENVELOPE_BATCH_SIZE}），送出")
+                _flush_pending(rows)
+            elif count > 0:
+                remaining = _remaining_seconds()
+                if remaining is not None and remaining <= ENVELOPE_FLUSH_SAFETY_MARGIN_S:
+                    rows = db.fetchall("SELECT * FROM pending_envelope ORDER BY id")
+                    print(f"[Voter] 距截止僅剩 {remaining} 秒，強制送出池內剩餘 {count} 封")
+                    _flush_pending(rows)
+        except Exception as e:
+            print(f"[Voter] 批次排程例外：{e}")
+        time.sleep(ENVELOPE_FLUSH_POLL_S)
+
+
+threading.Thread(target=_batch_scheduler_loop, daemon=True).start()
 
 # ============================================================
 # Flask App
@@ -91,10 +182,6 @@ def proxy_tpa_blind_sign():
 def proxy_cc_pk():
     return _proxy("GET", f"{CC_URL}/api/public_key")
 
-@app.route('/api/proxy/cc/receive_envelope', methods=['POST'])
-def proxy_cc_envelope():
-    return _proxy("POST", f"{CC_URL}/api/receive_envelope", request.get_json())
-
 @app.route('/api/proxy/ta/public_key', methods=['GET'])
 def proxy_ta_pk():
     return _proxy("GET", f"{TA_URL}/api/public_key")
@@ -112,6 +199,47 @@ def proxy_bb_results():
 @app.route('/api/candidates', methods=['GET'])
 def api_candidates():
     return jsonify({"status": "success", "candidates": _get_candidates()}), 200
+
+@app.route('/api/submit_envelope', methods=['POST'])
+def submit_envelope():
+    """
+    [POST] 選民提交數位信封（v3.0 改為批次混合，不再即時轉送給 CC）。
+    收下後先進本地佇列，由背景排程（見 _batch_scheduler_loop）湊滿
+    ENVELOPE_BATCH_SIZE 封、或距投票截止進入安全緩衝時間時，才打亂
+    順序一次送出，降低「提交時間點」洩漏投票行為的風險。
+    """
+    data = request.get_json()
+    required = ('c_data', 'iv', 'tag', 'aad', 'c_key', 'token_hash')
+    if not data or not all(k in data for k in required):
+        return jsonify({"status": "error", "message": "缺少信封欄位"}), 400
+
+    # 先確認選舉確實還在進行中，避免快截止前收進佇列的信封，稍後送給 CC
+    # 時才被默默拒絕，選民卻已經看到「已收到」的誤導訊息。查不到（TA
+    # 連不上）也一併拒絕，維持 fail-secure。 <3
+    remaining = _remaining_seconds()
+    if remaining is None or remaining <= 0:
+        return jsonify({
+            "status":  "error",
+            "code":    "DEADLINE_PASSED",
+            "message": "投票已截止或選舉尚未開始，無法提交",
+        }), 403  # <3
+
+    now = int(time.time())
+    try:
+        db.execute(
+            "INSERT INTO pending_envelope (c_data, iv, tag, aad, c_key, token_hash, queued_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (data['c_data'], data['iv'], data['tag'], data['aad'], data['c_key'], data['token_hash'], now),
+        )
+    except Exception as e:
+        # token_hash 已在佇列中（同一封信封被重複提交），視為已收到即可，
+        # 不需要因為前端重試就回傳錯誤讓選民誤以為投票失敗。
+        return jsonify({"status": "queued", "message": "此信封已在佇列中"}), 202
+
+    return jsonify({
+        "status":  "queued",
+        "message": "已收到您的選票，將於稍後批次送出以保護您的匿名性",
+    }), 202
 
 # v3.0 修正：/api/all_receipts、/api/vote_status、/api/save_vote_receipt
 # 三個端點已移除。這三個端點原本讓伺服器端保存 voter_id 與 vote 的明文
@@ -517,8 +645,11 @@ _VOTE_HTML = """<!DOCTYPE html>
 
   <!-- 成功提示 -->
   <div id="successCard" class="hidden mt-6 bg-green-50 dark:bg-green-900/10 border border-green-200 dark:border-green-800/50 rounded-xl p-6">
-    <p class="text-green-700 dark:text-green-400 font-semibold text-base mb-3">投票成功</p>
-    <p class="text-xs text-gray-500 mb-1">請保存您的 m_hex 以便日後在 BB 驗證：</p>
+    <p class="text-green-700 dark:text-green-400 font-semibold text-base mb-3">已收到您的選票</p>
+    <p class="text-xs text-gray-500 mb-1">
+      為保護匿名性，選票會與其他選民一起批次送出，不會立即出現在計票中心，
+      請放心，這是正常流程。開票後可用 m_hex 到公告板（BB）驗證是否已計入：
+    </p>
     <code id="successMhex" class="block bg-gray-100 dark:bg-gray-800/60 rounded-lg p-3 text-xs font-mono break-all text-gray-700 dark:text-gray-300 mt-2"></code>
     <a href="/status" class="mt-4 inline-block text-xs text-msblue hover:underline">查看完整回執 →</a>
   </div>
@@ -722,15 +853,17 @@ async function doVote() {
     const envelope = { c_data, iv, tag, aad, c_key, token_hash };
     addStep('信封封裝完成', true);
 
-    // Step 8: 傳送至 CC
-    addStep('傳送數位信封至計票中心...');
-    const ccResp = await fetch('/api/proxy/cc/receive_envelope', {
+    // Step 8: 提交信封（v3.0 修正：不再直接送到 CC，而是先進選民端本地
+    // 佇列，由背景排程湊滿批次或接近截止時間才打亂順序一次送出，避免
+    // 每個人的提交時間點各自暴露投票行為。 <3
+    addStep('提交數位信封...');
+    const submitResp = await fetch('/api/submit_envelope', {
       method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify(envelope),
     });
-    const ccData = await ccResp.json();
-    if (ccData.status !== 'success') throw new Error('CC 拒絕信封：' + (ccData.message || ccData.code || ''));
-    addStep('CC 已接收信封', true);
+    const submitData = await submitResp.json();
+    if (submitData.status !== 'queued') throw new Error('信封提交失敗：' + (submitData.message || submitData.code || ''));
+    addStep('已收到，將於稍後批次送出', true);
 
     // Step 9: 儲存回執（v3.0 修正：只存本機 IndexedDB，伺服器端完全不接觸
     // 「voter_id ↔ vote」的對應關係，避免留下一份能直接匯出全體選民投票
