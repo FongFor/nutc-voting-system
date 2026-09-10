@@ -24,6 +24,7 @@ import json
 import time
 import secrets
 import base64
+import hashlib
 import datetime
 
 from cryptography import x509  # <3 新增：驗證 Voter 憑證的 CA 簽章鏈需要載入憑證物件
@@ -577,7 +578,18 @@ def api_auth():
     # 裡從未包含選民這次送出的 NVoter，跟規格書「TPA 回應 NVoter 以建立
     # 本次認證之雙向關聯」的設計不符——就算選民端之後要驗證雙向關聯，
     # TPA 自己這端也從未真的把值放進去過。 <3
-    response_packet = create_auth_packet(TPA_ID, sender_id, _private_key, _cert_pem, nonce_echo=si)  # <3
+    #
+    # v3.0 新增：voter_sig_ref = H(選民這次 auth_packet 的簽章位元組)，
+    # 一併納入 TPA 回應的簽章範圍。這不是防重放機制（nonce_echo 已經
+    # 完整解決那個問題），而是稽核／不可否認性的強化：讓 TPA 的回應成為
+    # 「我確實收到並處理過這一份、完全指定的選民簽章」的密碼學證據，
+    # 而不只是對應到某個 nonce 值而已。 <3
+    voter_sig_ref = hashlib.sha256(signature_bytes).hexdigest()
+    response_packet = create_auth_packet(
+        TPA_ID, sender_id, _private_key, _cert_pem,
+        nonce_echo=si,
+        extra_payload={"voter_sig_ref": voter_sig_ref},
+    )  # <3
 
     # ── 簽發 Voting Token（Phase 2 Step 2.3） ────────────
     deadline = _get_deadline()

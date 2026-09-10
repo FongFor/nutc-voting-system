@@ -46,7 +46,8 @@ def create_auth_packet(
     receiver_id: str,
     sender_private_key,
     certificate_pem: str,
-    nonce_echo: str = None
+    nonce_echo: str = None,
+    extra_payload: dict = None,
 ) -> dict:
     """
     建立標準認證封包（v2.0 版本）
@@ -62,6 +63,9 @@ def create_auth_packet(
         sender_private_key : 發送方的 RSA 私鑰物件（用於簽章）
         certificate_pem  : 發送方的 PEM 格式憑證字串
         nonce_echo       : 回應對方的 nonce（建立雙向關聯）
+        extra_payload    : v3.0 新增，額外要一併納入簽章範圍的欄位（dict），
+                           例如稽核用的 voter_sig_ref。呼叫端自行決定放什麼，
+                           這裡不預設任何特定用途。
 
     回傳：
         dict，包含 payload（JSON 可序列化）與 signature（Base64 字串）
@@ -86,6 +90,11 @@ def create_auth_packet(
     # v2.0 新增：如果是回應封包，加入 nonce_echo
     if nonce_echo:
         payload["nonce_echo"] = nonce_echo
+
+    # v3.0 新增：額外欄位一併納入簽章範圍（例如稽核用的 voter_sig_ref），
+    # 在序列化簽章之前合併進去，確保這些欄位跟其他欄位一樣受簽章保護。
+    if extra_payload:
+        payload.update(extra_payload)
 
     # 將 payload 序列化為 bytes，作為簽章輸入
     payload_bytes = _serialize_payload(payload)
