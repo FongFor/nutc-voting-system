@@ -462,6 +462,82 @@ _VERIFY_HTML = """<!DOCTYPE html>
       </div>
 
       {% if result.valid %}
+      <!-- v3.0 新增：瀏覽器本機獨立驗證。上面那個「驗證通過」是 BB 伺服器
+           自己算完才回傳的結論，選民只是在相信 BB 說的話；這裡改成瀏覽器
+           自己用 Web Crypto API 重新算一次 Merkle Root 並比對，不依賴、
+           也不用信任 BB 的判斷，真正做到端到端可驗證。 -->
+      <div id="localVerifyBanner" class="flex items-start gap-3 mb-5 p-4 rounded-xl border bg-gray-50/80 dark:bg-[#0a0a0a] border-gray-200 dark:border-gray-800">
+        <div class="mt-0.5">
+          <svg id="localVerifyIcon" class="w-5 h-5 text-gray-400 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+        </div>
+        <div>
+          <p id="localVerifyTitle" class="font-semibold text-gray-600 dark:text-gray-400 text-sm">瀏覽器本機獨立驗證中...</p>
+          <p class="text-gray-500 dark:text-gray-500 text-xs mt-1">不依賴、也不信任 BB 伺服器的判斷結果，在您的瀏覽器裡用相同的雜湊規則重新計算一次 Merkle Root 並比對，即使 BB 被入侵並謊報「驗證通過」，這裡也會如實顯示不符。</p>
+        </div>
+      </div>
+      <script>
+        (function () {
+          async function sha256Hex(bytes) {
+            const digest = await crypto.subtle.digest('SHA-256', bytes);
+            return Array.from(new Uint8Array(digest)).map(b => b.toString(16).padStart(2, '0')).join('');
+          }
+          function concatBytes(...arrs) {
+            const total = arrs.reduce((n, a) => n + a.length, 0);
+            const out = new Uint8Array(total);
+            let offset = 0;
+            for (const a of arrs) { out.set(a, offset); offset += a.length; }
+            return out;
+          }
+          // 必須跟 shared/merkle_tree.py 的 h_leaf/h_node 規則完全一致：
+          // 前綴一個位元組（葉節點 0x00、中間節點 0x01），後面接的是雜湊值
+          // 的「16進位字串本身」當文字編碼，不是先還原成二進位。
+          async function hLeafLocal(mHex) {
+            const enc = new TextEncoder();
+            return sha256Hex(concatBytes(new Uint8Array([0x00]), enc.encode(mHex)));
+          }
+          async function hNodeLocal(left, right) {
+            const enc = new TextEncoder();
+            return sha256Hex(concatBytes(new Uint8Array([0x01]), enc.encode(left), enc.encode(right)));
+          }
+          async function verifyProofLocally(mHex, proof, rootOfficial) {
+            let current = await hLeafLocal(mHex);
+            for (const step of proof) {
+              current = step.position === 'right'
+                ? await hNodeLocal(current, step.sibling)
+                : await hNodeLocal(step.sibling, current);
+            }
+            return current === rootOfficial;
+          }
+
+          (async function () {
+            const mHex        = {{ result.m_hex | tojson }};
+            const proof       = {{ result.proof | tojson }};
+            const rootOfficial = {{ result.root | tojson }};
+            const icon  = document.getElementById('localVerifyIcon');
+            const title = document.getElementById('localVerifyTitle');
+            const banner = document.getElementById('localVerifyBanner');
+            try {
+              const ok = await verifyProofLocally(mHex, proof, rootOfficial);
+              icon.classList.remove('animate-spin');
+              if (ok) {
+                banner.classList.remove('bg-gray-50/80', 'dark:bg-[#0a0a0a]', 'border-gray-200', 'dark:border-gray-800');
+                banner.classList.add('bg-emerald-50/80', 'dark:bg-emerald-900/10', 'border-emerald-200', 'dark:border-emerald-900/50');
+                title.className = 'font-semibold text-emerald-800 dark:text-emerald-400 text-sm';
+                title.textContent = '瀏覽器本機獨立驗證：通過（未使用 BB 的判斷結果）';
+                icon.innerHTML = '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path>';
+                icon.setAttribute('class', 'w-5 h-5 text-emerald-600 dark:text-emerald-500');
+              } else {
+                banner.classList.add('bg-red-50/80', 'dark:bg-red-900/10', 'border-red-200', 'dark:border-red-900/50');
+                title.className = 'font-semibold text-red-800 dark:text-red-400 text-sm';
+                title.textContent = '⚠ 瀏覽器本機獨立驗證：與 BB 公告結果不符，請勿信任上方「驗證通過」訊息並立即通報';
+              }
+            } catch (e) {
+              title.textContent = '本機獨立驗證發生錯誤：' + e.message;
+            }
+          })();
+        })();
+      </script>
+
       <details class="mb-6 group">
         <summary class="cursor-pointer text-[13px] font-medium text-gray-500 dark:text-gray-400 hover:text-msblue dark:hover:text-white select-none py-2 flex items-center transition-colors">
           <svg class="w-3.5 h-3.5 mr-2 transform transition-transform group-open:rotate-90" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"></path></svg>
