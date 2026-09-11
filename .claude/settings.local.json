@@ -11,7 +11,8 @@
       "Bash(Sort-Object FullName)",
       "Bash(docker info *)",
       "Bash(PYTHONIOENCODING=utf-8 python test/test_comprehensive.py --voters 5 --verbose)",
-      "Bash(echo \"EXIT_CODE=$?\")"
+      "Bash(echo \"EXIT_CODE=$?\")",
+      "Bash(docker compose *)"
     ]
   }
 }
