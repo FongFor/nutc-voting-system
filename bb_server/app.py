@@ -32,9 +32,10 @@ import requests as http_requests
 from shared.merkle_tree import MerkleTree, h_leaf
 from shared.format_utils import sha256_hex, ts_to_human, b64_to_bytes
 from shared.db_utils import Database
-from shared.config_loader import make_reload_endpoint
+from shared.config_loader import make_reload_endpoint, get_service_registration_token  # <3 v4.0
 from shared.crypto_utils import verify_signature
 from shared.key_manager import load_or_fetch_ca_cert
+from shared.tls_utils import load_or_request_tls_certificate, build_mtls_server_context  # <3 v4.0：mTLS
 from cryptography import x509
 from cryptography.x509.oid import NameOID  # <3 新增：用於核對憑證 Subject CN，防止冒充 CC
 from cryptography.hazmat.primitives import serialization
@@ -46,8 +47,10 @@ from cryptography.hazmat.primitives.asymmetric import padding
 SERVICE_DIR = os.path.dirname(os.path.abspath(__file__))
 KEYS_DIR    = os.path.join(SERVICE_DIR, "keys")
 DB_PATH     = os.path.join(SERVICE_DIR, "bb.db")
-CC_URL      = os.environ.get("CC_URL", "http://localhost:5003")
-CA_URL      = os.environ.get("CA_URL", "http://localhost:5001")
+BB_ID       = "BB"
+BB_HOSTNAME = os.environ.get("BB_HOSTNAME", "bb")  # <3 v4.0：填入 TLS 憑證的 SAN
+CC_URL      = os.environ.get("CC_URL", "https://localhost:5003")
+CA_URL      = os.environ.get("CA_URL", "https://localhost:5001")
 
 # ============================================================
 # 資料庫初始化
@@ -83,6 +86,17 @@ except Exception as ex:
     print(f"[BB] 警告：無法取得 CA 憑證（{ex}）")
     _ca_cert_pem = None
     _ca_cert = None
+
+# v4.0 新增：BB 沒有應用層身分金鑰對（規格書一貫定位 BB「無自有金鑰」），
+# 但一樣需要一把 TLS 專用金鑰對，供公開監聽埠出示伺服器憑證用。
+try:
+    _tls_cert_path, _tls_key_path = load_or_request_tls_certificate(
+        KEYS_DIR, BB_ID, BB_HOSTNAME, CA_URL,
+        registration_token=get_service_registration_token(),
+    )
+except Exception as ex:
+    print(f"[BB] 警告：無法取得 TLS 憑證（{ex}）")
+    _tls_cert_path = _tls_key_path = None
 
 # ============================================================
 # Flask App
@@ -1626,4 +1640,13 @@ def _build_tree_data(m_hex: str) -> dict:
 
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5004, debug=False)
+    # v4.0 新增：BB 的監聽埠除了 CC 推送結果，還要接受一般瀏覽器（經
+    # Caddy）的公開連線——瀏覽器不會持有這套內部 PKI 的用戶端憑證，
+    # 所以刻意不要求 CERT_REQUIRED（require_client_cert=False），對
+    # CC 身分的驗證繼續由既有的應用層簽章＋Subject CN 核對負責，見
+    # shared/tls_utils.py 的說明。
+    _ca_cert_path = os.path.join(KEYS_DIR, "ca_cert.pem")
+    _ssl_ctx = build_mtls_server_context(
+        _tls_cert_path, _tls_key_path, _ca_cert_path, require_client_cert=False,
+    )
+    app.run(host='0.0.0.0', port=5004, debug=False, ssl_context=_ssl_ctx)

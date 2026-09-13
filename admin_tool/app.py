@@ -29,7 +29,9 @@ from flask import Flask, request, jsonify, render_template_string
 import requests as http_requests
 
 from shared.db_utils import Database
-from shared.config_loader import get_admin_api_token  # <3 呼叫 CA/CC 的 Admin 端點需要帶 Bearer Token
+from shared.config_loader import get_admin_api_token, get_service_registration_token  # <3 呼叫 CA/CC 的 Admin 端點需要帶 Bearer Token
+from shared.key_manager import load_or_fetch_ca_cert  # <3 v4.0：mTLS
+from shared.tls_utils import load_or_request_tls_certificate, build_mtls_server_context, mtls_client_kwargs  # <3 v4.0：mTLS
 
 # ============================================================
 # 常數設定
@@ -37,17 +39,40 @@ from shared.config_loader import get_admin_api_token  # <3 呼叫 CA/CC 的 Admi
 SERVICE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR    = os.path.join(SERVICE_DIR, "data")
 DB_PATH     = os.path.join(DATA_DIR, "admin.db")
+KEYS_DIR    = os.path.join(SERVICE_DIR, "keys")  # <3 v4.0：admin_tool 沒有應用層身分憑證，只快取 CA 根憑證＋TLS 專用金鑰對
+os.makedirs(KEYS_DIR, exist_ok=True)
+ADMIN_HOSTNAME = os.environ.get("ADMIN_HOSTNAME", "admin")  # <3 v4.0：填入 TLS 憑證的 SAN
 
-CA_URL    = os.environ.get("CA_URL",    "http://localhost:5001")
-TA_URL    = os.environ.get("TA_URL",    "http://localhost:5002")
-CC_URL    = os.environ.get("CC_URL",    "http://localhost:5003")
+CA_URL    = os.environ.get("CA_URL",    "https://localhost:5001")
+TA_URL    = os.environ.get("TA_URL",    "https://localhost:5002")
+CC_URL    = os.environ.get("CC_URL",    "https://localhost:5003")
 
 
 def _admin_headers() -> dict:
     """呼叫 CA /api/admin/* 或 CC /api/tally 時附上的 Admin Bearer Token 標頭。 <3"""
     return {"Authorization": f"Bearer {get_admin_api_token()}"}
-BB_URL    = os.environ.get("BB_URL",    "http://localhost:5004")
-VOTER_URL = os.environ.get("VOTER_URL", "http://localhost:5005")
+BB_URL    = os.environ.get("BB_URL",    "https://localhost:5004")
+VOTER_URL = os.environ.get("VOTER_URL", "https://localhost:5005")
+
+# v4.0 新增：先快取 CA 根憑證，才有材料驗證 CA 與其他實體的 TLS 憑證，
+# 再向 CA 申請本服務專用的 TLS 憑證（admin_tool 沒有應用層身分憑證，這是
+# 它唯一持有的一把金鑰對）。
+try:
+    load_or_fetch_ca_cert(KEYS_DIR, CA_URL)
+except Exception as ex:
+    print(f"[Admin] 警告：無法取得 CA 憑證（{ex}）")
+
+try:
+    _TLS_CERT_PATH, _TLS_KEY_PATH = load_or_request_tls_certificate(
+        KEYS_DIR, "ADMIN", ADMIN_HOSTNAME, CA_URL,
+        registration_token=get_service_registration_token(),
+    )
+except Exception as ex:
+    print(f"[Admin] 警告：無法取得 TLS 憑證（{ex}）")
+    _TLS_CERT_PATH = _TLS_KEY_PATH = None
+
+# 供本檔案所有對外呼叫共用的 mTLS 參數。
+_ADMIN_MTLS = mtls_client_kwargs(_TLS_CERT_PATH, _TLS_KEY_PATH, os.path.join(KEYS_DIR, "ca_cert.pem"))
 
 # ============================================================
 # 資料庫初始化
@@ -88,6 +113,7 @@ def _register_to_ca(voter_id: str, otp_hash: str) -> dict:
         json={"voter_id": voter_id, "otp_hash": otp_hash},
         headers=_admin_headers(),  # <3
         timeout=10,
+        **_ADMIN_MTLS,
     )
     resp.raise_for_status()
     return resp.json()
@@ -590,7 +616,7 @@ def dashboard():
 
     # 從 CA 同步選民認證狀態（把 CA 端已完成的 registered 狀態寫回本地）
     try:
-        ca_resp = http_requests.get(f"{CA_URL}/api/admin/voter_registry", headers=_admin_headers(), timeout=3)  # <3
+        ca_resp = http_requests.get(f"{CA_URL}/api/admin/voter_registry", headers=_admin_headers(), timeout=3, **_ADMIN_MTLS)  # <3
         ca_data = ca_resp.json()
         if ca_data.get("status") == "success":
             for row in ca_data.get("voters", []):
@@ -606,7 +632,7 @@ def dashboard():
     election_state = 'standby'
     election_deadline_str = None
     try:
-        resp = http_requests.get(f"{TA_URL}/api/deadline", timeout=3)
+        resp = http_requests.get(f"{TA_URL}/api/deadline", timeout=3, **_ADMIN_MTLS)
         data = resp.json()
         if data.get("status") == "success":
             election_state = data.get("election_state", "standby")
@@ -748,14 +774,14 @@ def api_new_round():
 
     # 1. 重置 TA 選舉狀態
     try:
-        resp = http_requests.post(f"{TA_URL}/api/admin/reset_election", json={}, timeout=10)
+        resp = http_requests.post(f"{TA_URL}/api/admin/reset_election", json={}, timeout=10, **_ADMIN_MTLS)
         results['ta'] = resp.json()
     except Exception as e:
         results['ta'] = {"status": "error", "message": str(e)}
 
     # 2. 清除 CA 選民名冊
     try:
-        resp = http_requests.post(f"{CA_URL}/api/admin/reset_voter_registry", json={}, headers=_admin_headers(), timeout=10)  # <3
+        resp = http_requests.post(f"{CA_URL}/api/admin/reset_voter_registry", json={}, headers=_admin_headers(), timeout=10, **_ADMIN_MTLS)  # <3
         results['ca'] = resp.json()
     except Exception as e:
         results['ca'] = {"status": "error", "message": str(e)}
@@ -774,7 +800,7 @@ def api_new_round():
 def api_start_election():
     """向 TA 發送啟動選舉指令（管理員操作）。"""
     try:
-        resp = http_requests.post(f"{TA_URL}/api/start_election", json={}, timeout=10)
+        resp = http_requests.post(f"{TA_URL}/api/start_election", json={}, timeout=10, **_ADMIN_MTLS)
         return jsonify(resp.json()), resp.status_code
     except Exception as e:
         return jsonify({"status": "error", "message": f"無法連接 TA：{e}"}), 502
@@ -784,7 +810,7 @@ def api_start_election():
 def api_election_status():
     """查詢選舉狀態（從 TA 取得）。"""
     try:
-        resp = http_requests.get(f"{TA_URL}/api/deadline", timeout=5)
+        resp = http_requests.get(f"{TA_URL}/api/deadline", timeout=5, **_ADMIN_MTLS)
         return jsonify(resp.json()), resp.status_code
     except Exception as e:
         return jsonify({"status": "error", "message": f"無法連接 TA：{e}"}), 502
@@ -806,28 +832,28 @@ def api_export():
 
     # 2. TA 選舉狀態
     try:
-        r = http_requests.get(f"{TA_URL}/api/deadline", timeout=5)
+        r = http_requests.get(f"{TA_URL}/api/deadline", timeout=5, **_ADMIN_MTLS)
         export["sections"]["election_state"] = r.json()
     except Exception as e:
         export["sections"]["election_state"] = {"error": str(e)}
 
     # 3. CA 選民名冊狀態
     try:
-        r = http_requests.get(f"{CA_URL}/api/admin/voter_registry", headers=_admin_headers(), timeout=5)  # <3
+        r = http_requests.get(f"{CA_URL}/api/admin/voter_registry", headers=_admin_headers(), timeout=5, **_ADMIN_MTLS)  # <3
         export["sections"]["ca_voter_registry"] = r.json().get("voters", [])
     except Exception as e:
         export["sections"]["ca_voter_registry"] = {"error": str(e)}
 
     # 4. BB 公告結果
     try:
-        r = http_requests.get(f"{BB_URL}/api/results", timeout=5)
+        r = http_requests.get(f"{BB_URL}/api/results", timeout=5, **_ADMIN_MTLS)
         export["sections"]["published_results"] = r.json()
     except Exception as e:
         export["sections"]["published_results"] = {"error": str(e)}
 
     # 5. 選民投票回執
     try:
-        r = http_requests.get(f"{VOTER_URL}/api/all_receipts", timeout=5)
+        r = http_requests.get(f"{VOTER_URL}/api/all_receipts", timeout=5, **_ADMIN_MTLS)
         export["sections"]["vote_receipts"] = r.json().get("receipts", [])
     except Exception as e:
         export["sections"]["vote_receipts"] = {"error": str(e)}
@@ -854,4 +880,16 @@ def print_page():
 
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5010, debug=False)
+    # v4.0 修正：Admin 的實際使用情境是系統維運人員直接用瀏覽器操作
+    # 儀表板（新增選民、啟動/重置選舉），不是服務對服務的機器呼叫——
+    # 目前系統裡也沒有任何東西會主動連進 Admin 並出示用戶端憑證。強制
+    # CERT_REQUIRED 只會逼操作者把用戶端憑證匯入瀏覽器才能打開頁面，
+    # 增加操作摩擦卻沒有對應的安全效益，所以跟 BB/Voter 一樣改成
+    # require_client_cert=False——Admin 本來就不對外開放（沒有 Caddy
+    # 代理、沒有對外 port），這一層防護交給網路層存取控制，不依賴傳輸層
+    # 用戶端憑證。
+    _ca_cert_path = os.path.join(KEYS_DIR, "ca_cert.pem")
+    _ssl_ctx = build_mtls_server_context(
+        _TLS_CERT_PATH, _TLS_KEY_PATH, _ca_cert_path, require_client_cert=False,
+    )
+    app.run(host='0.0.0.0', port=5010, debug=False, ssl_context=_ssl_ctx)

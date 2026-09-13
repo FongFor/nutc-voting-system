@@ -23,6 +23,7 @@ import sys
 import time
 import json
 import secrets
+import hashlib
 import datetime
 import sqlite3  # <3 新增：用於捕捉 token_hash UNIQUE 約束衝突，做原子化去重
 
@@ -38,6 +39,7 @@ from shared.key_manager import (
     load_or_fetch_ca_cert,
     verify_cert_with_ca,  # <3 用於交叉驗證 TA 釋放的私鑰是否真的對應其認證公鑰
 )
+from shared.tls_utils import load_or_request_tls_certificate, build_mtls_server_context, mtls_client_kwargs  # <3 v4.0：mTLS
 from cryptography import x509  # <3
 from cryptography.x509.oid import NameOID  # <3
 from shared.crypto_utils import open_envelope_layer1, open_envelope_layer2, sign_data
@@ -56,10 +58,11 @@ SERVICE_DIR = os.path.dirname(os.path.abspath(__file__))
 KEYS_DIR    = os.path.join(SERVICE_DIR, "keys")
 DB_PATH     = os.path.join(SERVICE_DIR, "cc.db")
 CC_ID       = "CC"
-CA_URL      = os.environ.get("CA_URL",  "http://localhost:5001")
-TA_URL      = os.environ.get("TA_URL",  "http://localhost:5002")
-BB_URL      = os.environ.get("BB_URL",  "http://localhost:5004")
-TPA_URL     = os.environ.get("TPA_URL", "http://localhost:5000")
+CC_HOSTNAME = os.environ.get("CC_HOSTNAME", "cc")  # <3 v4.0：填入 TLS 憑證的 SAN
+CA_URL      = os.environ.get("CA_URL",  "https://localhost:5001")
+TA_URL      = os.environ.get("TA_URL",  "https://localhost:5002")
+BB_URL      = os.environ.get("BB_URL",  "https://localhost:5004")
+TPA_URL     = os.environ.get("TPA_URL", "https://localhost:5000")
 
 # 截止時間與選舉狀態快取（每次請求時向 TA 重新查詢）
 _DEADLINE: int = int(os.environ.get("VOTE_DEADLINE", "0"))
@@ -74,7 +77,7 @@ def _get_deadline() -> int:
     if _DEADLINE > 0:
         return _DEADLINE
     try:
-        resp = http_requests.get(f"{TA_URL}/api/deadline", timeout=5)
+        resp = http_requests.get(f"{TA_URL}/api/deadline", timeout=5, **_CC_MTLS)
         data = resp.json()
         if data.get("status") == "success":
             _DEADLINE = int(data["deadline"])
@@ -165,6 +168,21 @@ except Exception as ex:
     print(f"[CC] 警告：無法取得憑證（{ex}）")
     _cert_pem = ""
 
+# v4.0 新增：另外申請一把獨立的 TLS 專用憑證，跟上面的應用層身分憑證
+# 完全分開，供本服務的 HTTPS 監聽埠與對外呼叫（CA/TA/BB/TPA）使用。
+try:
+    _tls_cert_path, _tls_key_path = load_or_request_tls_certificate(
+        KEYS_DIR, CC_ID, CC_HOSTNAME, CA_URL,
+        registration_token=get_service_registration_token(),
+    )
+except Exception as ex:
+    print(f"[CC] 警告：無法取得 TLS 憑證（{ex}）")
+    _tls_cert_path = _tls_key_path = None
+
+# 供本檔案所有對外呼叫共用的 mTLS 參數（cert= 我方憑證、verify= CA 根
+# 憑證），直接以 **_CC_MTLS 展開進 http_requests.get/post(...)。
+_CC_MTLS = mtls_client_kwargs(_tls_cert_path, _tls_key_path, os.path.join(KEYS_DIR, "ca_cert.pem"))
+
 print(f"[CC] 初始化完成。")
 
 # ============================================================
@@ -194,7 +212,7 @@ def _check_deadline():
     election_state = _ELECTION_STATE
     deadline = _DEADLINE
     try:
-        resp = http_requests.get(f"{TA_URL}/api/deadline", timeout=5)
+        resp = http_requests.get(f"{TA_URL}/api/deadline", timeout=5, **_CC_MTLS)
         data = resp.json()
         if data.get("status") == "success":
             election_state = data.get("election_state", "standby")
@@ -534,7 +552,7 @@ def dashboard():
     # 查詢選舉狀態（供 UI 顯示）
     election_state = _ELECTION_STATE
     try:
-        resp = http_requests.get(f"{TA_URL}/api/deadline", timeout=3)
+        resp = http_requests.get(f"{TA_URL}/api/deadline", timeout=3, **_CC_MTLS)
         data = resp.json()
         if data.get("status") == "success":
             election_state = data.get("election_state", "standby")
@@ -644,7 +662,52 @@ def api_receive_envelope():
         ),
     )
     print(f"[CC] 收到數位信封（Unix ts：{now}  →  {ts_to_human(now)}）")
-    return jsonify({"status": "success", "message": "信封已接收"}), 200
+
+    # v4.0 新增：對「收到信封」這件事本身簽一張收據（receipt），選民端可
+    # 選擇驗證。這條端點刻意不驗證選民身分（匿名投票的核心設計——CC 不能
+    # 知道是誰送的），所以收據不能綁 sender_id/receiver_id，改綁
+    # envelope_hash：對這次收到的信封欄位（c_data/iv/tag/aad/c_key/
+    # token_hash）算 canonical JSON 的 SHA-256。選民自己本來就知道這些欄
+    # 位（是自己送出去的），可以在本地重算同一個雜湊比對，藉此確認「這張
+    # 收據對應的就是我剛剛送出的這份信封」，而不是被套用到別次提交、或被
+    # 攻擊者偽造的「已接收」假訊息。沒有這張收據時（VERIFY_CC_RECEIPT=
+    # false，見 voter_client），選民只能假設 HTTPS 傳輸沒被動手腳；有了
+    # 收據，選民可以在當下就偵測「回應是否真的來自 CC、對應的是不是這份
+    # 信封」，補上跟 Voter↔TPA 那組雙向認證同等級的保障。 <3
+    envelope_hash = hashlib.sha256(
+        json.dumps(
+            {
+                'c_data':     data.get('c_data'),
+                'iv':         data.get('iv'),
+                'tag':        data.get('tag', ''),
+                'aad':        data.get('aad', ''),
+                'c_key':      data.get('c_key'),
+                'token_hash': token_hash,
+            },
+            sort_keys=True, ensure_ascii=False, separators=(',', ':'),
+        ).encode('utf-8')
+    ).hexdigest()
+    receipt_payload = {
+        "sender_id":      CC_ID,
+        "envelope_hash":  envelope_hash,
+        "received_at":    now,
+    }
+    receipt_signature = b""
+    if _cert_pem and _private_key:
+        receipt_payload_bytes = json.dumps(
+            receipt_payload, sort_keys=True, ensure_ascii=False, separators=(',', ':')
+        ).encode('utf-8')
+        receipt_signature = sign_data(receipt_payload_bytes, _private_key)
+
+    return jsonify({
+        "status":  "success",
+        "message": "信封已接收",
+        "receipt": {
+            "payload":   receipt_payload,
+            "signature": bytes_to_b64(receipt_signature) if receipt_signature else "",
+        },
+        "cc_cert_pem": _cert_pem,
+    }), 200
 
 
 @app.route('/api/tally', methods=['POST'])
@@ -776,7 +839,7 @@ def _do_tally() -> dict:
             request_payload = {}
             print(f"[CC] 警告：無憑證，向 TA 請求 SK_TA（無認證封包）")
 
-        resp = http_requests.post(f"{TA_URL}/api/release_key", json=request_payload, timeout=10)
+        resp = http_requests.post(f"{TA_URL}/api/release_key", json=request_payload, timeout=10, **_CC_MTLS)
         sk_ta_data = resp.json()
         
         if sk_ta_data.get('status') != 'released':
@@ -795,7 +858,7 @@ def _do_tally() -> dict:
 
     # 步驟 2：向 TPA 取得公鑰大整數 (e, n)
     try:
-        resp = http_requests.get(f"{TPA_URL}/api/public_key", timeout=10)
+        resp = http_requests.get(f"{TPA_URL}/api/public_key", timeout=10, **_CC_MTLS)
         tpa_data = resp.json()
         tpa_e = hex_to_int(tpa_data['e'])
         tpa_n = hex_to_int(tpa_data['n'])
@@ -817,7 +880,7 @@ def _do_tally() -> dict:
     # 反推出的模數比對是否一致——一致才代表這把私鑰在數學上不可能是
     # 別人偽造的（要偽造就等於要破解 RSA）。 <3
     try:
-        ta_pubkey_resp = http_requests.get(f"{TA_URL}/api/public_key", timeout=10)
+        ta_pubkey_resp = http_requests.get(f"{TA_URL}/api/public_key", timeout=10, **_CC_MTLS)
         ta_pubkey_data = ta_pubkey_resp.json()
         ta_cert_pem = ta_pubkey_data.get('cert_pem', '')
     except Exception as e:
@@ -941,6 +1004,8 @@ def _do_tally() -> dict:
     print(f"[CC] 開票完成（Unix ts：{now}  →  {ts_to_human(now)}）。合法選票：{valid_count}，Root_official：{merkle_root[:20]}...")
 
     # 步驟 6：對開票結果簽章並推送至 BB (v2.0 Sprint 2)
+    bb_published = True
+    bb_publish_warning = None
     try:
         # v2.0 修正：規格書 §19.5 明確要求推送給 BB 的結果只能含
         # valid_m_hex_list（純 m_hex 清單），不可含 vote 與 m_hex 的
@@ -973,23 +1038,73 @@ def _do_tally() -> dict:
             "cert_pem":         _cert_pem,
         }
         
-        resp = http_requests.post(f"{BB_URL}/api/publish", json=bb_payload, timeout=10)
+        resp = http_requests.post(f"{BB_URL}/api/publish", json=bb_payload, timeout=10, **_CC_MTLS)
         if resp.status_code == 200:
             print(f"[CC] 結果已簽章並推送至 BB（簽章長度：{len(signature)} bytes）")
         else:
-            print(f"[CC] 警告：BB 拒絕結果（HTTP {resp.status_code}）：{resp.text}")
+            bb_published = False
+            bb_publish_warning = f"BB 拒絕結果（HTTP {resp.status_code}）：{resp.text}"
+            print(f"[CC] 警告：{bb_publish_warning}")
     except Exception as e:
-        print(f"[CC] 警告：無法推送至 BB（{e}）")
+        bb_published = False
+        bb_publish_warning = f"無法連接 BB：{e}"
+        print(f"[CC] 警告：{bb_publish_warning}")
+
+    # v4.0 新增：CC 對 BB 沒有做任何身分／回應驗證——BB_URL 目前是內部
+    # docker DNS 名稱，一旦這條路徑被攻擊者攔截（未來服務各自上網後風險更
+    # 高），攻擊者可以攔下這個 POST、回一個假的 HTTP 200，讓 CC 誤以為結果
+    # 已公告，但真正的 BB 從未收到。這裡不用要求 BB 額外簽章回應（那需要
+    # BB 也持有金鑰、且改動 BB 的 API），改用成本低很多的「送出後立刻讀
+    # 回」：直接呼叫 BB 自己的公開 GET 端點，拿它現在實際存的
+    # merkle_root/tally/valid_m_hex_list 跟這次送出去的內容逐項比對——這幾
+    # 個值都是 CC 自己算出來、自己簽過章的，不需要 BB 簽任何東西，只要
+    # 「BB 現在存的東西跟我剛剛送的一模一樣」就能抓到「送丟了 / 被送到假
+    # 的地方」這個情況，而不是只看 HTTP 200 就相信。 <3
+    if bb_published:
+        try:
+            verify_resp = http_requests.get(f"{BB_URL}/api/results", timeout=10, **_CC_MTLS)
+            verify_data = verify_resp.json()
+            if (
+                verify_data.get('merkle_root') != merkle_root
+                or verify_data.get('tally') != tally
+                or verify_data.get('valid_m_hex_list') != m_hex_list
+            ):
+                bb_published = False
+                bb_publish_warning = (
+                    "BB read-back 驗證失敗：BB 目前公告的內容與 CC 剛剛送出的不一致，"
+                    "結果可能被送到錯誤的目的地或在傳輸途中被竄改"
+                )
+                print(f"[CC] 警告：{bb_publish_warning}")
+            else:
+                print("[CC] BB read-back 驗證通過，確認結果已正確公告")
+        except Exception as e:
+            bb_published = False
+            bb_publish_warning = f"BB read-back 驗證時發生錯誤：{e}"
+            print(f"[CC] 警告：{bb_publish_warning}")
 
     return {
-        "status":       "success",
-        "valid_count":  valid_count,
-        "tally":        tally,
-        "merkle_root":  merkle_root,
+        "status":              "success",
+        "valid_count":         valid_count,
+        "tally":               tally,
+        "merkle_root":         merkle_root,
         # Unix timestamp（後端標準）
-        "tallied_at":   now,
+        "tallied_at":          now,
+        # v4.0 新增：開票本身（本地計票、Merkle Tree、簽章）成功與否，跟
+        # 「結果是否真的送達並被 BB 正確公告」是兩件事，不要混在同一個
+        # status 欄位裡（否則會動到 /api/tally 既有的成功/400 判斷邏輯）。
+        # 呼叫端（Admin dashboard 等）應額外檢查 bb_published，True 才代表
+        # 選民真的能去 BB 查到這次的結果。 <3
+        "bb_published":        bb_published,
+        "bb_publish_warning":  bb_publish_warning,
     }
 
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5003, debug=False)
+    # v4.0 新增：CC 只會被 Voter（提交信封）與 Admin（觸發開票）連線，
+    # 兩者都持有本套 PKI 核發的 TLS 用戶端憑證，要求對方出示合法 mTLS
+    # 憑證不會擋到任何合法流量。
+    _ca_cert_path = os.path.join(KEYS_DIR, "ca_cert.pem")
+    _ssl_ctx = build_mtls_server_context(
+        _tls_cert_path, _tls_key_path, _ca_cert_path, require_client_cert=True,
+    )
+    app.run(host='0.0.0.0', port=5003, debug=False, ssl_context=_ssl_ctx)

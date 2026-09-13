@@ -32,6 +32,7 @@ from shared.key_manager import (
     load_or_fetch_ca_cert,
     verify_cert_with_ca,
 )
+from shared.tls_utils import load_or_request_tls_certificate, build_mtls_server_context  # <3 v4.0：mTLS
 from shared.format_utils import int_to_hex, ts_to_human
 from shared.db_utils import Database
 from shared.config_loader import make_reload_endpoint, get_vote_duration, get_delta_t, get_service_registration_token
@@ -49,7 +50,8 @@ SERVICE_DIR = os.path.dirname(os.path.abspath(__file__))
 KEYS_DIR    = os.path.join(SERVICE_DIR, "keys")
 DB_PATH     = os.path.join(SERVICE_DIR, "ta.db")
 TA_ID       = "TA"
-CA_URL      = os.environ.get("CA_URL", "http://localhost:5001")
+TA_HOSTNAME = os.environ.get("TA_HOSTNAME", "ta")  # <3 v4.0：填入 TLS 憑證的 SAN
+CA_URL      = os.environ.get("CA_URL", "https://localhost:5001")
 DELTA_T     = int(os.environ.get("DELTA_T", str(get_delta_t())))  # <3 release_key 請求時間戳檢查用
 
 # 選舉狀態由資料庫管理：standby（待命）→ running（進行中）
@@ -119,6 +121,17 @@ try:
 except Exception as ex:
     print(f"[TA] 警告：無法取得憑證（{ex}）")
     _cert_pem = ""
+
+# v4.0 新增：另外申請一把獨立的 TLS 專用憑證（見 shared/tls_utils.py），
+# 跟上面的應用層身分憑證完全分開，供本服務的 HTTPS 監聽埠使用。
+try:
+    _tls_cert_path, _tls_key_path = load_or_request_tls_certificate(
+        KEYS_DIR, TA_ID, TA_HOSTNAME, CA_URL,
+        registration_token=get_service_registration_token(),
+    )
+except Exception as ex:
+    print(f"[TA] 警告：無法取得 TLS 憑證（{ex}）")
+    _tls_cert_path = _tls_key_path = None
 
 # 日誌使用人類可讀格式（ts_to_human 確保時區正確）
 print(f"[TA] 初始化完成。選舉狀態：{_get_election_state()}")
@@ -693,4 +706,11 @@ make_reload_endpoint(app)
 
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5002, debug=False)
+    # v4.0 新增：TA 只會被 TPA（查公鑰）與 CC（釋放金鑰）連線，兩者都是
+    # 已經跑過自己的 CA 憑證 bootstrap 流程的內部服務，要求對方出示合法
+    # mTLS 憑證不會擋到任何合法流量。
+    _ca_cert_path = os.path.join(KEYS_DIR, "ca_cert.pem")
+    _ssl_ctx = build_mtls_server_context(
+        _tls_cert_path, _tls_key_path, _ca_cert_path, require_client_cert=True,
+    )
+    app.run(host='0.0.0.0', port=5002, debug=False, ssl_context=_ssl_ctx)

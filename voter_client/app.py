@@ -29,17 +29,25 @@ IndexedDB（跟私鑰放在一起），伺服器端不保存、也查詢不到�
 
 import os
 import sys
+import json
 import time
+import base64
 import random
+import hashlib
 import threading
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from flask import Flask, request, jsonify, render_template_string
 import requests as http_requests
+from cryptography import x509
+from cryptography.x509.oid import NameOID
 
 from shared.db_utils import Database
-from shared.config_loader import get_candidates as cfg_get_candidates, make_reload_endpoint
+from shared.config_loader import get_candidates as cfg_get_candidates, make_reload_endpoint, get_service_registration_token
+from shared.key_manager import load_or_fetch_ca_cert, verify_cert_with_ca, get_public_key_from_cert
+from shared.crypto_utils import verify_signature
+from shared.tls_utils import load_or_request_tls_certificate, build_mtls_server_context, mtls_client_kwargs  # <3 v4.0：mTLS
 
 # ============================================================
 # 常數設定
@@ -48,13 +56,52 @@ SERVICE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR    = os.path.join(SERVICE_DIR, "data")
 os.makedirs(DATA_DIR, exist_ok=True)
 DB_PATH     = os.path.join(DATA_DIR, "voter_queue.db")
+KEYS_DIR    = os.path.join(SERVICE_DIR, "keys")   # 快取 CA 根憑證＋v4.0 新增的 TLS 專用金鑰對；voter_client 沒有應用層身分金鑰對
+os.makedirs(KEYS_DIR, exist_ok=True)
 
-VOTER_ID = os.environ.get("VOTER_ID", "")   # 僅作表單預設值，不強制
-CA_URL   = os.environ.get("CA_URL",  "http://localhost:5001")
-TPA_URL  = os.environ.get("TPA_URL", "http://localhost:5000")
-TA_URL   = os.environ.get("TA_URL",  "http://localhost:5002")
-CC_URL   = os.environ.get("CC_URL",  "http://localhost:5003")
-BB_URL   = os.environ.get("BB_URL",  "http://localhost:5004")
+# v4.0 新增：是否驗證 CC 對 /api/receive_envelope 的簽章收據（見
+# cc_server/app.py 的 receipt 欄位）。批次送出信封是這個 Flask 後端
+# （_flush_pending）直接對 CC 發 HTTP 請求，不是瀏覽器 JS，所以驗證邏輯
+# 放在這裡而不是 voter-crypto.js。
+#   false（預設）：只看 HTTP 狀態碼，不驗證回應內容是否真的來自 CC。
+#   true：額外驗證 cc_cert_pem 的 CA 憑證鏈與 Subject CN、收據的 RSA-PSS
+#     簽章、以及 envelope_hash 是否對應到剛剛送出的這份信封——只有驗證
+#     通過才視為「CC 真的收到了」，否則保留在佇列裡等下一輪重試，而不是
+#     被一個偽造的假 200 回應騙走、從佇列裡刪掉。
+VERIFY_CC_RECEIPT = False
+
+VOTER_ID      = os.environ.get("VOTER_ID", "")   # 僅作表單預設值，不強制
+VOTER_HOSTNAME = os.environ.get("VOTER_HOSTNAME", "voter")  # <3 v4.0：填入 TLS 憑證的 SAN
+CA_URL   = os.environ.get("CA_URL",  "https://localhost:5001")
+TPA_URL  = os.environ.get("TPA_URL", "https://localhost:5000")
+TA_URL   = os.environ.get("TA_URL",  "https://localhost:5002")
+CC_URL   = os.environ.get("CC_URL",  "https://localhost:5003")
+BB_URL   = os.environ.get("BB_URL",  "https://localhost:5004")
+
+# v4.0 新增：先快取 CA 根憑證，才有材料可以驗證 CA 自己的 TLS 伺服器
+# 憑證，也才有東西可以驗證後續其他實體的憑證鏈——順序必須在申請 TLS
+# 憑證之前，否則下面 mtls_client_kwargs() 組出來的 verify= 路徑會指向
+# 一個還不存在的檔案。
+try:
+    load_or_fetch_ca_cert(KEYS_DIR, CA_URL)
+except Exception as ex:
+    print(f"[Voter] 警告：無法取得 CA 憑證（{ex}）")
+
+# 向 CA 申請本服務專用的 TLS 憑證（跟應用層身分憑證概念一樣，但
+# voter_client 本來就沒有應用層身分憑證，這裡是它第一次、也是唯一一次
+# 持有金鑰對——純粹用於 HTTPS 監聽與對外呼叫，不涉及任何簽章身分主張）。
+try:
+    _TLS_CERT_PATH, _TLS_KEY_PATH = load_or_request_tls_certificate(
+        KEYS_DIR, "VOTER", VOTER_HOSTNAME, CA_URL,
+        registration_token=get_service_registration_token(),
+    )
+except Exception as ex:
+    print(f"[Voter] 警告：無法取得 TLS 憑證（{ex}）")
+    _TLS_CERT_PATH = _TLS_KEY_PATH = None
+
+# 供本檔案所有對外呼叫共用的 mTLS 參數，直接以 **_VOTER_MTLS 展開進
+# http_requests.get/post(...)。
+_VOTER_MTLS = mtls_client_kwargs(_TLS_CERT_PATH, _TLS_KEY_PATH, os.path.join(KEYS_DIR, "ca_cert.pem"))
 
 # 批次混合參數：湊滿 K 封就送；否則距截止只剩安全緩衝時間就強制全送。
 ENVELOPE_BATCH_SIZE            = int(os.environ.get("ENVELOPE_BATCH_SIZE", "10"))
@@ -85,6 +132,67 @@ db.execute("""
 """)
 
 
+_ca_cert_pem_cache = None
+
+
+def _get_ca_cert_pem() -> str:
+    """快取載入 CA 根憑證，供 _verify_cc_receipt 驗證 cc_cert_pem 的憑證鏈用。"""
+    global _ca_cert_pem_cache
+    if _ca_cert_pem_cache is None:
+        _ca_cert_pem_cache = load_or_fetch_ca_cert(KEYS_DIR, CA_URL)
+    return _ca_cert_pem_cache
+
+
+def _verify_cc_receipt(resp_json: dict, envelope: dict) -> bool:
+    """驗證 CC 對 /api/receive_envelope 回應裡的簽章收據（VERIFY_CC_RECEIPT=True 時使用）。
+
+    對應 cc_server/app.py 產生 receipt 的邏輯：
+      1. cc_cert_pem 須通過 CA 憑證鏈驗證，且 Subject CN 必須是 'CC'
+      2. 用該憑證公鑰驗證 receipt 的 RSA-PSS 簽章
+      3. envelope_hash 必須等於本地對這次送出的信封（c_data/iv/tag/aad/
+         c_key/token_hash）重算出的 SHA-256——確保這張收據對應的就是這
+         份信封，而不是別次提交的收據被重放過來。
+    任一步失敗回傳 False，呼叫端應視為「尚未確認送達」，保留於佇列重試。
+    """
+    try:
+        receipt       = resp_json.get('receipt') or {}
+        cc_cert_pem   = resp_json.get('cc_cert_pem', '')
+        payload       = receipt.get('payload') or {}
+        signature_b64 = receipt.get('signature', '')
+        if not cc_cert_pem or not payload or not signature_b64:
+            return False
+
+        if not verify_cert_with_ca(cc_cert_pem, _get_ca_cert_pem()):
+            return False
+
+        cc_cert = x509.load_pem_x509_certificate(cc_cert_pem.encode('utf-8'))
+        cc_cn = cc_cert.subject.get_attributes_for_oid(NameOID.COMMON_NAME)[0].value
+        if cc_cn != 'CC' or payload.get('sender_id') != 'CC':
+            return False
+
+        expected_hash = hashlib.sha256(
+            json.dumps(
+                {
+                    'c_data':     envelope.get('c_data'),
+                    'iv':         envelope.get('iv'),
+                    'tag':        envelope.get('tag', ''),
+                    'aad':        envelope.get('aad', ''),
+                    'c_key':      envelope.get('c_key'),
+                    'token_hash': envelope.get('token_hash'),
+                },
+                sort_keys=True, ensure_ascii=False, separators=(',', ':'),
+            ).encode('utf-8')
+        ).hexdigest()
+        if payload.get('envelope_hash') != expected_hash:
+            return False
+
+        payload_bytes = json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
+        cc_public_key = get_public_key_from_cert(cc_cert_pem)
+        return verify_signature(payload_bytes, base64.b64decode(signature_b64), cc_public_key)
+    except Exception:
+        return False
+
+
 def _flush_pending(rows):
     """打亂順序後逐一送給 CC。
 
@@ -103,12 +211,23 @@ def _flush_pending(rows):
     for row in rows:
         envelope = {k: row[k] for k in ('c_data', 'iv', 'tag', 'aad', 'c_key', 'token_hash')}
         try:
-            r = http_requests.post(f"{CC_URL}/api/receive_envelope", json=envelope, timeout=10)
+            r = http_requests.post(f"{CC_URL}/api/receive_envelope", json=envelope, timeout=10, **_VOTER_MTLS)
         except Exception as e:
             print(f"[Voter] 批次送出信封失敗（連線錯誤，保留於佇列待重試）：{e}")  # <3
             continue  # <3 不刪除，留待下一輪重試
 
         if r.status_code == 200:
+            if VERIFY_CC_RECEIPT:
+                try:
+                    resp_json = r.json()
+                except Exception:
+                    resp_json = {}
+                if not _verify_cc_receipt(resp_json, envelope):
+                    print(
+                        f"[Voter] 警告：CC 回應的收據驗證失敗，可能遭偽造或竄改，"
+                        f"保留於佇列待重試（token_hash={row['token_hash'][:16]}...）"
+                    )
+                    continue  # 不刪除，留待下一輪重試
             print(f"[Voter] 批次送出信封成功（token_hash={row['token_hash'][:16]}...）")
             db.execute("DELETE FROM pending_envelope WHERE id = ?", (row['id'],))
         elif r.status_code == 403:
@@ -130,7 +249,7 @@ def _remaining_seconds():
     _voting_open()，不要直接把這裡的 None 當成「已截止」。 <3
     """
     try:
-        r = http_requests.get(f"{TA_URL}/api/deadline", timeout=5)
+        r = http_requests.get(f"{TA_URL}/api/deadline", timeout=5, **_VOTER_MTLS)
         d = r.json()
         if d.get("election_state") != "running":
             return None
@@ -152,7 +271,7 @@ def _voting_open():
     不能投票。 <3
     """
     try:
-        r = http_requests.get(f"{TA_URL}/api/deadline", timeout=5)
+        r = http_requests.get(f"{TA_URL}/api/deadline", timeout=5, **_VOTER_MTLS)
         d = r.json()
     except Exception:
         return False  # <3 查不到就 fail-secure 拒絕，不要樂觀放行
@@ -227,9 +346,9 @@ def _rate_limit_exceeded(e):
 def _proxy(method, url, data=None, params=None):
     try:
         if method == "GET":
-            r = http_requests.get(url, params=params, timeout=10)
+            r = http_requests.get(url, params=params, timeout=10, **_VOTER_MTLS)
         else:
-            r = http_requests.post(url, json=data, timeout=15)
+            r = http_requests.post(url, json=data, timeout=15, **_VOTER_MTLS)
         return jsonify(r.json()), r.status_code
     except Exception as e:
         return jsonify({"status": "error", "message": f"代理錯誤：{e}"}), 502
@@ -351,6 +470,22 @@ _CRYPTO_JS = r"""
    - IndexedDB：keypair + cert 本地持久化
    ===================================================================== */
 
+/* ---------- 功能開關：選民是否驗證 TPA 回應封包（雙向認證的第二半） ----------
+   TPA 在 /api/auth 的回應裡會用自己的私鑰簽一個 response_packet（含
+   nonce_echo、voter_sig_ref），協定上支援選民反過來驗證「這真的是 TPA
+   簽的」。是否啟用由這個常數決定，兩種模式都能正常完成投票：
+
+   false（預設）：不驗證，只信任 HTTPS 傳輸層 + 下游 /api/blind_sign 對
+     Voting Token 簽章／TPA 自己資料庫記錄的把關。回應就算被竄改，最壞
+     結果是這一輪認證失敗（可用性問題），因為偽造的 Token 換不到真正的
+     盲簽章——TPA 只認自己簽發、自己資料庫裡有記錄的 token_id。
+   true：額外做完整的雙向認證——驗證 tpa_cert_pem 的 CA 憑證鏈與
+     Subject CN、用憑證公鑰驗 response_packet 的 RSA-PSS 簽章、核對
+     nonce_echo 與 voter_sig_ref。能在這一步就偵測到竄改，代價是多一次
+     憑證 DER 解析與驗簽的本地運算。
+   見下方 Step 2（TPA 身分認證）呼叫處。 */
+const VERIFY_TPA_RESPONSE_SIGNATURE = false;
+
 /* ---------- IndexedDB helpers ---------- */
 function _idb(mode) {
   return new Promise((res, rej) => {
@@ -406,6 +541,9 @@ function hexToBigInt(hex) {
 }
 function b64encode(bytes) {
   return btoa(String.fromCharCode(...bytes));
+}
+function b64decode(b64) {
+  return Uint8Array.from(atob(b64), c => c.charCodeAt(0));
 }
 
 /* ---------- 最小 DER/ASN.1 解析器 ---------------------------------------
@@ -530,6 +668,47 @@ async function verifyCertChain(certPem, expectedCN, caPublicKey) {
   const ok = await crypto.subtle.verify({ name: 'RSASSA-PKCS1-v1_5' }, caPublicKey, sigValue, tbsBytes);
   if (!ok) throw new Error(`${expectedCN} 憑證簽章驗證失敗，可能遭偽造或竄改，拒絕信任此公鑰`);
   return spkiBytes;
+}
+
+/* ---------- VERIFY_TPA_RESPONSE_SIGNATURE=true 時使用：驗證 TPA 回應封包 ---------- */
+async function importPssVerifyKeyFromSpki(spkiBytes) {
+  return crypto.subtle.importKey('spki', spkiBytes, { name: 'RSA-PSS', hash: 'SHA-256' }, false, ['verify']);
+}
+/* 與 Python padding.PSS.MAX_LENGTH（create_auth_packet 簽 TPA 回應時所用）
+   算法一致：emLen - hLen - 2，emLen = ceil((模數位元長度 - 1) / 8)，
+   hLen = SHA-256 = 32 bytes。用實際解出的模數計算，不寫死 2048 位元，
+   金鑰長度改變也不會跟著壞掉。 */
+function pssMaxSaltLength(spkiBytes) {
+  const { n } = parseRsaPublicKeyFromSpki(spkiBytes);
+  const modulusBits = n.toString(2).length;
+  const emLen = Math.ceil((modulusBits - 1) / 8);
+  return emLen - 32 - 2;
+}
+/* 驗證 TPA /api/auth 回應封包（雙向認證的第二半）：
+     1. tpa_cert_pem 走 CA 憑證鏈驗證 + Subject CN 必須是 'TPA'
+     2. 用該憑證公鑰驗 response_packet 的 RSA-PSS 簽章
+     3. nonce_echo 必須等於這次請求送出的 nonce（防止回應被替換成別次
+        認證、或別的選民那次認證的封包）
+     4. voter_sig_ref 必須等於這次請求簽章的 SHA-256（對應 TPA 端
+        tpa_server/app.py 的稽核綁定設計）
+   任一步失敗即 throw，呼叫端視同認證失敗處理。 */
+async function verifyAuthResponsePacket(responsePacket, tpaCertPem, expectedReceiverId, expectedNonceEcho, expectedVoterSigRef, caPublicKey) {
+  const tpaSpki = await verifyCertChain(tpaCertPem, 'TPA', caPublicKey);
+  const pssKey  = await importPssVerifyKeyFromSpki(tpaSpki);
+  const saltLength = pssMaxSaltLength(tpaSpki);
+
+  const payload = responsePacket.payload;
+  if (payload.sender_id !== 'TPA') throw new Error('TPA 回應封包 sender_id 不是 TPA');
+  if (payload.receiver_id !== expectedReceiverId) throw new Error('TPA 回應封包 receiver_id 與本次選民 ID 不符');
+  if (payload.nonce_echo !== expectedNonceEcho) throw new Error('TPA 回應封包 nonce_echo 與本次請求 nonce 不符（可能是重放或竄改）');
+  if (payload.voter_sig_ref !== expectedVoterSigRef) throw new Error('TPA 回應封包 voter_sig_ref 與本次請求簽章不符');
+
+  /* sort_keys=True + separators=(',',':') — 與 Python _serialize_payload 一致 */
+  const sorted    = Object.fromEntries(Object.keys(payload).sort().map(k => [k, payload[k]]));
+  const bytes     = new TextEncoder().encode(JSON.stringify(sorted));
+  const sigBytes  = b64decode(responsePacket.signature);
+  const ok = await crypto.subtle.verify({ name: 'RSA-PSS', saltLength }, pssKey, sigBytes, bytes);
+  if (!ok) throw new Error('TPA 回應封包簽章驗證失敗，可能遭偽造或竄改');
 }
 
 /* ---------- SHA-256 ---------- */
@@ -1020,16 +1199,19 @@ async function doVote() {
     });
     const authData = await authResp.json();
     if (authData.status !== 'success') throw new Error('TPA 認證失敗：' + (authData.message || authData.code || ''));
-    // 已知限制（v3.0 評估後刻意不做）：這裡沒有驗證 authData.response_packet
-    // 的簽章與 nonce_echo，即未做雙向認證裡「選民驗證 TPA」的那一半。原因：
-    //   1. 要驗證需要從 authData.tpa_cert_pem 解析出公鑰，但 Web Crypto API
-    //      沒有 X.509 憑證解析器，得自己刻一段 ASN.1 解析，成本不小。
-    //   2. 這個檢查要防的是「攻擊者竄改選民瀏覽器 ↔ voter_client 之間的
-    //      回應」，但這段路徑現在已經走 HTTPS（見 Caddy），攻擊門檻已經
-    //      被 TLS 拉高很多；就算真的被偽造，偽造的 Token 一樣會在
-    //      /api/blind_sign 因簽章驗證失敗被真正的 TPA 擋下，頂多造成這
-    //      次認證失敗，不會產生偽造選票。
-    // 綜合效益成本後判斷不值得實作，非疏漏。
+
+    // 雙向認證的第二半——選民驗證 TPA 回應封包，是否啟用由檔案開頭的
+    // VERIFY_TPA_RESPONSE_SIGNATURE 開關決定（見該處註解說明兩種模式的
+    // 差異與取捨）。
+    if (VERIFY_TPA_RESPONSE_SIGNATURE) {
+      const voterSigRef = await sha256Hex(b64decode(authPkt.signature));
+      await verifyAuthResponsePacket(
+        authData.response_packet, authData.tpa_cert_pem,
+        _voterId, authPkt.payload.nonce, voterSigRef, caPubKey,
+      );
+      addStep('TPA 回應簽章驗證通過（雙向認證完整）', true);
+    }
+
     // v2.0 修正：之前這裡拿到 authData.voting_token 後從未使用，導致 Phase 3
     // 盲簽章請求沒有帶 Token，Phase 2 的身分驗證與 Phase 3 的取簽完全脫鉤。 <3
     const votingToken = authData.voting_token;
@@ -1224,4 +1406,11 @@ def status():
 make_reload_endpoint(app)
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5005, debug=False)
+    # v4.0 新增：voter 的監聽埠除了 Admin 稽核查詢，主要是接受一般選民
+    # 瀏覽器（經 Caddy）的公開連線——瀏覽器不會持有這套內部 PKI 的用戶端
+    # 憑證，所以刻意不要求 CERT_REQUIRED（require_client_cert=False）。
+    _ca_cert_path = os.path.join(KEYS_DIR, "ca_cert.pem")
+    _ssl_ctx = build_mtls_server_context(
+        _TLS_CERT_PATH, _TLS_KEY_PATH, _ca_cert_path, require_client_cert=False,
+    )
+    app.run(host='0.0.0.0', port=5005, debug=False, ssl_context=_ssl_ctx)

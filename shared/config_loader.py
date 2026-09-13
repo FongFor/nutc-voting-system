@@ -11,10 +11,10 @@ shared/config_loader.py  —  設定檔載入器
     cands = get_candidates()   # ["候選人A", "候選人B", ...]
 
     # 取得服務 URL（容器內部）
-    ca_url = svc_url("ca")     # "http://ca:5001"
+    ca_url = svc_url("ca")     # "https://ca:5001"
 
     # 取得服務 URL（本機測試用）
-    ca_url = local_url("ca")   # "http://localhost:5001"
+    ca_url = local_url("ca")   # "https://localhost:5001"
 """
 
 import json
@@ -167,27 +167,27 @@ class _HotReloadConfig:
     def svc_url(self, service: str) -> str:
         """
         回傳容器內部服務 URL（Docker 網路名稱解析）。
-        例：svc_url("ca") → "http://ca:5001"
+        例：svc_url("ca") → "https://ca:5001"
         """
         svc = self.raw["services"][service]
-        return f"http://{svc['host']}:{svc['port']}"
+        return f"https://{svc['host']}:{svc['port']}"
 
     def local_url(self, service: str) -> str:
         """
         回傳本機 localhost URL（E2E 測試 / 外部腳本使用）。
-        例：local_url("ca") → "http://localhost:5001"
+        例：local_url("ca") → "https://localhost:5001"
         """
         svc = self.raw["services"][service]
-        return f"http://localhost:{svc['local_port']}"
+        return f"https://localhost:{svc['local_port']}"
 
     def voter_local_url(self, voter_id: str) -> str:
         """
         回傳指定選民的本機 URL。
-        例：voter_local_url("VOTER_001") → "http://localhost:5010"
+        例：voter_local_url("VOTER_001") → "https://localhost:5010"
         """
         for v in self.raw.get("voters", []):
             if v["id"] == voter_id:
-                return f"http://localhost:{v['port']}"
+                return f"https://localhost:{v['port']}"
         raise KeyError(f"找不到選民 {voter_id} 的配置")
 
 
@@ -217,7 +217,7 @@ def force_reload():
 def svc_url(service: str) -> str:
     """
     回傳容器內部服務 URL（Docker 網路名稱解析）。
-    例：svc_url("ca") → "http://ca:5001"
+    例：svc_url("ca") → "https://ca:5001"
     """
     return _hot_config.svc_url(service)
 
@@ -225,7 +225,7 @@ def svc_url(service: str) -> str:
 def local_url(service: str) -> str:
     """
     回傳本機 localhost URL（E2E 測試 / 外部腳本使用）。
-    例：local_url("ca") → "http://localhost:5001"
+    例：local_url("ca") → "https://localhost:5001"
     """
     return _hot_config.local_url(service)
 
@@ -233,7 +233,7 @@ def local_url(service: str) -> str:
 def voter_local_url(voter_id: str) -> str:
     """
     回傳指定選民的本機 URL。
-    例：voter_local_url("VOTER_001") → "http://localhost:5010"
+    例：voter_local_url("VOTER_001") → "https://localhost:5010"
     """
     return _hot_config.voter_local_url(voter_id)
 

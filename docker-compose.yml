@@ -46,12 +46,16 @@ x-common-env: &common-env
   # 若需覆蓋，可在各服務的 environment 區塊加入：
   #   CANDIDATES: "Candidate_A,Candidate_B,Candidate_C"
 
+# v4.0 修正：全部改為 https://——服務間不再靠 Docker 網路隔離當唯一防線
+# （見 v4.0 規格書第 26 章），每個服務現在都用 shared/tls_utils.py 核發
+# 的獨立 TLS 專用金鑰對做 mTLS，跟原本用來簽應用層封包的身分金鑰對完全
+# 分開。
 x-service-urls: &service-urls
-  CA_URL:  http://ca:5001
-  TPA_URL: http://tpa:5000
-  TA_URL:  http://ta:5002
-  CC_URL:  http://cc:5003
-  BB_URL:  http://bb:5004
+  CA_URL:  https://ca:5001
+  TPA_URL: https://tpa:5000
+  TA_URL:  https://ta:5002
+  CC_URL:  https://cc:5003
+  BB_URL:  https://bb:5004
 
 services:
 
@@ -70,7 +74,7 @@ services:
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c",
-             "import urllib.request; urllib.request.urlopen('http://localhost:5001/api/ca_cert')"]
+             "import ssl, urllib.request; urllib.request.urlopen('https://localhost:5001/api/ca_cert', context=ssl._create_unverified_context())"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -97,7 +101,7 @@ services:
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c",
-             "import urllib.request; urllib.request.urlopen('http://localhost:5000/api/public_key')"]
+             "import ssl, urllib.request; ctx = ssl._create_unverified_context(); ctx.load_cert_chain('/app/tpa_server/keys/tls_certificate.pem', '/app/tpa_server/keys/tls_private_key.pem'); urllib.request.urlopen('https://localhost:5000/api/public_key', context=ctx)"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -124,7 +128,7 @@ services:
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c",
-             "import urllib.request; urllib.request.urlopen('http://localhost:5002/api/deadline')"]
+             "import ssl, urllib.request; ctx = ssl._create_unverified_context(); ctx.load_cert_chain('/app/ta_server/keys/tls_certificate.pem', '/app/ta_server/keys/tls_private_key.pem'); urllib.request.urlopen('https://localhost:5002/api/deadline', context=ctx)"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -148,7 +152,7 @@ services:
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c",
-             "import urllib.request; urllib.request.urlopen('http://localhost:5003/api/public_key')"]
+             "import ssl, urllib.request; ctx = ssl._create_unverified_context(); ctx.load_cert_chain('/app/cc_server/keys/tls_certificate.pem', '/app/cc_server/keys/tls_private_key.pem'); urllib.request.urlopen('https://localhost:5003/api/public_key', context=ctx)"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -163,14 +167,22 @@ services:
     command: python bb_server/app.py
     environment:
       <<: *common-env
-      CA_URL: http://ca:5001
-      CC_URL: http://cc:5003
+      CA_URL: https://ca:5001
+      CC_URL: https://cc:5003
     volumes:
       - ./config.json:/app/config.json:ro
+      # v4.0 新增：BB 現在也持有一把 TLS 專用金鑰對（見
+      # shared/tls_utils.py），必須跟其他服務一樣掛持久 volume——沒有
+      # 這個掛載，容器一重建金鑰就消失，但 CA 端記得「BB 已經核發過
+      # TLS 憑證」（一次性 token 已用掉），會導致永久拿不到新憑證。
+      - bb_keys:/app/bb_server/keys
+    depends_on:
+      ca:
+        condition: service_healthy
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c",
-             "import urllib.request; urllib.request.urlopen('http://localhost:5004/api/results')"]
+             "import ssl, urllib.request; urllib.request.urlopen('https://localhost:5004/api/results', context=ssl._create_unverified_context())"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -187,6 +199,7 @@ services:
       <<: [*common-env, *service-urls]
     volumes:
       - ./config.json:/app/config.json:ro
+      - voter_keys:/app/voter_client/keys  # <3 v4.0：同上，TLS 金鑰對需要持久化
     depends_on:
       ca:
         condition: service_healthy
@@ -207,13 +220,14 @@ services:
     command: python admin_tool/app.py
     environment:
       <<: *common-env
-      CA_URL: http://ca:5001
-      TA_URL: http://ta:5002
-      CC_URL: http://cc:5003
-      BB_URL: http://bb:5004
-      VOTER_URL: http://voter:5005
+      CA_URL: https://ca:5001
+      TA_URL: https://ta:5002
+      CC_URL: https://cc:5003
+      BB_URL: https://bb:5004
+      VOTER_URL: https://voter:5005
     volumes:
       - ./config.json:/app/config.json:ro
+      - admin_keys:/app/admin_tool/keys  # <3 v4.0：同上，TLS 金鑰對需要持久化
     depends_on:
       ca:
         condition: service_healthy
@@ -222,7 +236,7 @@ services:
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c",
-             "import urllib.request; urllib.request.urlopen('http://localhost:5010/api/voters')"]
+             "import ssl, urllib.request; urllib.request.urlopen('https://localhost:5010/api/voters', context=ssl._create_unverified_context())"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -242,11 +256,17 @@ services:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
       - caddy_config:/config
+      # v4.0 新增：唯讀掛載 CA 的 keys volume，讓 Caddy 能讀到
+      # ca_root_cert.pem 去驗證 voter/bb 的 TLS 伺服器憑證（見
+      # Caddyfile 的 tls_trusted_ca_certs 設定）。
+      - ca_keys:/certs:ro
     ports:
       - "80:80"
       - "443:443"
       - "443:443/udp"
     depends_on:
+      ca:
+        condition: service_healthy
       voter:
         condition: service_started
       bb:
@@ -259,5 +279,8 @@ volumes:
   tpa_keys:
   ta_keys:
   cc_keys:
+  bb_keys:      # <3 v4.0
+  voter_keys:   # <3 v4.0
+  admin_keys:   # <3 v4.0
   caddy_data:
   caddy_config:

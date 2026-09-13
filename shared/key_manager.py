@@ -104,9 +104,19 @@ def load_or_request_certificate(
     registration_token：服務帳號（TPA/TA/CC）申請憑證時需附帶的一次性
     SERVICE_REGISTRATION_TOKEN（規格書 §0.5 Step 0.5、§1.4 Step 1.3）。 <3
 
+    v4.0 新增：呼叫本函式前，呼叫端必須已經跑過 load_or_fetch_ca_cert()
+    （每個服務的啟動順序皆是如此），所以這裡一定拿得到本地已快取的
+    ca_cert.pem，用它驗證 CA 這一端的 TLS 伺服器憑證（ca_url 升級為
+    https:// 之後，不驗證的話等於白裝了 TLS）。這個時間點本服務自己
+    還沒有 TLS 用戶端憑證可以出示，所以只做伺服器端驗證，不是完整
+    mTLS——這是正常的，CA 本來就不對這幾個 bootstrap 端點要求用戶端
+    憑證（見 shared/tls_utils.py 的說明），身分驗證由
+    SERVICE_REGISTRATION_TOKEN／OTP+PoP 負責。
+
     回傳：certificate PEM 字串
     """
-    cert_path = os.path.join(keys_dir, "certificate.pem")
+    cert_path    = os.path.join(keys_dir, "certificate.pem")
+    ca_cert_path = os.path.join(keys_dir, "ca_cert.pem")
 
     if os.path.exists(cert_path):
         cert_pem = open(cert_path).read()
@@ -122,6 +132,7 @@ def load_or_request_certificate(
             f"{ca_url}/api/issue_cert",
             json=payload,
             timeout=10,
+            verify=ca_cert_path if os.path.exists(ca_cert_path) else False,  # <3 v4.0
         )
         resp.raise_for_status()
         data = resp.json()
@@ -138,6 +149,17 @@ def load_or_fetch_ca_cert(keys_dir: str, ca_url: str) -> str:
     """
     從 keys_dir 載入 CA 根憑證；若不存在則從 CA 下載並儲存。
 
+    v4.0 新增：ca_url 升級為 https:// 之後，這裡的下載請求面臨一個
+    無可避免的「先有雞還是先有蛋」問題——驗證 CA 的 TLS 伺服器憑證，
+    本來就需要 CA 的根憑證，但根憑證正是這支函式要下載的東西，此刻
+    本地還沒有任何材料可以驗證。這正是 v4.0 規格書第 27 章討論的
+    TOFU（Trust-On-First-Use）bootstrap 問題：這一次、僅此一次的請求
+    刻意不驗證伺服器身分（verify=False），下載回來的內容會被永久釘選
+    （下方 os.path.exists 判斷式確保之後再也不會重新下載／覆蓋），之後
+    所有對 CA 的請求都會改用這裡存下來的根憑證做驗證。降低這個 race
+    window 的風險，屬於部署階段的責任（見第 27 章的縮小暴露窗口／指紋
+    人工核對等緩解措施），不是這支函式能單獨解決的。
+
     回傳：CA certificate PEM 字串
     """
     ca_cert_path = os.path.join(keys_dir, "ca_cert.pem")
@@ -148,7 +170,7 @@ def load_or_fetch_ca_cert(keys_dir: str, ca_url: str) -> str:
         return ca_cert_pem
 
     try:
-        resp = requests.get(f"{ca_url}/api/ca_cert", timeout=10)
+        resp = requests.get(f"{ca_url}/api/ca_cert", timeout=10, verify=False)  # <3 v4.0：見上方 TOFU 說明
         resp.raise_for_status()
         data = resp.json()
         ca_cert_pem = data["ca_certificate"]

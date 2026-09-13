@@ -5,6 +5,15 @@
 # 服務不再對外發布 port（見 docker-compose.yml），只有選民端
 # (voter) 與公告板 (BB) 透過這裡對外提供服務，全部走 HTTPS。
 #
+# v4.0 修正：Caddy → voter、Caddy → bb 這兩段以前是明文 HTTP（靠 Docker
+# 網路隔離撐著），現在 voter/bb 兩個服務也各自監聽 TLS（見
+# shared/tls_utils.py、voter_client/app.py、bb_server/app.py），upstream
+# 改成 https://，並用 CA 根憑證驗證這兩個服務的伺服器憑證——這裡不是
+# mTLS（Caddy 不持有這套 PKI 的用戶端憑證，也不需要，見 v4.0 規格書
+# 第 26 章：voter/bb 的監聽埠本來就要接受一般瀏覽器的公開連線，不能要求
+# 對方出示內部 PKI 的用戶端憑證）。CA 根憑證透過 docker-compose.yml 掛載
+# 的 ca_keys 唯讀 volume 提供，見 /certs/ca_root_cert.pem。
+#
 # 本地測試（預設，不用改任何設定）：
 #   docker compose up --build
 #   瀏覽器開 https://localhost        → 選民端
@@ -22,9 +31,17 @@
 # ============================================================
 
 {$SITE_ADDRESS:localhost} {
-	reverse_proxy voter:5005
+	reverse_proxy https://voter:5005 {
+		transport http {
+			tls_trusted_ca_certs /certs/ca_root_cert.pem
+		}
+	}
 }
 
 {$BB_ADDRESS:bb.localhost} {
-	reverse_proxy bb:5004
+	reverse_proxy https://bb:5004 {
+		transport http {
+			tls_trusted_ca_certs /certs/ca_root_cert.pem
+		}
+	}
 }

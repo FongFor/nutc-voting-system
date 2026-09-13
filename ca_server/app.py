@@ -28,12 +28,14 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from flask import Flask, request, jsonify, render_template_string
 from cryptography.hazmat.primitives.asymmetric import rsa, padding
 from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.x509.oid import NameOID
+from cryptography.x509.oid import NameOID, ExtendedKeyUsageOID  # <3 v4.0：TLS 憑證用
 from cryptography import x509
 
 from shared.db_utils import Database
 from shared.admin_auth import check_admin_token, admin_auth_error  # <3 Admin 端點認證
 from shared.config_loader import get_service_registration_token  # <3 服務憑證一次性驗證
+from shared.tls_utils import build_mtls_server_context  # <3 v4.0：mTLS
+from shared.crypto_generate_key_pair import generate_rsa_keypair  # <3 v4.0：CA 自己的 TLS 金鑰對
 
 # ============================================================
 # 常數設定
@@ -97,9 +99,33 @@ db.execute("""
         registered_at INTEGER NOT NULL
     )
 """)
+# v4.0 新增：TLS 憑證核發記錄，跟上面的 service_registrations（應用層身分
+# 憑證）分開追蹤，避免同一個 entity_id 因為已經兌換過應用層憑證的 token
+# 而被誤判成「已註冊」，導致無法再申請 TLS 憑證——兩者是獨立的一次性
+# 兌換流程，各自互不影響。 <3
+db.execute("""
+    CREATE TABLE IF NOT EXISTS tls_registrations (
+        entity_id     TEXT PRIMARY KEY,
+        registered_at INTEGER NOT NULL
+    )
+""")
+db.execute("""
+    CREATE TABLE IF NOT EXISTS issued_tls_certs (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        entity_id   TEXT NOT NULL,
+        hostname    TEXT NOT NULL,
+        cert_pem    TEXT NOT NULL,
+        issued_at   TEXT NOT NULL,
+        cert_serial TEXT
+    )
+""")
 
 # 服務帳號（不需 OTP 驗證，改用 SERVICE_REGISTRATION_TOKEN 一次性驗證）
 _SERVICE_IDS = {'TPA', 'TA', 'CC', 'BB', 'CA', 'ADMIN'}
+# v4.0 新增：可申請 TLS 憑證的實體——比 _SERVICE_IDS 多了 VOTER（選民端
+# 後端本身沒有應用層身分憑證，但一樣需要 TLS 專用金鑰對來對外呼叫其他
+# 服務、並在自己的公開監聽埠上出示伺服器憑證）。 <3
+_TLS_ENTITY_IDS = _SERVICE_IDS | {'VOTER'}
 # 時間誤差容許值（秒）
 _DELTA_T = int(os.environ.get("DELTA_T", "300"))
 # v2.0 修正：OTP 連續失敗鎖定與過期時間（規格書 §0.5、§0.6 S-0.2） <3
@@ -150,6 +176,26 @@ def _load_or_generate_ca_keys():
             .serial_number(x509.random_serial_number())
             .not_valid_before(now)
             .not_valid_after(now + datetime.timedelta(days=365))
+            # v4.0 新增：這張自簽根憑證一直沒有標準的 CA 擴充欄位。過去
+            # 沒出過問題，是因為 verify_cert_with_ca() 自己手刻簽章驗證
+            # （直接拿 CA 公鑰驗 cert.signature），完全不檢查
+            # BasicConstraints；但 Python 標準 ssl/OpenSSL 的憑證鏈驗證
+            # （requests 的 verify=、ssl.SSLContext.load_verify_locations）
+            # 會檢查——沒有 BasicConstraints(ca=True) 的憑證，OpenSSL 視為
+            # 一般終端憑證，不接受它簽發／驗證別的憑證，會直接報
+            # 「invalid CA certificate」而不是可讀的錯誤。這是實際跑
+            # docker compose 起服務時才發現的真實 bug，不是理論推測。 <3
+            .add_extension(
+                x509.BasicConstraints(ca=True, path_length=None), critical=True,
+            )
+            .add_extension(
+                x509.KeyUsage(
+                    digital_signature=False, key_encipherment=False, content_commitment=False,
+                    data_encipherment=False, key_agreement=False, key_cert_sign=True,
+                    crl_sign=True, encipher_only=False, decipher_only=False,
+                ),
+                critical=True,
+            )
             .sign(private_key, hashes.SHA256())
         )
 
@@ -205,6 +251,88 @@ def issue_certificate(entity_id: str, public_key_pem: str) -> str:
     )  # <3
     print(f"[CA] 已核發憑證給 {entity_id}")
     return cert_pem
+
+
+def issue_tls_certificate(entity_id: str, hostname: str, public_key_pem: str) -> str:
+    """
+    v4.0 新增：核發 TLS 專用憑證（服務間 mTLS 用），跟上面 issue_certificate()
+    核發的應用層身分憑證是完全不同的一張憑證、不同的金鑰——刻意不重用同一把
+    私鑰身兼「簽應用層封包」與「TLS handshake」兩種角色，外洩一把金鑰的
+    影響範圍才不會疊在一起。
+
+    跟應用層憑證的關鍵差異：多加了標準 TLS 函式庫（瀏覽器、curl、Python
+    ssl 模組）驗證主機名所必需的 SubjectAlternativeName，以及表明這張
+    憑證可合法用於 TLS 伺服器／用戶端驗證的 KeyUsage／ExtendedKeyUsage——
+    這三個擴充欄位是 issue_certificate() 完全沒有的，沒有它們這張憑證
+    連基本的 TLS handshake 都會被拒絕。
+    """
+    entity_public_key = serialization.load_pem_public_key(public_key_pem.encode('utf-8'))
+    subject = x509.Name([
+        x509.NameAttribute(NameOID.ORGANIZATION_NAME, "NUTC Voting System"),
+        x509.NameAttribute(NameOID.COMMON_NAME, entity_id),
+    ])
+    now = datetime.datetime.now(datetime.timezone.utc)
+    serial = x509.random_serial_number()
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(subject)
+        .issuer_name(_ca_root_cert.subject)
+        .public_key(entity_public_key)
+        .serial_number(serial)
+        .not_valid_before(now)
+        .not_valid_after(now + datetime.timedelta(days=365))
+        .add_extension(x509.SubjectAlternativeName([x509.DNSName(hostname)]), critical=False)
+        .add_extension(
+            x509.KeyUsage(
+                digital_signature=True, key_encipherment=True, content_commitment=False,
+                data_encipherment=False, key_agreement=False, key_cert_sign=False,
+                crl_sign=False, encipher_only=False, decipher_only=False,
+            ),
+            critical=True,
+        )
+        .add_extension(
+            x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH, ExtendedKeyUsageOID.CLIENT_AUTH]),
+            critical=False,
+        )
+        .sign(_ca_private_key, hashes.SHA256())
+    )
+    cert_pem = cert.public_bytes(serialization.Encoding.PEM).decode('utf-8')
+
+    db.execute(
+        "INSERT INTO issued_tls_certs (entity_id, hostname, cert_pem, issued_at, cert_serial) VALUES (?, ?, ?, ?, ?)",
+        (entity_id, hostname, cert_pem, now.isoformat(), str(serial)),
+    )
+    print(f"[CA] 已核發 TLS 憑證給 {entity_id}（hostname={hostname}）")
+    return cert_pem
+
+
+# ============================================================
+# CA 自己的 TLS 身分（v4.0 新增）
+# ============================================================
+# CA 不能像其他服務一樣打 /api/issue_tls_cert 跟自己申請（那個端點還沒
+# 啟動），所以直接在本地呼叫 issue_tls_certificate()，邏輯完全一致，只是
+# 省了一趟 HTTP 來回。
+CA_HOSTNAME = os.environ.get("CA_HOSTNAME", "ca")
+_tls_key_path  = os.path.join(KEYS_DIR, "tls_private_key.pem")
+_tls_cert_path = os.path.join(KEYS_DIR, "tls_certificate.pem")
+
+if os.path.exists(_tls_key_path) and os.path.exists(_tls_cert_path):
+    print(f"[CA] 已從磁碟載入自己的 TLS 憑證：{_tls_cert_path}")
+else:
+    _tls_private_key, _tls_public_key, _, _, _ = generate_rsa_keypair()
+    _tls_private_key_pem = _tls_private_key.private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.TraditionalOpenSSL,
+        serialization.NoEncryption(),
+    ).decode('utf-8')
+    _tls_public_key_pem = _tls_public_key.public_bytes(
+        serialization.Encoding.PEM,
+        serialization.PublicFormat.SubjectPublicKeyInfo,
+    ).decode('utf-8')
+    _tls_cert_pem = issue_tls_certificate('CA', CA_HOSTNAME, _tls_public_key_pem)
+    _save_pem_file(_tls_key_path, _tls_private_key_pem)
+    _save_pem_file(_tls_cert_path, _tls_cert_pem)
+    print(f"[CA] 已生成並核發自己的 TLS 憑證（hostname={CA_HOSTNAME}）")
 
 
 # ============================================================
@@ -624,6 +752,67 @@ def api_issue_cert():
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
+@app.route('/api/issue_tls_cert', methods=['POST'])
+def api_issue_tls_cert():
+    """
+    [POST] 核發 TLS 專用憑證（v4.0 新增，服務間 mTLS 用）。
+    Body: {"entity_id": str, "hostname": str, "public_key": str, "registration_token": str}
+
+    跟 /api/issue_cert 是兩個完全獨立的一次性兌換流程（各自的 DB 表、
+    各自的「是否已兌換過」判斷），可以用同一組 SERVICE_REGISTRATION_TOKEN
+    分別跟這兩個端點各換一次，互不影響、互不消耗對方的額度。
+    """
+    data = request.get_json()
+    if not data or not all(k in data for k in ('entity_id', 'hostname', 'public_key', 'registration_token')):
+        return jsonify({
+            "status":  "error",
+            "code":    "MISSING_FIELDS",
+            "message": "需要 entity_id、hostname、public_key、registration_token",
+        }), 400
+
+    entity_id = data['entity_id']
+    hostname  = data['hostname']
+
+    if entity_id not in _TLS_ENTITY_IDS:
+        return jsonify({
+            "status":  "error",
+            "code":    "UNKNOWN_ENTITY",
+            "message": f"不支援核發 TLS 憑證給此 entity_id：{entity_id}",
+        }), 403
+
+    if db.exists("SELECT 1 FROM tls_registrations WHERE entity_id = ?", (entity_id,)):
+        return jsonify({
+            "status":  "error",
+            "code":    "ALREADY_REGISTERED",
+            "message": f"{entity_id} 已核發過 TLS 憑證，registration_token 已失效",
+        }), 403
+
+    registration_token = data.get('registration_token', '')
+    expected_token = get_service_registration_token()
+    # 固定時間比較，避免時序側通道洩漏 SERVICE_REGISTRATION_TOKEN（比照
+    # /api/issue_cert 的既有作法）。
+    if not expected_token or not hmac.compare_digest(registration_token, expected_token):
+        return jsonify({
+            "status":  "error",
+            "code":    "SERVICE_TOKEN_INVALID",
+            "message": "SERVICE_REGISTRATION_TOKEN 無效或缺漏",
+        }), 403
+
+    try:
+        cert_pem = issue_tls_certificate(entity_id, hostname, data['public_key'])
+        db.execute(
+            "INSERT INTO tls_registrations (entity_id, registered_at) VALUES (?, ?)",
+            (entity_id, int(time.time())),
+        )
+        return jsonify({
+            "status":      "success",
+            "message":     f"TLS 憑證核發成功（{entity_id}）",
+            "certificate": cert_pem,
+        }), 200
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
 @app.route('/api/admin/voter_registry', methods=['GET'])
 def api_admin_voter_registry():
     """
@@ -727,4 +916,16 @@ def api_revocation_list():
 
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5001, debug=False)
+    # v4.0 修正：CA 不能要求 CERT_REQUIRED。CA 是整條信任鏈的起點——每個
+    # 實體第一次呼叫 CA（下載根憑證、申請應用層憑證、申請 TLS 憑證）都
+    # 發生在它自己還沒有任何憑證的時候，如果 CA 強制要求對方先出示合法
+    # 憑證才能連線，等於沒有任何實體能完成 bootstrap（先有雞還是先有蛋）。
+    # CA 端點本來就各自有自己的身分驗證機制（SERVICE_REGISTRATION_TOKEN
+    # 一次性權杖、選民的 OTP+PoP、Admin Bearer Token），不依賴傳輸層的
+    # 用戶端憑證，所以拿掉 mTLS 的雙向要求不會削弱安全性，純粹是解決
+    # 這個先後順序上的矛盾。 <3
+    _ca_root_cert_path = os.path.join(KEYS_DIR, "ca_root_cert.pem")
+    _ssl_ctx = build_mtls_server_context(
+        _tls_cert_path, _tls_key_path, _ca_root_cert_path, require_client_cert=False,
+    )
+    app.run(host='0.0.0.0', port=5001, debug=False, ssl_context=_ssl_ctx)

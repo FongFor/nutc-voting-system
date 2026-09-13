@@ -43,6 +43,7 @@ from shared.key_manager import (
     verify_cert_with_ca,
     get_public_key_from_cert,
 )
+from shared.tls_utils import load_or_request_tls_certificate, build_mtls_server_context, mtls_client_kwargs  # <3 v4.0：mTLS
 from shared.auth_component import create_auth_packet, verify_auth_component
 from shared.blind_signature import blind_sign
 from shared.format_utils import int_to_hex, hex_to_int, ts_to_human
@@ -55,9 +56,10 @@ from shared.config_loader import make_reload_endpoint, get_delta_t, get_service_
 SERVICE_DIR = os.path.dirname(os.path.abspath(__file__))
 KEYS_DIR    = os.path.join(SERVICE_DIR, "keys")
 DB_PATH     = os.path.join(SERVICE_DIR, "tpa.db")
-TPA_ID      = "TPA"
-CA_URL      = os.environ.get("CA_URL", "http://localhost:5001")
-TA_URL      = os.environ.get("TA_URL", "http://localhost:5002")
+TPA_ID       = "TPA"
+TPA_HOSTNAME = os.environ.get("TPA_HOSTNAME", "tpa")  # <3 v4.0：填入 TLS 憑證的 SAN
+CA_URL      = os.environ.get("CA_URL", "https://localhost:5001")
+TA_URL      = os.environ.get("TA_URL", "https://localhost:5002")
 DELTA_T     = int(os.environ.get("DELTA_T", str(get_delta_t())))
 
 # 截止時間與選舉狀態快取（每次請求時向 TA 重新查詢）
@@ -74,7 +76,10 @@ def _get_deadline() -> int:
         return _DEADLINE
     try:
         import requests as _req
-        resp = _req.get(f"{TA_URL}/api/deadline", timeout=5)
+        resp = _req.get(
+            f"{TA_URL}/api/deadline", timeout=5,
+            **mtls_client_kwargs(_tls_cert_path, _tls_key_path, os.path.join(KEYS_DIR, "ca_cert.pem")),
+        )
         data = resp.json()
         if data.get("status") == "success":
             _DEADLINE = int(data["deadline"])
@@ -158,6 +163,17 @@ except Exception as ex:
     print(f"[TPA] 警告：無法取得憑證（{ex}），認證回應功能將受限。")
     _cert_pem = ""
 
+# v4.0 新增：另外申請一把獨立的 TLS 專用憑證，跟上面的應用層身分憑證
+# 完全分開，供本服務的 HTTPS 監聽埠與對外呼叫（TA）使用。
+try:
+    _tls_cert_path, _tls_key_path = load_or_request_tls_certificate(
+        KEYS_DIR, TPA_ID, TPA_HOSTNAME, CA_URL,
+        registration_token=get_service_registration_token(),
+    )
+except Exception as ex:
+    print(f"[TPA] 警告：無法取得 TLS 憑證（{ex}）")
+    _tls_cert_path = _tls_key_path = None
+
 print(f"[TPA] 初始化完成。e={hex(_e)[:20]}...")
 
 # ============================================================
@@ -188,15 +204,22 @@ def _check_deadline():
     election_state = _ELECTION_STATE
     deadline = _DEADLINE
     try:
-        resp = _req.get(f"{TA_URL}/api/deadline", timeout=5)
+        resp = _req.get(
+            f"{TA_URL}/api/deadline", timeout=5,
+            **mtls_client_kwargs(_tls_cert_path, _tls_key_path, os.path.join(KEYS_DIR, "ca_cert.pem")),
+        )  # <3 v4.0：這裡漏加 mTLS 參數會讓每次呼叫都在 TLS handshake 就被
+        # TA 拒絕（TA 要求用戶端憑證），被下面的 except Exception: pass
+        # 靜默吞掉，永遠回退到模組載入時的預設值 _ELECTION_STATE='standby'
+        # ——實際運行時的症狀是選舉明明已經啟動，TPA 卻一直回報
+        # ELECTION_NOT_STARTED，且完全沒有錯誤訊息可以看，非常難排查。
         data = resp.json()
         if data.get("status") == "success":
             election_state = data.get("election_state", "standby")
             deadline = int(data["deadline"])
             _DEADLINE = deadline
             _ELECTION_STATE = election_state
-    except Exception:
-        pass  # 若 TA 不可達，回退到快取值
+    except Exception as e:
+        print(f"[TPA] 警告：向 TA 查詢選舉狀態失敗（{e}），暫時沿用快取值")  # <3 v4.0：原本靜默吞掉，除錯完全看不到原因
 
     if election_state == 'standby':
         return jsonify({
@@ -745,4 +768,11 @@ make_reload_endpoint(app)
 
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000, debug=False)
+    # v4.0 新增：TPA 只會被 Voter（透過 voter_client）連線，voter_client
+    # 一樣持有本套 PKI 核發的 TLS 用戶端憑證（見 shared/tls_utils.py），
+    # 要求對方出示合法 mTLS 憑證不會擋到任何合法流量。
+    _ca_cert_path = os.path.join(KEYS_DIR, "ca_cert.pem")
+    _ssl_ctx = build_mtls_server_context(
+        _tls_cert_path, _tls_key_path, _ca_cert_path, require_client_cert=True,
+    )
+    app.run(host='0.0.0.0', port=5000, debug=False, ssl_context=_ssl_ctx)
