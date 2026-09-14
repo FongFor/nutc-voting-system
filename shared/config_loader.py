@@ -315,5 +315,5 @@ def make_reload_endpoint(app):
             "status":     "ok",
             "candidates": get_candidates(),
             "timing":     _hot_config.raw.get("timing", {}),
-            "voters":     [{"id": v["id"]} for v in get_voters()],
+            "voters":     [{"id": v["id"]} for v in voters()],
         }), 200
