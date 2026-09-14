@@ -270,8 +270,15 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
           啟動
         </button>
         {% else %}
+        <button onclick="triggerTally()"
+          class="ml-auto px-5 py-2.5 bg-msblue hover:bg-msblueHover rounded-lg text-white font-medium text-sm transition shadow-md flex items-center gap-2 focus:outline-none focus:ring-2 focus:ring-msblue/50">
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 15l-2 5L9 9l11 4-5 2zm0 0l5 5M7.188 2.239l.777 2.897M5.136 7.965l-2.898-.777M13.95 4.05l-2.122 2.122m-5.657 5.656l-2.12 2.122"/>
+          </svg>
+          觸發開票
+        </button>
         <button onclick="newRound()"
-          class="ml-auto px-5 py-2.5 bg-red-600 hover:bg-red-700 rounded-lg text-white font-medium text-sm transition shadow-md flex items-center gap-2 focus:outline-none focus:ring-2 focus:ring-red-500/50">
+          class="px-5 py-2.5 bg-red-600 hover:bg-red-700 rounded-lg text-white font-medium text-sm transition shadow-md flex items-center gap-2 focus:outline-none focus:ring-2 focus:ring-red-500/50">
           <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
           </svg>
@@ -435,6 +442,30 @@ async function startElection() {
       setTimeout(() => location.reload(), 1500);
     } else if (data.code === 'ALREADY_STARTED') {
       showMsg(msg, `[資訊] 選舉已在進行中（截止：${data.deadline_str}）`, 'warn');
+    } else {
+      showMsg(msg, `[錯誤] ${data.message || data.code}`, 'error');
+    }
+  } catch (e) {
+    showMsg(msg, `[錯誤] 請求失敗：${e.message}`, 'error');
+  }
+}
+
+async function triggerTally() {
+  if (!confirm('確定要觸發開票？\\n\\nCC 只有在投票確實已截止時才會真的執行開票，若尚未截止會被拒絕，可放心先試。')) return;
+  const msg = document.getElementById('electionMsg');
+  showMsg(msg, '正在向 CC 發送開票指令（可能需要幾秒到數十秒）...', 'info');
+  try {
+    const resp = await fetch('/api/trigger_tally', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({}),
+    });
+    const data = await resp.json();
+    if (data.status === 'success') {
+      const bbOk = data.bb_published ? '[成功]' : `[警告：${data.bb_publish_warning || '未確認公告成功'}]`;
+      showMsg(msg, `[成功] 開票完成！合法選票：${data.valid_count}，Merkle Root：${(data.merkle_root||'').slice(0,20)}...，BB 公告：${bbOk}`, 'success');
+    } else if (data.status === 'already_done') {
+      showMsg(msg, '[資訊] 本輪已完成開票，無需重複觸發', 'warn');
     } else {
       showMsg(msg, `[錯誤] ${data.message || data.code}`, 'error');
     }
@@ -814,6 +845,28 @@ def api_election_status():
         return jsonify(resp.json()), resp.status_code
     except Exception as e:
         return jsonify({"status": "error", "message": f"無法連接 TA：{e}"}), 502
+
+
+@app.route('/api/trigger_tally', methods=['POST'])
+def api_trigger_tally():
+    """
+    [POST] 向 CC 觸發開票（v4.0 補上）。
+
+    問題：CC 整個 Flask app（含網頁儀表板本身的「觸發開票」按鈕）都被
+    mTLS CERT_REQUIRED 保護，不持有這套 PKI 用戶端憑證的瀏覽器連 TLS
+    handshake 都過不了——包含管理員自己的瀏覽器。CC_URL 這個常數原本就
+    定義在本檔案，但從未真的被用來呼叫 CC，等於管理員完全沒有合法路徑
+    能觸發開票，只能 docker exec 進 CC 容器內部呼叫，明顯不是預期行為。
+
+    修法：比照本檔案呼叫 CA/TA 的既有模式，用 Admin 自己已經持有的
+    mTLS 用戶端憑證（_ADMIN_MTLS）代為呼叫 CC/api/tally，讓瀏覽器不需要
+    持有內部 PKI 憑證，一樣能透過 Admin 這個中介觸發開票。 <3
+    """
+    try:
+        resp = http_requests.post(f"{CC_URL}/api/tally", json={}, headers=_admin_headers(), timeout=120, **_ADMIN_MTLS)
+        return jsonify(resp.json()), resp.status_code
+    except Exception as e:
+        return jsonify({"status": "error", "message": f"無法連接 CC：{e}"}), 502
 
 
 @app.route('/api/export', methods=['GET'])
