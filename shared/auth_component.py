@@ -31,7 +31,12 @@ from cryptography.hazmat.primitives.asymmetric import padding
 def _serialize_payload(payload: dict) -> bytes:
     """
     將 payload 字典序列化為可重現的 bytes，作為數位簽章的輸入。
-    用 sort_keys=True 確保欄位順序固定，避免順序不同
+    用 sort_keys=True 確保欄位順序固定，避免順序不同導致兩端算出不同雜湊。
+
+    刻意採用有明確欄位邊界的 JSON 結構化序列化，而非把各欄位字串直接用 "||"
+    相接後再雜湊——後者在欄位長度不固定時，"AB"||"C" 與 "A"||"BC" 會相接成
+    同一個位元組序列，雜湊值也會相同，存在欄位邊界混淆、不同語意封包被同一
+    簽章覆蓋的風險。JSON 的 key 本身就是欄位邊界，不會有這個問題。 <3
     """
     # 用 JSON 序列化，確保兩端（建立與驗證）格式一致
     return json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
@@ -78,6 +83,12 @@ def create_auth_packet(
     import secrets
     nonce = secrets.token_hex(16)  # 16 bytes = 128 bits = 32 hex chars
 
+    # 重要：nonce（以及 cert_pem）必須跟其他欄位一起放進下面這個 payload dict，
+    # 隨整包一起被序列化、雜湊、簽章——不能只當成封包裡一個獨立的旁欄位。
+    # 簽章不是加密，被簽章的內容本身仍是明文照樣傳送，重點在於「這個欄位有
+    # 沒有被算進簽章覆蓋的範圍」：若 nonce 放在簽章範圍之外，攻擊者可以任意
+    # 把它換成一個沒用過的新值而不影響簽章驗證結果，讓接收端的「nonce 是否
+    # 已使用」防重放檢查看到的是偽造的新鮮值，形同虛設。 <3
     # 定義 payload（所有欄位皆為 JSON 可序列化的基本型別）
     payload = {
         "sender_id":   sender_id,
@@ -176,6 +187,10 @@ def verify_auth_component(
     from cryptography import x509
     from cryptography.hazmat.primitives.asymmetric import padding as _asym_padding
     cert = x509.load_pem_x509_certificate(packet_cert_pem.encode('utf-8'))
+    # 發送方公鑰直接從其自帶之憑證中取出，接收方不需要、也不會另外查詢或
+    # 事先持有對方公鑰——這正是憑證作為「公鑰合法分發載體」的核心用途：
+    # 憑證內容包含 Subject（宣稱之身分）、公鑰本身、有效期限，以及 CA 對
+    # 上述內容的簽章；下面先驗證這個簽章合法，才能信任接下來取出的公鑰。 <3
     sender_public_key = cert.public_key()
 
     if ca_public_key is not None:
