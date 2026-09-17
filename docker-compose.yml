@@ -45,6 +45,20 @@ x-common-env: &common-env
   # 注意：CANDIDATES 已移除，改由 config.json 動態讀取（hot-reload）
   # 若需覆蓋，可在各服務的 environment 區塊加入：
   #   CANDIDATES: "Candidate_A,Candidate_B,Candidate_C"
+  #
+  # 上線前驗收發現：這兩個變數過去雖然在 shared/config_loader.py 裡有
+  # 「優先讀環境變數，沒有才退回 config.json」的邏輯，也在 config.json
+  # 的註解裡寫著「正式環境請改用環境變數覆蓋」，但 docker-compose.yml
+  # 從未真的把它們轉送進任何容器——就算在 .env 填上真正的值，容器內部
+  # os.environ.get(...) 永遠讀不到，最後還是會用回 config.json 裡那組
+  # 教學用預設值。這裡補上 ${VAR} 轉送，讓 .env 真正生效；刻意不在這裡
+  # 另外寫一份預設字串（如 ${ADMIN_API_TOKEN:-dev-admin-token-CHANGE-ME}）
+  # ——那樣會讓預設值同時存在 docker-compose.yml 與 config.json 兩處，日
+  # 後只改一邊會悄悄產生分歧。.env 未設定時保留空字串，讓
+  # get_admin_api_token() 原本「環境變數為空就退回 config.json」的邏輯
+  # 繼續生效，config.json 仍是唯一的預設值來源。 <3
+  ADMIN_API_TOKEN: ${ADMIN_API_TOKEN:-}
+  SERVICE_REGISTRATION_TOKEN: ${SERVICE_REGISTRATION_TOKEN:-}
 
 # v4.0 修正：全部改為 https://——服務間不再靠 Docker 網路隔離當唯一防線
 # （見 v4.0 規格書第 26 章），每個服務現在都用 shared/tls_utils.py 核發
