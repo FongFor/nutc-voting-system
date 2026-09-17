@@ -37,14 +37,12 @@ from shared.key_manager import (
     load_or_generate_keypair,
     load_or_request_certificate,
     load_or_fetch_ca_cert,
-    verify_cert_with_ca,  # <3 用於交叉驗證 TA 釋放的私鑰是否真的對應其認證公鑰
+    verify_cert_chain_and_cn,  # <3 v4.0：共用的「驗憑證鏈 + 核對 CN」函式
 )
 from shared.tls_utils import load_or_request_tls_certificate, build_mtls_server_context, mtls_client_kwargs  # <3 v4.0：mTLS
-from cryptography import x509  # <3
-from cryptography.x509.oid import NameOID  # <3
 from shared.crypto_utils import open_envelope_layer1, open_envelope_layer2, sign_data
 from shared.merkle_tree import MerkleTree
-from shared.format_utils import int_to_hex, hex_to_int, ts_to_human, bytes_to_b64
+from shared.format_utils import int_to_hex, ts_to_human, bytes_to_b64
 from shared.db_utils import Database
 from shared.config_loader import make_reload_endpoint, get_service_registration_token
 from shared.admin_auth import is_internal_ip, check_admin_token, admin_auth_error  # <3 /api/tally 存取控制
@@ -857,15 +855,29 @@ def _do_tally() -> dict:
         return {"status": "error", "message": f"無法連接 TA：{e}"}
 
     # 步驟 2：向 TPA 取得公鑰大整數 (e, n)
+    # v4.0 修正：原本直接信任回應裡的裸 e/n 欄位，完全沒有驗證來源——這把
+    # e/n 是開票時驗證每張選票盲簽章合法性的關鍵依據，跟緊接在下面對 TA
+    # 的交叉驗證形成明顯落差，也跟選民瀏覽器端已經在做的憑證鏈驗證邏輯
+    # 不一致。改成先驗證 cert_pem 的 CA 簽章鏈與 Subject CN，再從「已驗證
+    # 的憑證」本身取出 e/n，不再信任回應裡分開提供、可能跟 cert_pem 講不
+    # 同故事的裸 e/n 欄位。 <3
     try:
         resp = http_requests.get(f"{TPA_URL}/api/public_key", timeout=10, **_CC_MTLS)
         tpa_data = resp.json()
-        tpa_e = hex_to_int(tpa_data['e'])
-        tpa_n = hex_to_int(tpa_data['n'])
-        _set_state('tpa_e', tpa_data['e'])
-        _set_state('tpa_n', tpa_data['n'])
+        tpa_cert_pem = tpa_data.get('cert_pem', '')
     except Exception as e:
         return {"status": "error", "message": f"無法取得 TPA 公鑰：{e}"}
+
+    tpa_cert_obj = verify_cert_chain_and_cn(tpa_cert_pem, _ca_cert_pem, 'TPA')  # <3
+    if tpa_cert_obj is None:
+        return {"status": "error", "code": "TPA_CERT_INVALID",
+                "message": "無法驗證 TPA 憑證，拒絕使用本次取得的公鑰"}  # <3
+
+    tpa_public_numbers = tpa_cert_obj.public_key().public_numbers()  # <3
+    tpa_e = tpa_public_numbers.e
+    tpa_n = tpa_public_numbers.n
+    _set_state('tpa_e', int_to_hex(tpa_e))
+    _set_state('tpa_n', int_to_hex(tpa_n))
 
     # 步驟 2.5：交叉驗證 TA 釋放的私鑰，是否真的對應其 CA 認證過的公鑰
     # v3.0 修正：原本收到 /api/release_key 回應後直接載入使用，完全沒有
@@ -886,18 +898,10 @@ def _do_tally() -> dict:
     except Exception as e:
         return {"status": "error", "message": f"無法取得 TA 憑證以進行交叉驗證：{e}"}  # <3
 
-    if not _ca_cert_pem or not ta_cert_pem or not verify_cert_with_ca(ta_cert_pem, _ca_cert_pem):
+    ta_cert_obj = verify_cert_chain_and_cn(ta_cert_pem, _ca_cert_pem, 'TA')  # <3
+    if ta_cert_obj is None:
         return {"status": "error", "code": "TA_CERT_INVALID",
                 "message": "無法驗證 TA 憑證，拒絕使用本次釋放的私鑰"}  # <3
-
-    try:
-        ta_cert_obj = x509.load_pem_x509_certificate(ta_cert_pem.encode('utf-8'))
-        ta_cert_cn = ta_cert_obj.subject.get_attributes_for_oid(NameOID.COMMON_NAME)[0].value
-    except Exception:
-        ta_cert_cn = None  # <3
-    if ta_cert_cn != 'TA':
-        return {"status": "error", "code": "TA_CERT_CN_MISMATCH",
-                "message": f"TA 憑證主體不是 TA（實際：{ta_cert_cn}），拒絕使用本次釋放的私鑰"}  # <3
 
     certified_ta_n = ta_cert_obj.public_key().public_numbers().n  # <3
 

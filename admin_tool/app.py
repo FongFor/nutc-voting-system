@@ -736,7 +736,13 @@ def api_add_voter():
 def api_add_batch():
     """批次新增選民：逐一處理，回傳各別結果。"""
     data = request.get_json()
-    if not data or 'voter_ids' not in data:
+    # v4.0 修正：原本用 `'voter_ids' not in data` 只擋得住「完全沒帶這個
+    # 欄位」，若明確傳 `"voter_ids": null`，這個 key 存在、檢查會放行，
+    # 下面 `for v in data['voter_ids']` 對 None 做迭代直接丟未攔截的
+    # TypeError、變成沒處理過的 500——跟 /api/add_voter 先前修過的同一種
+    # null-crash bug，這裡漏補。改用 `not data.get('voter_ids')` 同時擋
+    # 「缺欄位」「欄位是 null」「欄位是空陣列」三種情況。 <3
+    if not data or not data.get('voter_ids'):
         return jsonify({"status": "error", "message": "缺少 voter_ids"}), 400
 
     ids = [str(v).strip() for v in data['voter_ids'] if str(v).strip()]
@@ -804,8 +810,10 @@ def api_new_round():
     results = {}
 
     # 1. 重置 TA 選舉狀態
+    # v4.0 修正：TA 這兩個端點現在要求 Admin Bearer Token（見
+    # ta_server/app.py），補上 headers=_admin_headers()，否則會被 401 擋下。 <3
     try:
-        resp = http_requests.post(f"{TA_URL}/api/admin/reset_election", json={}, timeout=10, **_ADMIN_MTLS)
+        resp = http_requests.post(f"{TA_URL}/api/admin/reset_election", json={}, headers=_admin_headers(), timeout=10, **_ADMIN_MTLS)  # <3
         results['ta'] = resp.json()
     except Exception as e:
         results['ta'] = {"status": "error", "message": str(e)}
@@ -831,7 +839,7 @@ def api_new_round():
 def api_start_election():
     """向 TA 發送啟動選舉指令（管理員操作）。"""
     try:
-        resp = http_requests.post(f"{TA_URL}/api/start_election", json={}, timeout=10, **_ADMIN_MTLS)
+        resp = http_requests.post(f"{TA_URL}/api/start_election", json={}, headers=_admin_headers(), timeout=10, **_ADMIN_MTLS)  # <3
         return jsonify(resp.json()), resp.status_code
     except Exception as e:
         return jsonify({"status": "error", "message": f"無法連接 TA：{e}"}), 502

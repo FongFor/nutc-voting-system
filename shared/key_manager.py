@@ -293,3 +293,31 @@ def get_public_key_from_cert(cert_pem: str):
     """從 PEM 憑證提取公鑰物件"""
     cert = x509.load_pem_x509_certificate(cert_pem.encode('utf-8'))
     return cert.public_key()
+
+
+def verify_cert_chain_and_cn(cert_pem: str, ca_cert_pem: str, expected_cn: str):
+    """
+    v4.0 新增：把「驗證憑證是否由 CA 合法簽發」+「核對 Subject CommonName
+    是否等於預期身分」這組固定組合抽成共用函式——這兩個檢查缺一不可（只驗
+    證憑證合法性，任何合法選民或其他服務的憑證一樣能通過；只核對 CN 而不
+    驗證簽章鏈，等於誰都能自己簽一張寫著任意 CN 的假憑證），過去在
+    ta_server（release_key 驗 CC）、cc_server（驗 TA、驗 TPA）、bb_server
+    （驗 CC）、voter_client（驗 CC 收據）分別各自手刻過一份幾乎相同的邏
+    輯，容易在維護時互相走鐘（例如簽章 salt_length 用法不一致）。
+
+    驗證通過回傳該憑證的 cryptography x509.Certificate 物件（呼叫端可再自
+    行從中取出公鑰、模數等欄位）；任何一步失敗回傳 None，不拋例外——呼叫
+    端只需要判斷回傳值是否為 None，不需要各自處理例外。
+    """
+    if not cert_pem or not ca_cert_pem:
+        return None
+    if not verify_cert_with_ca(cert_pem, ca_cert_pem):
+        return None
+    try:
+        cert = x509.load_pem_x509_certificate(cert_pem.encode('utf-8'))
+        cn = cert.subject.get_attributes_for_oid(NameOID.COMMON_NAME)[0].value
+    except Exception:
+        return None
+    if cn != expected_cn:
+        return None
+    return cert

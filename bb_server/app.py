@@ -34,12 +34,9 @@ from shared.format_utils import sha256_hex, ts_to_human, b64_to_bytes
 from shared.db_utils import Database
 from shared.config_loader import make_reload_endpoint, get_service_registration_token  # <3 v4.0
 from shared.crypto_utils import verify_signature
-from shared.key_manager import load_or_fetch_ca_cert
+from shared.key_manager import load_or_fetch_ca_cert, verify_cert_chain_and_cn  # <3 v4.0
 from shared.tls_utils import load_or_request_tls_certificate, build_mtls_server_context  # <3 v4.0：mTLS
 from cryptography import x509
-from cryptography.x509.oid import NameOID  # <3 新增：用於核對憑證 Subject CN，防止冒充 CC
-from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric import padding
 
 # ============================================================
 # 常數設定
@@ -1346,39 +1343,20 @@ def api_publish():
             "message": "BB 無法取得 CA 憑證，無法驗證 CC 憑證"
         }), 500
 
-    try:
-        cc_cert = x509.load_pem_x509_certificate(cert_pem.encode('utf-8'))
-        cc_public_key = cc_cert.public_key()
-        
-        # 驗證憑證是否由 CA 簽發
-        ca_public_key = _ca_cert.public_key()
-        ca_public_key.verify(
-            cc_cert.signature,
-            cc_cert.tbs_certificate_bytes,
-            padding.PKCS1v15(),
-            cc_cert.signature_hash_algorithm,
-        )
-        print(f"[BB] CC 憑證驗證通過（Subject: {cc_cert.subject}）")
-
-        # v2.0 修正：只確認憑證由 CA 簽發還不夠 —— 任何合法選民的憑證也是由 CA
-        # 簽發的。必須再核對憑證本身的 Subject CN 是否真的是 "CC"，否則任何持有
-        # 合法憑證者都能冒充計票中心發布結果。 <3
-        try:
-            cc_cert_cn = cc_cert.subject.get_attributes_for_oid(NameOID.COMMON_NAME)[0].value
-        except Exception:
-            cc_cert_cn = None  # <3
-        if cc_cert_cn != 'CC':  # <3
-            return jsonify({
-                "status": "error",
-                "code": "CERT_NOT_CC",
-                "message": f"憑證並非核發給 CC（實際 CN：{cc_cert_cn}）"
-            }), 403  # <3
-    except Exception as e:
+    # v4.0 修正：改用共用的 verify_cert_chain_and_cn()（見
+    # shared/key_manager.py）——原本這裡手刻的驗證只檢查簽章鏈與 Subject
+    # CN，沒有檢查憑證有效期限，跟其他服務（ta_server 的 release_key、
+    # cc_server 對 TA/TPA）的驗證強度不一致；改用共用函式後，順帶也補上
+    # 了有效期限檢查，且往後這段邏輯只需要維護一份。 <3
+    cc_cert = verify_cert_chain_and_cn(cert_pem, _ca_cert_pem, 'CC')
+    if cc_cert is None:
         return jsonify({
             "status": "error",
             "code": "CERT_INVALID",
-            "message": f"CC 憑證驗證失敗：{e}"
+            "message": "CC 憑證驗證失敗：未由合法 CA 簽發、已過期，或 Subject CN 不是 CC",
         }), 403
+    cc_public_key = cc_cert.public_key()
+    print(f"[BB] CC 憑證驗證通過（Subject: {cc_cert.subject}）")
 
     # 步驟 2：驗證 CC 對 result_bundle 的 RSA-PSS 簽章
     try:
@@ -1528,6 +1506,20 @@ def _verify_m_hex(m_hex: str) -> dict:
     if not published_row or published_row['value'] != '1':
         return {"valid": False, "message": "結果尚未公告"}
 
+    # v4.0 修正：原本這裡完全沒有讀取 CC 當初簽章公告、寫進 bb_state 的
+    # 官方 root，而是每次都從目前的 published_votes 現場重建一棵樹、拿
+    # 「剛算出來的 root」去驗證 proof——proof 跟 root 出自同一份即時資料，
+    # 邏輯上必然自洽，等於這個檢查對「published_votes 事後被竄改」完全
+    # 無感（現場重算的 root 會跟著竄改後的資料一起變，永遠驗證得過）。
+    # 前端 /verify 頁面「不信任伺服器」的獨立驗證，用的也是這裡回傳的
+    # root，同樣會被連帶騙過。修法：一定要跟 bb_state 裡儲存的官方 root
+    # 比對，不符就直接判定資料完整性異常，不能只驗證「proof 對不對得上
+    # 現場重算的 root」。 <3
+    root_row = db.fetchone("SELECT value FROM bb_state WHERE key = 'merkle_root'")
+    official_root = root_row['value'] if root_row else None
+    if not official_root:
+        return {"valid": False, "message": "找不到官方公告的 Merkle Root"}
+
     votes = db.fetchall("SELECT m_hex FROM published_votes ORDER BY id")
     m_hex_list = [v['m_hex'] for v in votes]
 
@@ -1537,10 +1529,16 @@ def _verify_m_hex(m_hex: str) -> dict:
     index = m_hex_list.index(m_hex)
     tree  = MerkleTree(m_hex_list)
     proof = tree.get_proof(index)
-    root  = tree.get_root()
+    recomputed_root = tree.get_root()
 
-    # 驗證 Merkle Proof
-    is_valid = MerkleTree.verify_proof(m_hex, proof, root)
+    if recomputed_root != official_root:  # <3
+        return {
+            "valid": False,
+            "message": "資料完整性異常：現有選票資料與官方公告之 Merkle Root 不符，公告板資料可能遭竄改",
+        }
+
+    # 驗證 Merkle Proof（用官方 root，不是現場重算出來的 root）
+    is_valid = MerkleTree.verify_proof(m_hex, proof, official_root)  # <3
 
     if is_valid:
         return {
@@ -1548,7 +1546,7 @@ def _verify_m_hex(m_hex: str) -> dict:
             "m_hex":     m_hex,
             "leaf_hash": h_leaf(m_hex),
             "proof":     proof,
-            "root":      root,
+            "root":      official_root,  # <3
             "index":     index,
         }
     else:

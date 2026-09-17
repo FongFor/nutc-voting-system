@@ -30,17 +30,14 @@ from shared.key_manager import (
     load_or_generate_keypair,
     load_or_request_certificate,
     load_or_fetch_ca_cert,
-    verify_cert_with_ca,
+    verify_cert_chain_and_cn,  # <3 v4.0：共用的「驗憑證鏈 + 核對 CN」函式
 )
 from shared.tls_utils import load_or_request_tls_certificate, build_mtls_server_context  # <3 v4.0：mTLS
 from shared.format_utils import int_to_hex, ts_to_human
 from shared.db_utils import Database
 from shared.config_loader import make_reload_endpoint, get_vote_duration, get_delta_t, get_service_registration_token
-# v2.0 修正：release_key 改用專用驗證邏輯（見下方），不再需要通用 verify_auth_component <3
-from cryptography import x509
-from cryptography.hazmat.primitives import hashes as _ta_hashes  # <3 用於驗證 release_key 請求簽章
-from cryptography.hazmat.primitives.asymmetric import padding as _ta_padding  # <3
-from cryptography.x509.oid import NameOID  # <3 新增：用於核對憑證 Subject CN，防止冒充 CC
+from shared.admin_auth import check_admin_token, admin_auth_error  # <3 v4.0：保護 start_election/reset_election
+from shared.crypto_utils import verify_signature  # <3 v4.0：release_key 簽章驗證改用共用函式
 import json  # <3 用於 release_key 請求的 canonical JSON 驗簽
 
 # ============================================================
@@ -540,34 +537,32 @@ def api_release_key():
             "message": "TA 無法取得 CA 憑證，無法驗證請求方身分"
         }), 500
 
-    if not verify_cert_with_ca(cert_pem, _ca_cert_pem):
+    # v4.0 修正：改用共用的 verify_cert_chain_and_cn()（見
+    # shared/key_manager.py）——原本這裡跟 cc_server/bb_server/voter_client
+    # 各自手刻一份幾乎相同的「驗簽章鏈 + 核對 Subject CN」邏輯，改成呼叫
+    # 同一份共用實作，並順便補上原本沒做的憑證有效期限檢查。 <3
+    _requester_cert = verify_cert_chain_and_cn(cert_pem, _ca_cert_pem, 'CC')
+    if _requester_cert is None:
         db.execute(
             "INSERT INTO key_release_log (requested_at, requester_id, status, reason) VALUES (?, ?, ?, ?)",
-            (now, requester_id, 'rejected', 'cert_pem 未由合法 CA 簽發或已過期'),
+            (now, requester_id, 'rejected', 'cert_pem 未由合法 CA 簽發、已過期，或 Subject CN 不是 CC'),
         )
         return jsonify({"status": "error", "code": "CERT_INVALID",
-                        "message": "cert_pem 未由合法 CA 簽發或已過期"}), 403  # <3
+                        "message": "cert_pem 未由合法 CA 簽發、已過期，或 Subject CN 不是 CC"}), 403  # <3
 
-    # v2.0 修正：只驗證憑證合法性還不夠 —— 任何合法選民的憑證也是 CA 簽的。
-    # 必須核對憑證本身的 Subject CN 是否真的是 "CC"，並要求 payload 自報的
-    # requester_id 與憑證身分一致，兩者缺一不可，把身分主張綁回 PKI 身分鏈。 <3
-    try:
-        _requester_cert = x509.load_pem_x509_certificate(cert_pem.encode('utf-8'))
-        _cert_cn = _requester_cert.subject.get_attributes_for_oid(NameOID.COMMON_NAME)[0].value
-        _requester_pub = _requester_cert.public_key()
-    except Exception:
-        _cert_cn = None
-        _requester_pub = None  # <3
+    _requester_pub = _requester_cert.public_key()
 
-    if requester_id != 'CC' or _cert_cn != 'CC':
+    # v2.0 修正：只驗證憑證身分還不夠 —— 還要求 payload 自報的 requester_id
+    # 與憑證身分一致，把身分主張綁回 PKI 身分鏈。 <3
+    if requester_id != 'CC':
         db.execute(
             "INSERT INTO key_release_log (requested_at, requester_id, status, reason) VALUES (?, ?, ?, ?)",
-            (now, requester_id, 'rejected', f'請求方非 CC（requester_id={requester_id}, cert_cn={_cert_cn}）'),
+            (now, requester_id, 'rejected', f'請求方非 CC（requester_id={requester_id}）'),
         )
         return jsonify({
             "status": "error",
             "code": "UNAUTHORIZED_REQUESTER",
-            "message": f"僅允許 CC 請求 SK_TA（實際請求方：{requester_id}，憑證 CN：{_cert_cn}）"
+            "message": f"僅允許 CC 請求 SK_TA（實際請求方：{requester_id}）"
         }), 403
 
     # 步驟 3：purpose 必須為 "tally"（規格書 §18.3.3，防止把其他用途的簽章封包拿來重放）
@@ -615,20 +610,17 @@ def api_release_key():
         }), 403
 
     # 步驟 6：驗證簽章（canonical JSON，規格書 §18.6）
-    try:
-        if _requester_pub is None:
-            raise ValueError("無法從憑證取得公鑰")
-        payload_bytes = json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
-        _requester_pub.verify(
-            base64.b64decode(signature_b64),
-            payload_bytes,
-            _ta_padding.PSS(mgf=_ta_padding.MGF1(_ta_hashes.SHA256()), salt_length=_ta_padding.PSS.MAX_LENGTH),
-            _ta_hashes.SHA256(),
-        )
-    except Exception as e:
+    # v4.0 修正：改呼叫共用的 shared.crypto_utils.verify_signature()，不再
+    # 手刻一份 PSS padding 參數——原本這裡用 PSS.MAX_LENGTH，跟
+    # auth_component.py 的 verify_auth_component() 用 PSS.AUTO 不一致，
+    # 雖然目前所有簽章端都固定用 MAX_LENGTH 簽章、兩種驗證寫法剛好都算
+    # 得過，但重複維護五份幾乎相同的「建 PSS padding 物件」邏輯，容易在
+    # 未來改動時悄悄產生真正的不相容。 <3
+    payload_bytes = json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
+    if _requester_pub is None or not verify_signature(payload_bytes, base64.b64decode(signature_b64), _requester_pub):
         db.execute(
             "INSERT INTO key_release_log (requested_at, requester_id, status, reason) VALUES (?, ?, ?, ?)",
-            (now, requester_id, 'rejected', f'簽章驗證失敗：{e}'),
+            (now, requester_id, 'rejected', '簽章驗證失敗'),
         )
         return jsonify({"status": "error", "code": "SIGNATURE_INVALID",
                         "message": "release_key 請求簽章驗證失敗"}), 403  # <3
@@ -660,7 +652,17 @@ def api_start_election():
     讀取 config.json 的 timing.vote_duration_seconds，計算截止時間，
     將選舉狀態從 standby 切換至 running。
     已啟動後再次呼叫回傳 409。
+
+    v4.0 修正：原本這個端點完全沒有身分檢查，只靠 mTLS 擋「有沒有合法憑
+    證」，沒擋「這個合法憑證是不是真的有權限做這件事」——這套 PKI 核發過
+    憑證的任何實體（TPA、CC、BB、甚至選民端服務）都能呼叫這個端點提早
+    開始投票，跟旁邊 /api/release_key 嚴格要求 Subject CN 必須是 CC 的
+    作法不一致。改成要求 Admin Bearer Token，比照 CA 的 /api/admin/* 與
+    CC 的 /api/tally 既有作法。 <3
     """
+    if not check_admin_token():
+        return jsonify(admin_auth_error()), 401  # <3
+
     current_state = _get_election_state()
     if current_state == 'running':
         deadline = _get_deadline_ts()
@@ -693,7 +695,15 @@ def api_start_election():
 
 @app.route('/api/admin/reset_election', methods=['POST'])
 def api_admin_reset_election():
-    """[POST] 重置選舉狀態至 standby（新一輪前使用）。清除截止時間與 nonce 記錄。"""
+    """[POST] 重置選舉狀態至 standby（新一輪前使用）。清除截止時間與 nonce 記錄。
+
+    v4.0 修正：同 /api/start_election，原本無任何身分檢查，任何持有這套
+    PKI 合法憑證的實體都能呼叫，清空進行中選舉的截止時間與 nonce 記錄，
+    等同一次可重複發動的服務中斷攻擊。改成要求 Admin Bearer Token。 <3
+    """
+    if not check_admin_token():
+        return jsonify(admin_auth_error()), 401  # <3
+
     db.execute("INSERT OR REPLACE INTO election_state (key, value) VALUES ('state', 'standby')")
     db.execute("DELETE FROM election_state WHERE key = 'deadline'")
     db.execute("DELETE FROM used_nonces")

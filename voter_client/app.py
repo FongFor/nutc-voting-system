@@ -40,12 +40,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from flask import Flask, request, jsonify, render_template_string
 import requests as http_requests
-from cryptography import x509
-from cryptography.x509.oid import NameOID
 
 from shared.db_utils import Database
 from shared.config_loader import get_candidates as cfg_get_candidates, make_reload_endpoint, get_service_registration_token
-from shared.key_manager import load_or_fetch_ca_cert, verify_cert_with_ca, get_public_key_from_cert
+from shared.key_manager import load_or_fetch_ca_cert, verify_cert_chain_and_cn, get_public_key_from_cert  # <3 v4.0
 from shared.crypto_utils import verify_signature
 from shared.tls_utils import load_or_request_tls_certificate, build_mtls_server_context, mtls_client_kwargs  # <3 v4.0：mTLS
 
@@ -162,12 +160,11 @@ def _verify_cc_receipt(resp_json: dict, envelope: dict) -> bool:
         if not cc_cert_pem or not payload or not signature_b64:
             return False
 
-        if not verify_cert_with_ca(cc_cert_pem, _get_ca_cert_pem()):
-            return False
-
-        cc_cert = x509.load_pem_x509_certificate(cc_cert_pem.encode('utf-8'))
-        cc_cn = cc_cert.subject.get_attributes_for_oid(NameOID.COMMON_NAME)[0].value
-        if cc_cn != 'CC' or payload.get('sender_id') != 'CC':
+        # v4.0 修正：改用共用的 verify_cert_chain_and_cn()（見
+        # shared/key_manager.py），跟其他服務對「驗憑證鏈 + 核對 CN」這組
+        # 檢查共用同一份實作，不再各自手刻。 <3
+        cc_cert = verify_cert_chain_and_cn(cc_cert_pem, _get_ca_cert_pem(), 'CC')
+        if cc_cert is None or payload.get('sender_id') != 'CC':
             return False
 
         expected_hash = hashlib.sha256(
