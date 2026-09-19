@@ -278,6 +278,10 @@ services:
       - "80:80"
       - "443:443"
       - "443:443/udp"
+      # 沒有真實網域、暫時用裸 IP 上線時，BB_ADDRESS 會是
+      # "<IP>:8443"（跟 voter 共用 443 會撞同一個 host 位址），
+      # 需要額外開這個 port；等換成真網域子網域寫法後可以移除。
+      - "8443:8443"
     depends_on:
       ca:
         condition: service_healthy
