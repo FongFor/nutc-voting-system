@@ -35,6 +35,7 @@ from shared.db_utils import Database
 from shared.config_loader import make_reload_endpoint, get_service_registration_token  # <3 v4.0
 from shared.crypto_utils import verify_signature
 from shared.key_manager import load_or_fetch_ca_cert, verify_cert_chain_and_cn  # <3 v4.0
+from shared.admin_auth import check_admin_token, admin_auth_error  # <3 v4.0：保護 /api/admin/reset
 from shared.tls_utils import load_or_request_tls_certificate, build_mtls_server_context  # <3 v4.0：mTLS
 from cryptography import x509
 
@@ -1281,6 +1282,33 @@ def verify_page():
         result=result,
         tree_data=tree_data,
     )
+
+
+@app.route('/api/admin/reset', methods=['POST'])
+def api_admin_reset():
+    """
+    [POST] 重置公告板狀態（新一輪前使用）。
+
+    背景：admin_tool 的 /api/new_round 原本只重置 TA 與 CA，完全沒有
+    清掉 BB 這裡的 published 旗標——/api/publish 一開始就檢查
+    bb_state.published=='1'，是的話直接以 ALREADY_PUBLISHED 拒絕新結
+    果，導致新一輪投票開票後，BB 永遠停留在上一輪的結果，直到有人手動
+    進容器清空資料庫。這裡補上對應的重置端點，清空已公告狀態與選票清
+    單，讓下一輪能重新接受公告。
+
+    BB 本身不要求 mTLS 用戶端憑證（要接受一般瀏覽器公開連線），這裡改
+    用 Admin Bearer Token 單獨保護這個端點，比照 CA 的 /api/admin/*
+    端點模式。 <3
+    """
+    if not check_admin_token():
+        return jsonify(admin_auth_error()), 401
+
+    vote_count = db.count("published_votes")
+    db.execute("DELETE FROM published_votes")
+    db.execute("DELETE FROM bb_state")
+
+    print(f"[BB] 公告板狀態已重置（清除 {vote_count} 筆已公告選票）。")
+    return jsonify({"status": "success", "deleted_votes": vote_count}), 200
 
 
 @app.route('/api/publish', methods=['POST'])

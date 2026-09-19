@@ -31,6 +31,8 @@ services:
   voter:
     ports:
       - "5005:5005"
-  admin:
-    ports:
-      - "5010:5010"
+  # admin：不在這裡重複宣告 port——docker-compose.yml 本身已經幫 admin
+  # 加上 "127.0.0.1:5010:5010" 綁定（給正式部署下 SSH tunnel 用），本機
+  # 測試從同一台機器連 https://localhost:5010 一樣連得到，不需要在這裡
+  # 再疊加一次 0.0.0.0 綁定；疊加會讓 compose 把兩筆 ports 設定合併成
+  # 清單而非取代，導致同一個容器 port 同時嘗試綁定兩次而啟動失敗。 <3

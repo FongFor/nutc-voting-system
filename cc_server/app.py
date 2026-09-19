@@ -730,6 +730,33 @@ def api_tally():
         return jsonify(result), 400
 
 
+@app.route('/api/admin/reset_tally', methods=['POST'])
+def api_admin_reset_tally():
+    """
+    [POST] 重置本輪計票狀態（新一輪前使用）。
+
+    背景：admin_tool 的 /api/new_round 原本只重置 TA（回 standby）與 CA
+    （清空選民名冊），完全沒有清掉 CC 這裡的開票狀態——_do_tally() 一開
+    始就檢查 tally_state.done=='1'，是的話直接回傳 already_done 拒絕重
+    跑，導致新一輪投票結束後永遠無法再次開票，直到有人手動進容器清空
+    資料庫。這裡補上對應的重置端點，清空本輪所有選票/去重/開票狀態，
+    讓下一輪能重新從零開始。
+
+    存取控制比照 /api/tally：僅限內部 IP + Admin Bearer Token。 <3
+    """
+    if not is_internal_ip(request.remote_addr) or not check_admin_token():
+        return jsonify(admin_auth_error()), 403
+
+    envelope_count = db.count("envelopes")
+    db.execute("DELETE FROM envelopes")
+    db.execute("DELETE FROM valid_votes")
+    db.execute("DELETE FROM used_token_hashes")
+    db.execute("DELETE FROM tally_state")
+
+    print(f"[CC] 本輪計票狀態已重置（清除 {envelope_count} 筆信封記錄）。")
+    return jsonify({"status": "success", "deleted_envelopes": envelope_count}), 200
+
+
 @app.route('/api/results', methods=['GET'])
 def api_results():
     """[GET] 回傳計票結果與 Merkle Root"""

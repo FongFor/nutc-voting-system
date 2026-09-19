@@ -806,7 +806,15 @@ def api_voters():
 
 @app.route('/api/new_round', methods=['POST'])
 def api_new_round():
-    """新一輪重置：TA 回到 standby + CA 清除名冊 + Admin 清除本地名冊。"""
+    """新一輪重置：TA 回到 standby + CA 清除名冊 + CC 清除開票狀態 +
+    BB 清除公告狀態 + Admin 清除本地名冊。
+
+    v4.0 修正：原本這裡完全沒有重置 CC/BB，導致上一輪開票/公告過一次
+    後，CC 的 tally_state.done 與 BB 的 bb_state.published 會一直卡在
+    「已完成」，新一輪投票結束後 CC 直接拒絕重新開票、BB 也會拒絕接受
+    新結果並繼續顯示上一輪的舊資料——實測發現的真實 bug，過去只能手動
+    docker exec 進容器清資料庫繞過，這裡補上正式的重置端點呼叫。 <3
+    """
     results = {}
 
     # 1. 重置 TA 選舉狀態
@@ -825,13 +833,27 @@ def api_new_round():
     except Exception as e:
         results['ca'] = {"status": "error", "message": str(e)}
 
-    # 3. 清除本地名冊
+    # 3. 清除 CC 開票狀態（<3 新增，修正無法重新開票的問題）
+    try:
+        resp = http_requests.post(f"{CC_URL}/api/admin/reset_tally", json={}, headers=_admin_headers(), timeout=10, **_ADMIN_MTLS)
+        results['cc'] = resp.json()
+    except Exception as e:
+        results['cc'] = {"status": "error", "message": str(e)}
+
+    # 4. 清除 BB 公告狀態（<3 新增，修正 BB 停留在上一輪結果的問題）
+    try:
+        resp = http_requests.post(f"{BB_URL}/api/admin/reset", json={}, headers=_admin_headers(), timeout=10, **_ADMIN_MTLS)
+        results['bb'] = resp.json()
+    except Exception as e:
+        results['bb'] = {"status": "error", "message": str(e)}
+
+    # 5. 清除本地名冊
     row = db.fetchone("SELECT COUNT(*) as cnt FROM voter_roster")
     count = row['cnt'] if row else 0
     db.execute("DELETE FROM voter_roster")
     results['admin'] = {"status": "success", "deleted": count}
 
-    print(f"[Admin] 新一輪重置完成。本地刪除 {count} 筆。TA: {results['ta']}  CA: {results['ca']}")
+    print(f"[Admin] 新一輪重置完成。本地刪除 {count} 筆。TA: {results['ta']}  CA: {results['ca']}  CC: {results['cc']}  BB: {results['bb']}")
     return jsonify({"status": "success", "results": results}), 200
 
 
