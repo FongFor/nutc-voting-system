@@ -31,6 +31,10 @@
 # ============================================================
 
 {$SITE_ADDRESS:localhost} {
+	# 存取紀錄：結構化 JSON，寫到 Caddy 自己的標準輸出，用
+	# `docker compose logs caddy` 或 `docker compose logs -f caddy`
+	# 即可看到每一筆連線的來源 IP、時間、方法、路徑、狀態碼。 <3
+	log
 	reverse_proxy https://voter:5005 {
 		transport http {
 			tls_trusted_ca_certs /certs/ca_root_cert.pem
@@ -39,6 +43,7 @@
 }
 
 {$BB_ADDRESS:bb.localhost} {
+	log
 	reverse_proxy https://bb:5004 {
 		transport http {
 			tls_trusted_ca_certs /certs/ca_root_cert.pem
