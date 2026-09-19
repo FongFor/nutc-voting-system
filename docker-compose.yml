@@ -242,6 +242,17 @@ services:
     volumes:
       - ./config.json:/app/config.json:ro
       - admin_keys:/app/admin_tool/keys  # <3 v4.0：同上，TLS 金鑰對需要持久化
+    ports:
+      # 上線後發現：正式模式下 admin 完全沒有綁定到主機任何 port，連
+      # SSH tunnel（-L 5010:localhost:5010）都連不上——tunnel 的原理是
+      # 連到「遠端主機自己的 localhost:5010」，但主機自己的 5010 根本
+      # 沒有東西在監聽。這裡補上只綁定 127.0.0.1（迴圈介面）的對應，
+      # 讓 SSH tunnel 能連得到，但完全不會被公網任何人直接連到——
+      # 127.0.0.1 這個位址在核心網路層級就只接受本機自己發起的連線，
+      # 不像 0.0.0.0 那樣會被外部網路介面看到，不需要依賴防火牆規則
+      # 來擋，是比 docker-compose.override.yml 那種 0.0.0.0 對外綁定
+      # 更安全、且是正式部署下唯一該用的寫法。 <3
+      - "127.0.0.1:5010:5010"
     depends_on:
       ca:
         condition: service_healthy
