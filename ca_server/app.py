@@ -457,7 +457,7 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
           <tbody class="divide-y divide-gray-100 dark:divide-gray-800">
             {% for c in certs %}
             <tr class="hover:bg-gray-50 dark:hover:bg-[#1a1a1a] transition-colors">
-              <td class="px-6 py-4 text-gray-500">{{ c.id }}</td>
+              <td class="px-6 py-4 text-gray-500">{{ loop.index }}</td>
               <td class="px-6 py-4 font-mono font-medium text-msblue dark:text-[#3399FF]">{{ c.entity_id }}</td>
               <td class="px-6 py-4 text-gray-600 dark:text-gray-400 font-mono text-xs">{{ c.issued_at }}</td>
             </tr>

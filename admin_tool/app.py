@@ -402,7 +402,7 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
         <tbody class="divide-y divide-gray-100 dark:divide-gray-800">
           {% for v in voters %}
           <tr class="hover:bg-gray-50 dark:hover:bg-[#1a1a1a] transition-colors">
-            <td class="px-5 py-4 text-gray-400 text-xs">{{ v.id }}</td>
+            <td class="px-5 py-4 text-gray-400 text-xs">{{ loop.index }}</td>
             <td class="px-5 py-4 font-mono font-medium text-msblue dark:text-[#3399FF]">{{ v.voter_id }}</td>
             <td class="px-5 py-4">
               <span class="otp-blur font-mono text-xs text-gray-700 dark:text-gray-300 bg-gray-100 dark:bg-gray-800 px-2 py-1 rounded" title="懸停顯示">{{ v.otp }}</span>

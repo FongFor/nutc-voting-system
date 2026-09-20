@@ -274,7 +274,7 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
           <tbody class="divide-y divide-gray-100 dark:divide-gray-800/60">
             {% for v in votes %}
             <tr class="hover:bg-gray-50 dark:hover:bg-[#1a1a1a] transition-colors">
-              <td class="px-6 py-4 text-gray-400 dark:text-gray-600 text-xs">{{ v.id }}</td>
+              <td class="px-6 py-4 text-gray-400 dark:text-gray-600 text-xs">{{ loop.index }}</td>
               <td class="px-6 py-4 font-mono text-gray-500 dark:text-gray-500 text-xs">{{ v.m_hex[:24] }}...</td>
               <td class="px-6 py-4 font-mono text-gray-400 dark:text-gray-600 text-xs">{{ v.leaf_hash[:24] }}...</td>
               <td class="px-6 py-4 text-right">

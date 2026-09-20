@@ -326,7 +326,7 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
             <tbody class="divide-y divide-gray-100 dark:divide-gray-800/60">
               {% for log in release_logs %}
               <tr class="hover:bg-gray-50 dark:hover:bg-[#1a1a1a] transition-colors">
-                <td class="px-5 py-3.5 text-gray-400 dark:text-gray-600 text-[11px]">{{ log.id }}</td>
+                <td class="px-5 py-3.5 text-gray-400 dark:text-gray-600 text-[11px]">{{ loop.index }}</td>
                 <td class="px-5 py-3.5">
                   {% if log.status == 'released' %}
                   <span class="px-2 py-0.5 rounded text-[10px] font-medium bg-green-50 dark:bg-green-900/30 text-green-700 dark:text-green-400 border border-green-200 dark:border-green-800 flex inline-flex items-center gap-1"><svg class="w-2.5 h-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path></svg>已釋放</span>

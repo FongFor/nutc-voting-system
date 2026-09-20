@@ -441,7 +441,7 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
             <tbody class="divide-y divide-gray-100 dark:divide-gray-800/60">
               {% for v in valid_votes %}
               <tr class="hover:bg-gray-50 dark:hover:bg-[#1a1a1a] transition-colors">
-                <td class="px-5 py-3.5 text-gray-400 dark:text-gray-600 text-[11px]">{{ v.id }}</td>
+                <td class="px-5 py-3.5 text-gray-400 dark:text-gray-600 text-[11px]">{{ loop.index }}</td>
                 <td class="px-5 py-3.5 font-mono text-gray-800 dark:text-gray-300 font-medium text-xs">{{ v.vote }}</td>
                 <td class="px-5 py-3.5 font-mono text-gray-500 dark:text-gray-500 text-[11px]">{{ v.m_hex[:20] }}...</td>
                 <td class="px-5 py-3.5">
@@ -490,7 +490,7 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
             <tbody class="divide-y divide-gray-100 dark:divide-gray-800/60">
               {% for e in envelopes %}
               <tr class="hover:bg-gray-50 dark:hover:bg-[#1a1a1a] transition-colors">
-                <td class="px-5 py-3.5 text-gray-400 dark:text-gray-600 text-[11px]">{{ e.id }}</td>
+                <td class="px-5 py-3.5 text-gray-400 dark:text-gray-600 text-[11px]">{{ loop.index }}</td>
                 <td class="px-5 py-3.5 font-mono text-gray-500 dark:text-gray-500 text-[11px]">{{ e.c_data[:20] }}...</td>
                 <td class="px-5 py-3.5">
                   {% if e.status == 'verified' %}

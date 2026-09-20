@@ -378,7 +378,7 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
           <tbody class="divide-y divide-gray-100 dark:divide-gray-800">
             {% for log in logs %}
             <tr class="hover:bg-gray-50 dark:hover:bg-[#1a1a1a] transition-colors">
-              <td class="px-6 py-4 text-gray-400 dark:text-gray-600 text-xs">{{ log.id }}</td>
+              <td class="px-6 py-4 text-gray-400 dark:text-gray-600 text-xs">{{ loop.index }}</td>
               <td class="px-6 py-4 font-mono font-medium text-gray-600 dark:text-gray-400 text-[11px]">{{ log.blinded_m_hex[:20] }}...</td>
               <td class="px-6 py-4 font-mono font-medium text-msblue dark:text-[#3399FF] text-[11px]">{{ log.signed_b_m_hex[:20] }}...</td>
               <td class="px-6 py-4">
