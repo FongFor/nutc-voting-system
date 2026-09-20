@@ -18,6 +18,7 @@ admin，負責：
 
 import os
 import sys
+import json
 import time
 import hashlib
 import secrets
@@ -89,6 +90,19 @@ db.execute("""
         created_at    INTEGER NOT NULL,
         distributed   INTEGER NOT NULL DEFAULT 0,
         distributed_at INTEGER
+    )
+""")
+
+# <3 v4.0 新增：名冊範本——讓不同場投票（例如「資工系班代選舉」「學生會
+# 選舉」）各自保存一份獨立的選民清單，彼此不會互相覆蓋或清空。跟目前
+# 「同一時間只有一場投票」的整體架構相容：範本只是本地存好的一份 voter_id
+# 清單，真正要開新一輪時再「套用」到當次的 voter_roster / CA 名冊。
+db.execute("""
+    CREATE TABLE IF NOT EXISTS roster_templates (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        title       TEXT NOT NULL UNIQUE,
+        voter_ids   TEXT NOT NULL,
+        created_at  INTEGER NOT NULL
     )
 """)
 
@@ -332,6 +346,32 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
         批次生成 OTP 並全部註冊至 CA
       </button>
       <div id="batchMsg" class="mt-3 text-sm hidden"></div>
+
+      <div class="mt-5 pt-4 border-t border-gray-100 dark:border-gray-800/60">
+        <p class="text-xs text-gray-500 dark:text-gray-400 mb-2">把上面這份清單另存成一份具名的名冊範本，供未來其他場投票重複套用（同標題再存一次會覆蓋更新）。</p>
+        <div class="flex gap-2">
+          <input type="text" id="templateTitle" placeholder="選舉標題，例如：資工系班代選舉"
+            class="flex-1 px-4 py-2.5 rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-[#1a1a1a] text-sm text-gray-800 dark:text-gray-200 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-msblue/50 focus:border-msblue transition">
+          <button onclick="saveTemplate()"
+            class="px-4 py-2.5 rounded-lg border border-gray-300 dark:border-gray-700 text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 text-sm font-medium transition whitespace-nowrap">
+            另存為範本
+          </button>
+        </div>
+        <div id="templateSaveMsg" class="mt-2 text-sm hidden"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 名冊範本 -->
+  <div class="bg-white/70 dark:bg-cardblack/80 backdrop-blur-lg rounded-xl border border-gray-200 dark:border-gray-800 shadow-md p-6 mb-8">
+    <h2 class="font-medium text-gray-800 dark:text-gray-200 mb-4 text-sm uppercase tracking-wider flex items-center gap-2">
+      <svg class="w-4 h-4 text-msblue" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 4h.01M9 3v18m6-18v18"/>
+      </svg>名冊範本
+      <span class="text-xs font-normal text-gray-400 dark:text-gray-500 normal-case">各場投票可各自保存、彼此不會互相覆蓋或清空</span>
+    </h2>
+    <div id="templateList" class="space-y-2">
+      <p class="text-gray-400 text-sm">載入中...</p>
     </div>
   </div>
 
@@ -535,6 +575,84 @@ async function markDistributed(id) {
   location.reload();
 }
 
+async function saveTemplate() {
+  const title = document.getElementById('templateTitle').value.trim();
+  const raw   = document.getElementById('batchIds').value.trim();
+  const msg   = document.getElementById('templateSaveMsg');
+  if (!title) { showMsg(msg, '請輸入選舉標題', 'error'); return; }
+  if (!raw)   { showMsg(msg, '請先在上面填入這份範本的學號清單', 'error'); return; }
+  const ids = raw.split(/[\\r\\n,]+/).map(s => s.trim()).filter(s => s.length > 0);
+  showMsg(msg, '保存中...', 'info');
+  try {
+    const resp = await fetch('/api/templates', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({title, voter_ids: ids}),
+    });
+    const data = await resp.json();
+    if (data.status === 'success') {
+      showMsg(msg, `[成功] 已將「${data.title}」（${data.voter_count} 筆）存為名冊範本`, 'success');
+      document.getElementById('templateTitle').value = '';
+      loadTemplates();
+    } else {
+      showMsg(msg, `[錯誤] ${data.message}`, 'error');
+    }
+  } catch (e) {
+    showMsg(msg, `[錯誤] 請求失敗：${e.message}`, 'error');
+  }
+}
+
+async function loadTemplates() {
+  const box = document.getElementById('templateList');
+  try {
+    const resp = await fetch('/api/templates');
+    const data = await resp.json();
+    const templates = data.templates || [];
+    if (templates.length === 0) {
+      box.innerHTML = '<p class="text-gray-400 text-sm">尚未保存任何名冊範本。</p>';
+      return;
+    }
+    box.innerHTML = templates.map(t => `
+      <div class="flex items-center justify-between gap-3 px-4 py-3 rounded-lg border border-gray-200 dark:border-gray-800 bg-gray-50/50 dark:bg-[#0a0a0a]/50">
+        <div class="min-w-0">
+          <p class="font-medium text-sm text-gray-800 dark:text-gray-200 truncate">${t.title}</p>
+          <p class="text-xs text-gray-400 dark:text-gray-500">${t.voter_count} 位選民 · ${t.created_at_str}</p>
+        </div>
+        <div class="flex gap-2 shrink-0">
+          <button onclick="applyTemplate(${t.id}, '${t.title.replace(/'/g, "\\\\'")}')"
+            class="text-xs px-3 py-1.5 rounded-lg bg-msblue hover:bg-msblueHover text-white font-medium transition">套用</button>
+          <button onclick="deleteTemplate(${t.id}, '${t.title.replace(/'/g, "\\\\'")}')"
+            class="text-xs px-3 py-1.5 rounded-lg border border-gray-300 dark:border-gray-700 text-gray-500 hover:bg-red-50 dark:hover:bg-red-900/20 hover:text-red-600 dark:hover:text-red-400 transition">刪除</button>
+        </div>
+      </div>
+    `).join('');
+  } catch (e) {
+    box.innerHTML = `<p class="text-red-500 text-sm">載入失敗：${e.message}</p>`;
+  }
+}
+
+async function applyTemplate(id, title) {
+  if (!confirm(`確定要套用名冊範本「${title}」？\\n\\n這會對範本裡的每一位選民重新生成 OTP 並註冊至 CA，不會刪除目前名冊裡其他既有選民。`)) return;
+  try {
+    const resp = await fetch(`/api/templates/${id}/apply`, { method: 'POST' });
+    const data = await resp.json();
+    const ok   = (data.results || []).filter(r => r.status === 'success').length;
+    const fail = (data.results || []).filter(r => r.status !== 'success').length;
+    alert(`已套用「${data.title || title}」：${ok} 筆成功，${fail} 筆失敗／略過`);
+    location.reload();
+  } catch (e) {
+    alert(`套用失敗：${e.message}`);
+  }
+}
+
+async function deleteTemplate(id, title) {
+  if (!confirm(`確定要刪除名冊範本「${title}」？此動作不影響目前已套用的選民名冊。`)) return;
+  await fetch(`/api/templates/${id}/delete`, { method: 'POST' });
+  loadTemplates();
+}
+
+loadTemplates();
+
 function showMsg(el, text, type) {
   el.classList.remove('hidden');
   const styles = {
@@ -733,20 +851,12 @@ def api_add_voter():
     return jsonify({"status": "success", "voter_id": voter_id}), 200
 
 
-@app.route('/api/add_batch', methods=['POST'])
-def api_add_batch():
-    """批次新增選民：逐一處理，回傳各別結果。"""
-    data = request.get_json()
-    # v4.0 修正：原本用 `'voter_ids' not in data` 只擋得住「完全沒帶這個
-    # 欄位」，若明確傳 `"voter_ids": null`，這個 key 存在、檢查會放行，
-    # 下面 `for v in data['voter_ids']` 對 None 做迭代直接丟未攔截的
-    # TypeError、變成沒處理過的 500——跟 /api/add_voter 先前修過的同一種
-    # null-crash bug，這裡漏補。改用 `not data.get('voter_ids')` 同時擋
-    # 「缺欄位」「欄位是 null」「欄位是空陣列」三種情況。 <3
-    if not data or not data.get('voter_ids'):
-        return jsonify({"status": "error", "message": "缺少 voter_ids"}), 400
+def _add_batch_voters(ids: list) -> list:
+    """批次新增選民的共用核心邏輯：逐一生成 OTP 並零知識註冊至 CA。
 
-    ids = [str(v).strip() for v in data['voter_ids'] if str(v).strip()]
+    抽出成獨立函式讓 /api/add_batch 與「套用名冊範本」共用同一套邏輯，
+    避免重複維護兩份幾乎一樣的迴圈。 <3
+    """
     results = []
     for voter_id in ids:
         try:
@@ -776,8 +886,88 @@ def api_add_batch():
                 results.append({"voter_id": voter_id, "status": "error", "message": ca_resp.get('message', '')})
         except Exception as e:
             results.append({"voter_id": voter_id, "status": "error", "message": str(e)})
+    return results
 
+
+@app.route('/api/add_batch', methods=['POST'])
+def api_add_batch():
+    """批次新增選民：逐一處理，回傳各別結果。"""
+    data = request.get_json()
+    # v4.0 修正：原本用 `'voter_ids' not in data` 只擋得住「完全沒帶這個
+    # 欄位」，若明確傳 `"voter_ids": null`，這個 key 存在、檢查會放行，
+    # 下面 `for v in data['voter_ids']` 對 None 做迭代直接丟未攔截的
+    # TypeError、變成沒處理過的 500——跟 /api/add_voter 先前修過的同一種
+    # null-crash bug，這裡漏補。改用 `not data.get('voter_ids')` 同時擋
+    # 「缺欄位」「欄位是 null」「欄位是空陣列」三種情況。 <3
+    if not data or not data.get('voter_ids'):
+        return jsonify({"status": "error", "message": "缺少 voter_ids"}), 400
+
+    ids = [str(v).strip() for v in data['voter_ids'] if str(v).strip()]
+    results = _add_batch_voters(ids)
     return jsonify({"status": "done", "results": results}), 200
+
+
+@app.route('/api/templates', methods=['GET'])
+def api_templates_list():
+    """列出所有已保存的名冊範本（不含實際 voter_id 清單，只給總覽用）。"""
+    rows = db.fetchall("SELECT id, title, voter_ids, created_at FROM roster_templates ORDER BY id DESC")
+    templates = []
+    for r in rows:
+        try:
+            count = len(json.loads(r['voter_ids']))
+        except Exception:
+            count = 0
+        templates.append({
+            "id": r['id'], "title": r['title'], "voter_count": count,
+            "created_at_str": _ts_fmt(r['created_at']),
+        })
+    return jsonify({"status": "success", "templates": templates}), 200
+
+
+@app.route('/api/templates', methods=['POST'])
+def api_templates_save():
+    """[POST] 將一份選舉標題 + 選民清單另存為名冊範本，供未來的投票重複套用。
+
+    用 title 當唯一鍵：同標題再存一次視為覆蓋更新，而不是報錯或疊加，
+    方便使用者修正名單後重新保存同一份範本。 <3
+    """
+    data = request.get_json()
+    title = str((data or {}).get('title') or '').strip()
+    ids   = [str(v).strip() for v in (data or {}).get('voter_ids') or [] if str(v).strip()]
+    if not title:
+        return jsonify({"status": "error", "message": "請輸入選舉標題"}), 400
+    if not ids:
+        return jsonify({"status": "error", "message": "選民清單不可為空"}), 400
+
+    now = int(time.time())
+    db.execute(
+        "INSERT INTO roster_templates (title, voter_ids, created_at) VALUES (?, ?, ?) "
+        "ON CONFLICT(title) DO UPDATE SET voter_ids = excluded.voter_ids, created_at = excluded.created_at",
+        (title, json.dumps(ids), now),
+    )
+    print(f"[Admin] 名冊範本已保存：「{title}」（{len(ids)} 筆選民）")
+    return jsonify({"status": "success", "title": title, "voter_count": len(ids)}), 200
+
+
+@app.route('/api/templates/<int:template_id>/apply', methods=['POST'])
+def api_templates_apply(template_id):
+    """[POST] 套用名冊範本：把範本裡的選民清單重新跑一次 OTP 生成 + CA 註冊，
+    等同對這份清單做一次批次匯入，不會動到目前名冊裡其他既有選民。"""
+    row = db.fetchone("SELECT title, voter_ids FROM roster_templates WHERE id = ?", (template_id,))
+    if not row:
+        return jsonify({"status": "error", "message": "找不到這份名冊範本"}), 404
+
+    ids = json.loads(row['voter_ids'])
+    results = _add_batch_voters(ids)
+    print(f"[Admin] 已套用名冊範本「{row['title']}」（{len(ids)} 筆選民）")
+    return jsonify({"status": "done", "title": row['title'], "results": results}), 200
+
+
+@app.route('/api/templates/<int:template_id>/delete', methods=['POST'])
+def api_templates_delete(template_id):
+    """[POST] 刪除一份名冊範本（僅刪除保存的範本，不影響目前已套用的選民名冊）。"""
+    db.execute("DELETE FROM roster_templates WHERE id = ?", (template_id,))
+    return jsonify({"status": "success"}), 200
 
 
 @app.route('/api/mark_distributed', methods=['POST'])
