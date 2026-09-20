@@ -235,6 +235,7 @@ services:
     environment:
       <<: *common-env
       CA_URL: https://ca:5001
+      TPA_URL: https://tpa:5000
       TA_URL: https://ta:5002
       CC_URL: https://cc:5003
       BB_URL: https://bb:5004

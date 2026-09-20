@@ -49,6 +49,7 @@ from shared.blind_signature import blind_sign
 from shared.format_utils import int_to_hex, hex_to_int, ts_to_human
 from shared.db_utils import Database
 from shared.config_loader import make_reload_endpoint, get_delta_t, get_service_registration_token
+from shared.admin_auth import check_admin_token, admin_auth_error  # <3 v4.0：保護 /api/admin/reset
 
 # ============================================================
 # 常數設定
@@ -761,6 +762,34 @@ def api_blind_sign():
         return jsonify({"status": "success", "S_hex": S_hex}), 200
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@app.route('/api/admin/reset', methods=['POST'])
+def api_admin_reset():
+    """
+    [POST] 重置本輪認證／發票狀態（新一輪前使用）。
+
+    v4.0 修正：admin_tool 的 /api/new_round 原本完全沒有呼叫 TPA，導致
+    issued_tokens（每位選民的 Voting Token 核發/使用紀錄）與 used_nonces
+    （防重放紀錄）永遠不會清空。任何在上一輪已經真正投過票（Token
+    used=1）的選民，到了新一輪重新認證時，一樣會被 /api/auth 的
+    「防重複投票」檢查判定為 ALREADY_VOTED 而拒絕——實測發現的真實 bug：
+    選民端明明是新一輪、還沒投票，卻在 TPA 認證這關直接被打回票。
+    存取控制比照 TA 的 /api/admin/reset_election：僅要求 Admin Bearer
+    Token（呼叫方已經是持有合法 mTLS 憑證的 admin_tool，不需要再疊加
+    is_internal_ip 檢查）。 <3
+    """
+    if not check_admin_token():
+        return jsonify(admin_auth_error()), 401  # <3
+
+    token_count = db.count("issued_tokens")
+    db.execute("DELETE FROM issued_tokens")
+    db.execute("DELETE FROM used_nonces")
+    db.execute("DELETE FROM auth_log")
+    db.execute("DELETE FROM blind_sign_log")
+
+    print(f"[TPA] 本輪認證／發票狀態已重置（清除 {token_count} 筆 Token 記錄）。")
+    return jsonify({"status": "success", "deleted_tokens": token_count}), 200
 
 
 # ── Config Hot-Reload 端點 ────────────────────────────────────

@@ -46,6 +46,7 @@ ADMIN_HOSTNAME = os.environ.get("ADMIN_HOSTNAME", "admin")  # <3 v4.0：填入 T
 CA_URL    = os.environ.get("CA_URL",    "https://localhost:5001")
 TA_URL    = os.environ.get("TA_URL",    "https://localhost:5002")
 CC_URL    = os.environ.get("CC_URL",    "https://localhost:5003")
+TPA_URL   = os.environ.get("TPA_URL",   "https://localhost:5000")  # <3 v4.0：new_round 需重置 TPA 的 issued_tokens
 
 
 def _admin_headers() -> dict:
@@ -806,14 +807,21 @@ def api_voters():
 
 @app.route('/api/new_round', methods=['POST'])
 def api_new_round():
-    """新一輪重置：TA 回到 standby + CA 清除名冊 + CC 清除開票狀態 +
-    BB 清除公告狀態 + Admin 清除本地名冊。
+    """新一輪重置：TA 回到 standby + TPA 清除發票紀錄 + CA 清除名冊 +
+    CC 清除開票狀態 + BB 清除公告狀態 + Admin 清除本地名冊。
 
     v4.0 修正：原本這裡完全沒有重置 CC/BB，導致上一輪開票/公告過一次
     後，CC 的 tally_state.done 與 BB 的 bb_state.published 會一直卡在
     「已完成」，新一輪投票結束後 CC 直接拒絕重新開票、BB 也會拒絕接受
     新結果並繼續顯示上一輪的舊資料——實測發現的真實 bug，過去只能手動
     docker exec 進容器清資料庫繞過，這裡補上正式的重置端點呼叫。 <3
+
+    v4.0 再修正：TPA 也完全沒被重置過。TPA 的 issued_tokens 表記錄每位
+    選民「這一輪」是否已消耗過 Voting Token（used=1），/api/auth 用它來
+    擋重複投票。這張表如果沒清，任何上一輪真正投過票的選民，到了新一輪
+    重新認證時一樣會被判定 ALREADY_VOTED、直接卡在 TPA 認證這關——實測
+    發現：選民端明明還沒投這一輪，卻顯示已投票／認證失敗，根源就在這裡
+    而不是選民端。補上 TPA 的重置呼叫（步驟 2，緊接在 TA 之後）。 <3
     """
     results = {}
 
@@ -826,34 +834,41 @@ def api_new_round():
     except Exception as e:
         results['ta'] = {"status": "error", "message": str(e)}
 
-    # 2. 清除 CA 選民名冊
+    # 2. 清除 TPA 發票／認證紀錄（<3 新增，修正新一輪一開始就被判定已投票的問題）
+    try:
+        resp = http_requests.post(f"{TPA_URL}/api/admin/reset", json={}, headers=_admin_headers(), timeout=10, **_ADMIN_MTLS)
+        results['tpa'] = resp.json()
+    except Exception as e:
+        results['tpa'] = {"status": "error", "message": str(e)}
+
+    # 3. 清除 CA 選民名冊
     try:
         resp = http_requests.post(f"{CA_URL}/api/admin/reset_voter_registry", json={}, headers=_admin_headers(), timeout=10, **_ADMIN_MTLS)  # <3
         results['ca'] = resp.json()
     except Exception as e:
         results['ca'] = {"status": "error", "message": str(e)}
 
-    # 3. 清除 CC 開票狀態（<3 新增，修正無法重新開票的問題）
+    # 4. 清除 CC 開票狀態（<3 新增，修正無法重新開票的問題）
     try:
         resp = http_requests.post(f"{CC_URL}/api/admin/reset_tally", json={}, headers=_admin_headers(), timeout=10, **_ADMIN_MTLS)
         results['cc'] = resp.json()
     except Exception as e:
         results['cc'] = {"status": "error", "message": str(e)}
 
-    # 4. 清除 BB 公告狀態（<3 新增，修正 BB 停留在上一輪結果的問題）
+    # 5. 清除 BB 公告狀態（<3 新增，修正 BB 停留在上一輪結果的問題）
     try:
         resp = http_requests.post(f"{BB_URL}/api/admin/reset", json={}, headers=_admin_headers(), timeout=10, **_ADMIN_MTLS)
         results['bb'] = resp.json()
     except Exception as e:
         results['bb'] = {"status": "error", "message": str(e)}
 
-    # 5. 清除本地名冊
+    # 6. 清除本地名冊
     row = db.fetchone("SELECT COUNT(*) as cnt FROM voter_roster")
     count = row['cnt'] if row else 0
     db.execute("DELETE FROM voter_roster")
     results['admin'] = {"status": "success", "deleted": count}
 
-    print(f"[Admin] 新一輪重置完成。本地刪除 {count} 筆。TA: {results['ta']}  CA: {results['ca']}  CC: {results['cc']}  BB: {results['bb']}")
+    print(f"[Admin] 新一輪重置完成。本地刪除 {count} 筆。TA: {results['ta']}  TPA: {results['tpa']}  CA: {results['ca']}  CC: {results['cc']}  BB: {results['bb']}")
     return jsonify({"status": "success", "results": results}), 200
 
 
