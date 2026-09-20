@@ -240,6 +240,11 @@ services:
       CC_URL: https://cc:5003
       BB_URL: https://bb:5004
       VOTER_URL: https://voter:5005
+      # <3 v4.0：QR code 需要知道選民實際會用瀏覽器連上的公開網域，
+      # 才能產生「掃了就能直接開啟投票網站」的網址；跟 caddy 用的是
+      # 同一個環境變數，本機沒設定時退回 localhost:5005（voter 的本機直連
+      # port，方便本機測試時也能掃碼開到正確網址）。
+      SITE_ADDRESS: ${SITE_ADDRESS:-localhost:5005}
     volumes:
       - ./config.json:/app/config.json:ro
       - admin_keys:/app/admin_tool/keys  # <3 v4.0：同上，TLS 金鑰對需要持久化

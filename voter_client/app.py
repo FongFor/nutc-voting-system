@@ -913,6 +913,29 @@ _REGISTER_HTML = """<!DOCTYPE html>
   }
 })();
 
+// <3 v4.0 新增：現場 QR code 掃碼帶入學號／OTP，方便 demo。刻意讀網址的
+// fragment（# 後面），不是 ?query=——fragment 天生不會被送到伺服器，
+// 瀏覽器也不會把它放進 Referer，掃碼裝置以外的任何人都看不到。只做
+// 自動「帶入」，不自動送出：保留讓使用者看到金鑰生成／PoP／憑證申請
+// 這幾個步驟的展示效果，也避免掃到舊/重複的碼時被動觸發註冊。
+(function() {
+  if (!location.hash) return;
+  const params = new URLSearchParams(location.hash.slice(1));
+  const vid = params.get('vid');
+  const otp = params.get('otp');
+  if (!vid || !otp) return;
+
+  document.getElementById('voterId').value = vid;
+  document.getElementById('otp').value = otp;
+  // 帶入後立刻清掉網址列上的 fragment，OTP 不留在網址列/瀏覽紀錄裡。
+  history.replaceState(null, '', location.pathname + location.search);
+
+  const el = document.getElementById('regStatus');
+  el.classList.remove('hidden');
+  el.className = 'mt-4 text-sm p-3 rounded-lg text-green-700 dark:text-green-400 bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800/50';
+  el.textContent = `✓ 已透過 QR code 自動帶入學號與 OTP，請確認學號無誤後按下方按鈕完成註冊。`;
+})();
+
 async function doRegister() {
   const voterId = document.getElementById('voterId').value.trim();
   const otp     = document.getElementById('otp').value.trim();

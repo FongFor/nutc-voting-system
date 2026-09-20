@@ -17,17 +17,21 @@ admin，負責：
 """
 
 import os
+import io
 import sys
 import json
 import time
 import hashlib
 import secrets
 import datetime
+import urllib.parse
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from flask import Flask, request, jsonify, render_template_string
 import requests as http_requests
+import qrcode
+import qrcode.image.svg  # <3 v4.0：純向量、不需要 Pillow，QR 內容完全本地生成，不經過任何第三方服務
 
 from shared.db_utils import Database
 from shared.config_loader import get_admin_api_token, get_service_registration_token  # <3 呼叫 CA/CC 的 Admin 端點需要帶 Bearer Token
@@ -55,6 +59,28 @@ def _admin_headers() -> dict:
     return {"Authorization": f"Bearer {get_admin_api_token()}"}
 BB_URL    = os.environ.get("BB_URL",    "https://localhost:5004")
 VOTER_URL = os.environ.get("VOTER_URL", "https://localhost:5005")
+
+# <3 v4.0 新增：選民實際用瀏覽器連上的公開網域（跟 Caddyfile 用同一個
+# SITE_ADDRESS），QR code 要靠這個組出「掃了就能直接開啟投票網站」的網址。
+SITE_ADDRESS = os.environ.get("SITE_ADDRESS", "localhost:5005")
+
+
+def _build_register_qr_svg(voter_id: str, otp: str) -> str:
+    """產生「掃描後自動開啟投票網站並帶入學號/OTP」的 QR code（inline SVG）。
+
+    刻意把 voter_id/otp 放在網址的 fragment（# 後面），而不是一般的
+    ?query= 參數：fragment 天生不會被送到伺服器，Caddy／Flask 的 access
+    log 完全看不到裡面的明文 OTP，只存在掃碼裝置自己的網址列。就算之後
+    這個網址被看到，OTP 本身在 CA 完成一次註冊後就永久失效，不能重複
+    使用。QR 圖檔完全在本機用 qrcode 套件生成（純向量 SVG），不會呼叫
+    任何第三方 QR 產生服務，OTP 明文不會離開這台伺服器。 <3
+    """
+    frag = urllib.parse.urlencode({"vid": voter_id, "otp": otp})
+    url = f"https://{SITE_ADDRESS}/register#{frag}"
+    img = qrcode.make(url, image_factory=qrcode.image.svg.SvgPathImage, box_size=6)
+    buf = io.BytesIO()
+    img.save(buf)
+    return buf.getvalue().decode('utf-8')
 
 # v4.0 新增：先快取 CA 根憑證，才有材料驗證 CA 與其他實體的 TLS 憑證，
 # 再向 CA 申請本服務專用的 TLS 憑證（admin_tool 沒有應用層身分憑證，這是
@@ -90,19 +116,6 @@ db.execute("""
         created_at    INTEGER NOT NULL,
         distributed   INTEGER NOT NULL DEFAULT 0,
         distributed_at INTEGER
-    )
-""")
-
-# <3 v4.0 新增：名冊範本——讓不同場投票（例如「資工系班代選舉」「學生會
-# 選舉」）各自保存一份獨立的選民清單，彼此不會互相覆蓋或清空。跟目前
-# 「同一時間只有一場投票」的整體架構相容：範本只是本地存好的一份 voter_id
-# 清單，真正要開新一輪時再「套用」到當次的 voter_roster / CA 名冊。
-db.execute("""
-    CREATE TABLE IF NOT EXISTS roster_templates (
-        id          INTEGER PRIMARY KEY AUTOINCREMENT,
-        title       TEXT NOT NULL UNIQUE,
-        voter_ids   TEXT NOT NULL,
-        created_at  INTEGER NOT NULL
     )
 """)
 
@@ -163,6 +176,7 @@ _BASE_CSS = """
   .mono { font-family: 'Courier New', Courier, monospace; }
   .otp-blur { filter: blur(4px); transition: filter 0.2s; cursor: pointer; }
   .otp-blur:hover { filter: none; }
+  .qr-thumb svg { width: 100%; height: 100%; display: block; }
   @media print {
     .no-print { display: none !important; }
     body { background: white !important; color: black !important; }
@@ -346,32 +360,6 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
         批次生成 OTP 並全部註冊至 CA
       </button>
       <div id="batchMsg" class="mt-3 text-sm hidden"></div>
-
-      <div class="mt-5 pt-4 border-t border-gray-100 dark:border-gray-800/60">
-        <p class="text-xs text-gray-500 dark:text-gray-400 mb-2">把上面這份清單另存成一份具名的名冊範本，供未來其他場投票重複套用（同標題再存一次會覆蓋更新）。</p>
-        <div class="flex gap-2">
-          <input type="text" id="templateTitle" placeholder="選舉標題，例如：資工系班代選舉"
-            class="flex-1 px-4 py-2.5 rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-[#1a1a1a] text-sm text-gray-800 dark:text-gray-200 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-msblue/50 focus:border-msblue transition">
-          <button onclick="saveTemplate()"
-            class="px-4 py-2.5 rounded-lg border border-gray-300 dark:border-gray-700 text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 text-sm font-medium transition whitespace-nowrap">
-            另存為範本
-          </button>
-        </div>
-        <div id="templateSaveMsg" class="mt-2 text-sm hidden"></div>
-      </div>
-    </div>
-  </div>
-
-  <!-- 名冊範本 -->
-  <div class="bg-white/70 dark:bg-cardblack/80 backdrop-blur-lg rounded-xl border border-gray-200 dark:border-gray-800 shadow-md p-6 mb-8">
-    <h2 class="font-medium text-gray-800 dark:text-gray-200 mb-4 text-sm uppercase tracking-wider flex items-center gap-2">
-      <svg class="w-4 h-4 text-msblue" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 4h.01M9 3v18m6-18v18"/>
-      </svg>名冊範本
-      <span class="text-xs font-normal text-gray-400 dark:text-gray-500 normal-case">各場投票可各自保存、彼此不會互相覆蓋或清空</span>
-    </h2>
-    <div id="templateList" class="space-y-2">
-      <p class="text-gray-400 text-sm">載入中...</p>
     </div>
   </div>
 
@@ -394,6 +382,7 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
             <th class="px-5 py-3.5 text-left font-medium">#</th>
             <th class="px-5 py-3.5 text-left font-medium">選民 ID</th>
             <th class="px-5 py-3.5 text-left font-medium">OTP（懸停顯示）</th>
+            <th class="px-5 py-3.5 text-left font-medium">QR（現場掃碼登記）</th>
             <th class="px-5 py-3.5 text-left font-medium">CA 狀態</th>
             <th class="px-5 py-3.5 text-left font-medium">建立時間</th>
             <th class="px-5 py-3.5 text-left font-medium">派發</th>
@@ -406,6 +395,14 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
             <td class="px-5 py-4 font-mono font-medium text-msblue dark:text-[#3399FF]">{{ v.voter_id }}</td>
             <td class="px-5 py-4">
               <span class="otp-blur font-mono text-xs text-gray-700 dark:text-gray-300 bg-gray-100 dark:bg-gray-800 px-2 py-1 rounded" title="懸停顯示">{{ v.otp }}</span>
+            </td>
+            <td class="px-5 py-4">
+              {% if v.qr_svg %}
+              <div class="qr-thumb w-12 h-12 p-1 bg-white rounded cursor-pointer hover:ring-2 hover:ring-msblue transition"
+                data-voter-id="{{ v.voter_id }}" onclick="openQrModal(this)" title="點擊放大，供選民掃描">{{ v.qr_svg | safe }}</div>
+              {% else %}
+              <span class="text-xs text-gray-400">—</span>
+              {% endif %}
             </td>
             <td class="px-5 py-4">
               {% if v.ca_status == 'registered' %}
@@ -446,7 +443,28 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
 
 </div>
 
+<!-- QR 放大彈窗，方便現場選民掃描 -->
+<div id="qrModal" class="hidden fixed inset-0 bg-black/70 z-50 flex items-center justify-center p-4" onclick="closeQrModal()">
+  <div class="bg-white dark:bg-cardblack rounded-2xl p-6 max-w-xs w-full text-center" onclick="event.stopPropagation()">
+    <p id="qrModalVoterId" class="font-mono text-sm text-gray-600 dark:text-gray-300 mb-3"></p>
+    <div id="qrModalContent" class="mx-auto bg-white p-2 rounded-lg" style="width:240px;height:240px"></div>
+    <p class="text-xs text-gray-400 mt-3">請選民用手機相機或掃碼 App 掃描，將自動開啟投票頁並帶入學號與 OTP</p>
+    <button onclick="closeQrModal()"
+      class="mt-4 text-xs px-4 py-2 rounded-lg border border-gray-300 dark:border-gray-700 text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 transition">關閉</button>
+  </div>
+</div>
+
 <script>
+function openQrModal(el) {
+  document.getElementById('qrModalContent').innerHTML = el.innerHTML;
+  document.getElementById('qrModalVoterId').textContent = el.dataset.voterId;
+  document.getElementById('qrModal').classList.remove('hidden');
+}
+
+function closeQrModal() {
+  document.getElementById('qrModal').classList.add('hidden');
+}
+
 async function newRound() {
   if (!confirm('確定要重置為新一輪投票？\\n\\n此操作將：\\n1. 重置選舉狀態（TA → standby）\\n2. 清除 CA 選民名冊（選民需重新憑 OTP 登記）\\n3. 清除本地 OTP 名冊\\n\\n選民再次造訪投票頁時會自動偵測到重置，導向重新身分綁定。\\n請確認本輪計票與公告已完成。')) return;
   const msg = document.getElementById('electionMsg');
@@ -575,84 +593,6 @@ async function markDistributed(id) {
   location.reload();
 }
 
-async function saveTemplate() {
-  const title = document.getElementById('templateTitle').value.trim();
-  const raw   = document.getElementById('batchIds').value.trim();
-  const msg   = document.getElementById('templateSaveMsg');
-  if (!title) { showMsg(msg, '請輸入選舉標題', 'error'); return; }
-  if (!raw)   { showMsg(msg, '請先在上面填入這份範本的學號清單', 'error'); return; }
-  const ids = raw.split(/[\\r\\n,]+/).map(s => s.trim()).filter(s => s.length > 0);
-  showMsg(msg, '保存中...', 'info');
-  try {
-    const resp = await fetch('/api/templates', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({title, voter_ids: ids}),
-    });
-    const data = await resp.json();
-    if (data.status === 'success') {
-      showMsg(msg, `[成功] 已將「${data.title}」（${data.voter_count} 筆）存為名冊範本`, 'success');
-      document.getElementById('templateTitle').value = '';
-      loadTemplates();
-    } else {
-      showMsg(msg, `[錯誤] ${data.message}`, 'error');
-    }
-  } catch (e) {
-    showMsg(msg, `[錯誤] 請求失敗：${e.message}`, 'error');
-  }
-}
-
-async function loadTemplates() {
-  const box = document.getElementById('templateList');
-  try {
-    const resp = await fetch('/api/templates');
-    const data = await resp.json();
-    const templates = data.templates || [];
-    if (templates.length === 0) {
-      box.innerHTML = '<p class="text-gray-400 text-sm">尚未保存任何名冊範本。</p>';
-      return;
-    }
-    box.innerHTML = templates.map(t => `
-      <div class="flex items-center justify-between gap-3 px-4 py-3 rounded-lg border border-gray-200 dark:border-gray-800 bg-gray-50/50 dark:bg-[#0a0a0a]/50">
-        <div class="min-w-0">
-          <p class="font-medium text-sm text-gray-800 dark:text-gray-200 truncate">${t.title}</p>
-          <p class="text-xs text-gray-400 dark:text-gray-500">${t.voter_count} 位選民 · ${t.created_at_str}</p>
-        </div>
-        <div class="flex gap-2 shrink-0">
-          <button onclick="applyTemplate(${t.id}, '${t.title.replace(/'/g, "\\\\'")}')"
-            class="text-xs px-3 py-1.5 rounded-lg bg-msblue hover:bg-msblueHover text-white font-medium transition">套用</button>
-          <button onclick="deleteTemplate(${t.id}, '${t.title.replace(/'/g, "\\\\'")}')"
-            class="text-xs px-3 py-1.5 rounded-lg border border-gray-300 dark:border-gray-700 text-gray-500 hover:bg-red-50 dark:hover:bg-red-900/20 hover:text-red-600 dark:hover:text-red-400 transition">刪除</button>
-        </div>
-      </div>
-    `).join('');
-  } catch (e) {
-    box.innerHTML = `<p class="text-red-500 text-sm">載入失敗：${e.message}</p>`;
-  }
-}
-
-async function applyTemplate(id, title) {
-  if (!confirm(`確定要套用名冊範本「${title}」？\\n\\n這會對範本裡的每一位選民重新生成 OTP 並註冊至 CA，不會刪除目前名冊裡其他既有選民。`)) return;
-  try {
-    const resp = await fetch(`/api/templates/${id}/apply`, { method: 'POST' });
-    const data = await resp.json();
-    const ok   = (data.results || []).filter(r => r.status === 'success').length;
-    const fail = (data.results || []).filter(r => r.status !== 'success').length;
-    alert(`已套用「${data.title || title}」：${ok} 筆成功，${fail} 筆失敗／略過`);
-    location.reload();
-  } catch (e) {
-    alert(`套用失敗：${e.message}`);
-  }
-}
-
-async function deleteTemplate(id, title) {
-  if (!confirm(`確定要刪除名冊範本「${title}」？此動作不影響目前已套用的選民名冊。`)) return;
-  await fetch(`/api/templates/${id}/delete`, { method: 'POST' });
-  loadTemplates();
-}
-
-loadTemplates();
-
 function showMsg(el, text, type) {
   el.classList.remove('hidden');
   const styles = {
@@ -758,6 +698,9 @@ def dashboard():
     )
     for v in voters:
         v['created_at_str'] = _ts_fmt(v['created_at'])
+        # <3 v4.0：只有還沒完成 CA 註冊的選民，QR 裡的 OTP 才還能用；
+        # 已註冊的話 OTP 已經永久失效，秀出一個掃了也沒用的 QR 沒有意義。
+        v['qr_svg'] = _build_register_qr_svg(v['voter_id'], v['otp']) if v['ca_status'] != 'registered' else None
 
     total      = len(voters)
     pending    = sum(1 for v in voters if v['ca_status'] == 'pending')
@@ -851,12 +794,20 @@ def api_add_voter():
     return jsonify({"status": "success", "voter_id": voter_id}), 200
 
 
-def _add_batch_voters(ids: list) -> list:
-    """批次新增選民的共用核心邏輯：逐一生成 OTP 並零知識註冊至 CA。
+@app.route('/api/add_batch', methods=['POST'])
+def api_add_batch():
+    """批次新增選民：逐一處理，回傳各別結果。"""
+    data = request.get_json()
+    # v4.0 修正：原本用 `'voter_ids' not in data` 只擋得住「完全沒帶這個
+    # 欄位」，若明確傳 `"voter_ids": null`，這個 key 存在、檢查會放行，
+    # 下面 `for v in data['voter_ids']` 對 None 做迭代直接丟未攔截的
+    # TypeError、變成沒處理過的 500——跟 /api/add_voter 先前修過的同一種
+    # null-crash bug，這裡漏補。改用 `not data.get('voter_ids')` 同時擋
+    # 「缺欄位」「欄位是 null」「欄位是空陣列」三種情況。 <3
+    if not data or not data.get('voter_ids'):
+        return jsonify({"status": "error", "message": "缺少 voter_ids"}), 400
 
-    抽出成獨立函式讓 /api/add_batch 與「套用名冊範本」共用同一套邏輯，
-    避免重複維護兩份幾乎一樣的迴圈。 <3
-    """
+    ids = [str(v).strip() for v in data['voter_ids'] if str(v).strip()]
     results = []
     for voter_id in ids:
         try:
@@ -886,88 +837,8 @@ def _add_batch_voters(ids: list) -> list:
                 results.append({"voter_id": voter_id, "status": "error", "message": ca_resp.get('message', '')})
         except Exception as e:
             results.append({"voter_id": voter_id, "status": "error", "message": str(e)})
-    return results
 
-
-@app.route('/api/add_batch', methods=['POST'])
-def api_add_batch():
-    """批次新增選民：逐一處理，回傳各別結果。"""
-    data = request.get_json()
-    # v4.0 修正：原本用 `'voter_ids' not in data` 只擋得住「完全沒帶這個
-    # 欄位」，若明確傳 `"voter_ids": null`，這個 key 存在、檢查會放行，
-    # 下面 `for v in data['voter_ids']` 對 None 做迭代直接丟未攔截的
-    # TypeError、變成沒處理過的 500——跟 /api/add_voter 先前修過的同一種
-    # null-crash bug，這裡漏補。改用 `not data.get('voter_ids')` 同時擋
-    # 「缺欄位」「欄位是 null」「欄位是空陣列」三種情況。 <3
-    if not data or not data.get('voter_ids'):
-        return jsonify({"status": "error", "message": "缺少 voter_ids"}), 400
-
-    ids = [str(v).strip() for v in data['voter_ids'] if str(v).strip()]
-    results = _add_batch_voters(ids)
     return jsonify({"status": "done", "results": results}), 200
-
-
-@app.route('/api/templates', methods=['GET'])
-def api_templates_list():
-    """列出所有已保存的名冊範本（不含實際 voter_id 清單，只給總覽用）。"""
-    rows = db.fetchall("SELECT id, title, voter_ids, created_at FROM roster_templates ORDER BY id DESC")
-    templates = []
-    for r in rows:
-        try:
-            count = len(json.loads(r['voter_ids']))
-        except Exception:
-            count = 0
-        templates.append({
-            "id": r['id'], "title": r['title'], "voter_count": count,
-            "created_at_str": _ts_fmt(r['created_at']),
-        })
-    return jsonify({"status": "success", "templates": templates}), 200
-
-
-@app.route('/api/templates', methods=['POST'])
-def api_templates_save():
-    """[POST] 將一份選舉標題 + 選民清單另存為名冊範本，供未來的投票重複套用。
-
-    用 title 當唯一鍵：同標題再存一次視為覆蓋更新，而不是報錯或疊加，
-    方便使用者修正名單後重新保存同一份範本。 <3
-    """
-    data = request.get_json()
-    title = str((data or {}).get('title') or '').strip()
-    ids   = [str(v).strip() for v in (data or {}).get('voter_ids') or [] if str(v).strip()]
-    if not title:
-        return jsonify({"status": "error", "message": "請輸入選舉標題"}), 400
-    if not ids:
-        return jsonify({"status": "error", "message": "選民清單不可為空"}), 400
-
-    now = int(time.time())
-    db.execute(
-        "INSERT INTO roster_templates (title, voter_ids, created_at) VALUES (?, ?, ?) "
-        "ON CONFLICT(title) DO UPDATE SET voter_ids = excluded.voter_ids, created_at = excluded.created_at",
-        (title, json.dumps(ids), now),
-    )
-    print(f"[Admin] 名冊範本已保存：「{title}」（{len(ids)} 筆選民）")
-    return jsonify({"status": "success", "title": title, "voter_count": len(ids)}), 200
-
-
-@app.route('/api/templates/<int:template_id>/apply', methods=['POST'])
-def api_templates_apply(template_id):
-    """[POST] 套用名冊範本：把範本裡的選民清單重新跑一次 OTP 生成 + CA 註冊，
-    等同對這份清單做一次批次匯入，不會動到目前名冊裡其他既有選民。"""
-    row = db.fetchone("SELECT title, voter_ids FROM roster_templates WHERE id = ?", (template_id,))
-    if not row:
-        return jsonify({"status": "error", "message": "找不到這份名冊範本"}), 404
-
-    ids = json.loads(row['voter_ids'])
-    results = _add_batch_voters(ids)
-    print(f"[Admin] 已套用名冊範本「{row['title']}」（{len(ids)} 筆選民）")
-    return jsonify({"status": "done", "title": row['title'], "results": results}), 200
-
-
-@app.route('/api/templates/<int:template_id>/delete', methods=['POST'])
-def api_templates_delete(template_id):
-    """[POST] 刪除一份名冊範本（僅刪除保存的範本，不影響目前已套用的選民名冊）。"""
-    db.execute("DELETE FROM roster_templates WHERE id = ?", (template_id,))
-    return jsonify({"status": "success"}), 200
 
 
 @app.route('/api/mark_distributed', methods=['POST'])
