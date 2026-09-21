@@ -227,6 +227,11 @@ services:
     command: python voter_client/app.py
     environment:
       <<: [*common-env, *service-urls]
+      # <3 v4.0 新增：投完票的成功畫面要秀一個「前往公告板驗證」按鈕，
+      # 需要 BB 實際對外的公開網域（跟 Caddy 用同一個環境變數），不能用
+      # service-urls 裡那個 BB_URL——那是給容器間內部呼叫用的
+      # https://bb:5004，瀏覽器連不到。
+      BB_ADDRESS: ${BB_ADDRESS:-localhost:5004}
     volumes:
       - ./config.json:/app/config.json:ro
       - voter_keys:/app/voter_client/keys  # <3 v4.0：同上，TLS 金鑰對需要持久化
