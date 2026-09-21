@@ -258,7 +258,15 @@ services:
       # 不像 0.0.0.0 那樣會被外部網路介面看到，不需要依賴防火牆規則
       # 來擋，是比 docker-compose.override.yml 那種 0.0.0.0 對外綁定
       # 更安全、且是正式部署下唯一該用的寫法。 <3
-      - "127.0.0.1:5010:5010"
+      #
+      # <3 v4.0 新增：ADMIN_BIND_IP 讓這個綁定位址可設定——裝了 Tailscale
+      # 後把 .env 的 ADMIN_BIND_IP 設成主機的 Tailscale IP（100.x.y.z），
+      # 手機只要連上同一個 Tailscale 網路就能直接用瀏覽器打開，不用每次
+      # 手動建 SSH tunnel。Tailscale 的位址範圍一樣不會出現在公網路由
+      # 表上，只有加入同一個 tailnet 的裝置才連得到，安全性跟原本的
+      # SSH tunnel 是同一等級，只是換一種「私有網路」的實現方式。沒設
+      # ADMIN_BIND_IP 時維持原本的 127.0.0.1，行為完全不變。
+      - "${ADMIN_BIND_IP:-127.0.0.1}:5010:5010"
     depends_on:
       ca:
         condition: service_healthy
