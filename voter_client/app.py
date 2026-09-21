@@ -982,7 +982,14 @@ async function doRegister() {
     }
 
     showStatus(status, '④ 儲存憑證至 IndexedDB...', 'info');
-    await idbSave({ privJwk, pubPEM, certPem: data.certificate, voterId });
+    // <3 v4.0 修正：這裡只存新憑證的四個欄位，從沒清過舊的 voteReceipt。
+    // 如果這台裝置先前投過票（不管是上一輪、還是更早之前任何一次測試），
+    // 完成新一輪的身分綁定後，投票頁 init() 會先讀到這筆「還留著」的舊
+    // 回執，誤判成「已投票」直接卡住，即使這次登記的其實是全新的一輪、
+    // 根本還沒投票——實測發現：手機端身分綁定成功後立刻顯示已投票，
+    // 且無法重新投票，根源就在這裡。新憑證核發成功，就代表這是全新的
+    // 一輪身分，舊的本機回執必然已經過期，一併清掉。 <3
+    await idbSave({ privJwk, pubPEM, certPem: data.certificate, voterId, voteReceipt: null });
 
     showStatus(status, `✓ 身分綁定成功！憑證已安全儲存於本裝置。`, 'success');
     document.getElementById('regText').textContent = '✓ 完成，跳轉至投票頁...';
