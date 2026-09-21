@@ -56,7 +56,13 @@ from shared.admin_auth import check_admin_token, admin_auth_error  # <3 v4.0：�
 # ============================================================
 SERVICE_DIR = os.path.dirname(os.path.abspath(__file__))
 KEYS_DIR    = os.path.join(SERVICE_DIR, "keys")
-DB_PATH     = os.path.join(SERVICE_DIR, "tpa.db")
+# <3 v4.0：資料庫獨立放進 data/ 子目錄，才能掛載成持久化 volume——
+# 原本直接放在 SERVICE_DIR 底下，跟隨容器可寫層一起被重建時清空，
+# issued_tokens（誰已投過票）沒了等於防重複投票機制形同虛設，任何
+# 一次重新部署都可能連帶造成這個後果。
+DATA_DIR    = os.path.join(SERVICE_DIR, "data")
+os.makedirs(DATA_DIR, exist_ok=True)
+DB_PATH     = os.path.join(DATA_DIR, "tpa.db")
 TPA_ID       = "TPA"
 TPA_HOSTNAME = os.environ.get("TPA_HOSTNAME", "tpa")  # <3 v4.0：填入 TLS 憑證的 SAN
 CA_URL      = os.environ.get("CA_URL", "https://localhost:5001")

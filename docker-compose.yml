@@ -95,6 +95,7 @@ services:
       <<: *common-env
     volumes:
       - ca_keys:/app/ca_server/keys
+      - ca_data:/app/ca_server/data  # <3 v4.0：voter_registry 等資料庫持久化，重建容器不再清空
       - ./config.json:/app/config.json:ro
     restart: unless-stopped
     logging: *default-logging
@@ -120,6 +121,7 @@ services:
       # DELTA_T: "300"
     volumes:
       - tpa_keys:/app/tpa_server/keys
+      - tpa_data:/app/tpa_server/data  # <3 v4.0：issued_tokens 等資料庫持久化，重建容器不再清空
       - ./config.json:/app/config.json:ro
     depends_on:
       ca:
@@ -148,6 +150,7 @@ services:
       # VOTE_DURATION_SECONDS: "120"
     volumes:
       - ta_keys:/app/ta_server/keys
+      - ta_data:/app/ta_server/data  # <3 v4.0：election_state 等資料庫持久化，重建容器不再清空
       - ./config.json:/app/config.json:ro
     depends_on:
       ca:
@@ -173,6 +176,7 @@ services:
       <<: [*common-env, *service-urls]
     volumes:
       - cc_keys:/app/cc_server/keys
+      - cc_data:/app/cc_server/data  # <3 v4.0：envelopes/valid_votes 等資料庫持久化，重建容器不再清空
       - ./config.json:/app/config.json:ro
     depends_on:
       ca:
@@ -205,6 +209,7 @@ services:
       # 這個掛載，容器一重建金鑰就消失，但 CA 端記得「BB 已經核發過
       # TLS 憑證」（一次性 token 已用掉），會導致永久拿不到新憑證。
       - bb_keys:/app/bb_server/keys
+      - bb_data:/app/bb_server/data  # <3 v4.0：published_votes 等資料庫持久化，重建容器不再清空
     depends_on:
       ca:
         condition: service_healthy
@@ -235,6 +240,7 @@ services:
     volumes:
       - ./config.json:/app/config.json:ro
       - voter_keys:/app/voter_client/keys  # <3 v4.0：同上，TLS 金鑰對需要持久化
+      - voter_data:/app/voter_client/data  # <3 v4.0：pending_envelope（尚未送出的選票佇列）持久化，重建容器不再遺失
     depends_on:
       ca:
         condition: service_healthy
@@ -270,6 +276,7 @@ services:
     volumes:
       - ./config.json:/app/config.json:ro
       - admin_keys:/app/admin_tool/keys  # <3 v4.0：同上，TLS 金鑰對需要持久化
+      - admin_data:/app/admin_tool/data  # <3 v4.0：voter_roster 本地名冊持久化，重建容器不再清空
     ports:
       # 上線後發現：正式模式下 admin 完全沒有綁定到主機任何 port，連
       # SSH tunnel（-L 5010:localhost:5010）都連不上——tunnel 的原理是
@@ -355,3 +362,12 @@ volumes:
   admin_keys:   # <3 v4.0
   caddy_data:
   caddy_config:
+  # <3 v4.0 新增：各服務的 SQLite 資料庫持久化，避免重建容器時被清空
+  # （見各 app.py 裡 DATA_DIR 的說明）。
+  ca_data:
+  tpa_data:
+  ta_data:
+  cc_data:
+  bb_data:
+  voter_data:
+  admin_data:

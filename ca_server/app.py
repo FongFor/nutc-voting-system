@@ -42,7 +42,12 @@ from shared.crypto_generate_key_pair import generate_rsa_keypair  # <3 v4.0：CA
 # ============================================================
 SERVICE_DIR = os.path.dirname(os.path.abspath(__file__))
 KEYS_DIR    = os.path.join(SERVICE_DIR, "keys")
-DB_PATH     = os.path.join(SERVICE_DIR, "ca.db")
+# <3 v4.0：資料庫獨立放進 data/ 子目錄，才能掛載成持久化 volume——
+# 原本直接放在 SERVICE_DIR 底下，跟隨容器可寫層一起被重建時清空，
+# 任何一次重新部署（即使只是改別的服務）都可能連帶清空這裡的資料。
+DATA_DIR    = os.path.join(SERVICE_DIR, "data")
+os.makedirs(DATA_DIR, exist_ok=True)
+DB_PATH     = os.path.join(DATA_DIR, "ca.db")
 
 # ============================================================
 # 資料庫初始化
