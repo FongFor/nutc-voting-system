@@ -71,6 +71,17 @@ x-service-urls: &service-urls
   CC_URL:  https://cc:5003
   BB_URL:  https://bb:5004
 
+# <3 v4.0 新增：Docker 預設的 json-file log driver 沒有任何大小限制，
+# 長時間測試（例如連續跑一整天）下，log 會無限增長，在只有 30GB 硬碟
+# 的 Oracle Free Tier 機器上有把磁碟塞滿、拖垮整台機器的風險。這裡統一
+# 限制每個容器最多留 3 份、每份 10MB（單一服務最多佔 30MB），超過自動
+# 輪替捨棄舊的，不需要另外裝 logrotate。
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
 
   # ── 1. 憑證授權中心 (CA) ─────────────────────────────────
@@ -86,6 +97,7 @@ services:
       - ca_keys:/app/ca_server/keys
       - ./config.json:/app/config.json:ro
     restart: unless-stopped
+    logging: *default-logging
     healthcheck:
       test: ["CMD", "python", "-c",
              "import ssl, urllib.request; urllib.request.urlopen('https://localhost:5001/api/ca_cert', context=ssl._create_unverified_context())"]
@@ -113,6 +125,7 @@ services:
       ca:
         condition: service_healthy
     restart: unless-stopped
+    logging: *default-logging
     healthcheck:
       test: ["CMD", "python", "-c",
              "import ssl, urllib.request; ctx = ssl._create_unverified_context(); ctx.load_cert_chain('/app/tpa_server/keys/tls_certificate.pem', '/app/tpa_server/keys/tls_private_key.pem'); urllib.request.urlopen('https://localhost:5000/api/public_key', context=ctx)"]
@@ -140,6 +153,7 @@ services:
       ca:
         condition: service_healthy
     restart: unless-stopped
+    logging: *default-logging
     healthcheck:
       test: ["CMD", "python", "-c",
              "import ssl, urllib.request; ctx = ssl._create_unverified_context(); ctx.load_cert_chain('/app/ta_server/keys/tls_certificate.pem', '/app/ta_server/keys/tls_private_key.pem'); urllib.request.urlopen('https://localhost:5002/api/deadline', context=ctx)"]
@@ -164,6 +178,7 @@ services:
       ca:
         condition: service_healthy
     restart: unless-stopped
+    logging: *default-logging
     healthcheck:
       test: ["CMD", "python", "-c",
              "import ssl, urllib.request; ctx = ssl._create_unverified_context(); ctx.load_cert_chain('/app/cc_server/keys/tls_certificate.pem', '/app/cc_server/keys/tls_private_key.pem'); urllib.request.urlopen('https://localhost:5003/api/public_key', context=ctx)"]
@@ -194,6 +209,7 @@ services:
       ca:
         condition: service_healthy
     restart: unless-stopped
+    logging: *default-logging
     healthcheck:
       test: ["CMD", "python", "-c",
              "import ssl, urllib.request; urllib.request.urlopen('https://localhost:5004/api/results', context=ssl._create_unverified_context())"]
@@ -224,6 +240,7 @@ services:
       cc:
         condition: service_healthy
     restart: unless-stopped
+    logging: *default-logging
 
   # ── 9.  (Admin Tool) ─────────────────────
   admin:
@@ -277,6 +294,7 @@ services:
       ta:
         condition: service_healthy
     restart: unless-stopped
+    logging: *default-logging
     healthcheck:
       test: ["CMD", "python", "-c",
              "import ssl, urllib.request; urllib.request.urlopen('https://localhost:5010/api/voters', context=ssl._create_unverified_context())"]
@@ -319,6 +337,7 @@ services:
       bb:
         condition: service_healthy
     restart: unless-stopped
+    logging: *default-logging
 
 # ── Named Volumes（只保留金鑰，資料庫隨容器生滅）────────────
 volumes:
