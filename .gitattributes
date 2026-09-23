@@ -1,0 +1,4 @@
+# *.sh 一律強制 LF 換行——Windows 開發環境的 git 預設會在 checkout 時
+# 轉成 CRLF，如果不小心把 CRLF 版本 commit 上去，Oracle Linux 上執行
+# bash 腳本會直接報 $'\r': command not found。
+*.sh text eol=lf
