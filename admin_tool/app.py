@@ -474,9 +474,11 @@ async function newRound() {
     const data = await resp.json();
     if (data.status === 'success') {
       const r = data.results || {};
-      const taOk  = r.ta  && r.ta.status  === 'success';
-      const caOk  = r.ca  && r.ca.status  === 'success';
-      showMsg(msg, `[成功] 新一輪重置完成！TA:${taOk?'[成功]':'[失敗]'}  CA:${caOk?'[成功]':'[失敗]'}  Admin名冊:[成功]\n請重新新增選民名冊後再啟動選舉。選民造訪投票頁時將自動導向重新身分綁定。`, 'success');
+      // <3 v4.0 修正：原本只顯示 TA/CA 的重置結果，TPA/Voter/CC/BB
+      // 就算重置失敗也完全看不出來——這次抓到的「幽靈選票」問題如果
+      // 當初就能在這裡看到 voter 那一項失敗，會更快抓到根源。
+      const okLabel = r => r && r.status === 'success' ? '[成功]' : '[失敗]';
+      showMsg(msg, `[成功] 新一輪重置完成！TA:${okLabel(r.ta)}  TPA:${okLabel(r.tpa)}  Voter:${okLabel(r.voter)}  CA:${okLabel(r.ca)}  CC:${okLabel(r.cc)}  BB:${okLabel(r.bb)}  Admin名冊:[成功]\n請重新新增選民名冊後再啟動選舉。選民造訪投票頁時將自動導向重新身分綁定。`, 'success');
       setTimeout(() => location.reload(), 2500);
     } else {
       showMsg(msg, `[錯誤] ${data.message}`, 'error');
@@ -883,6 +885,17 @@ def api_new_round():
     重新認證時一樣會被判定 ALREADY_VOTED、直接卡在 TPA 認證這關——實測
     發現：選民端明明還沒投這一輪，卻顯示已投票／認證失敗，根源就在這裡
     而不是選民端。補上 TPA 的重置呼叫（步驟 2，緊接在 TA 之後）。 <3
+
+    v4.0 三修：voter_client 自己的 pending_envelope（選民端本地待送出
+    信封佇列，湊滿批次或快截止才會送給 CC）也從沒被重置過。實測發現：
+    某位選民上一輪投票時信封還卡在佇列裡沒送出，這期間執行了新一輪
+    重置，這筆卡住的舊信封完全沒被清掉；等它終於在新一輪送出時，CC
+    的防重複機制是全新的空表，會把這筆「其實屬於上一輪」的舊選票當成
+    合法新票收下——造成新一輪開票結果多出不屬於這一輪任何一位選民的
+    幽靈選票（實測案例：4 人完成認證投票，CC/BB 卻算出 5 張票）。
+    補上 voter_client 的重置呼叫（步驟 2，跟 TPA 一起，在 TA 之後、
+    CC 之前——一定要在 CC 重置前清空，否則萬一佇列裡剛好湊滿批次，
+    有可能在這次重置過程中搶先送進「舊」的 CC）。 <3
     """
     results = {}
 
@@ -902,34 +915,41 @@ def api_new_round():
     except Exception as e:
         results['tpa'] = {"status": "error", "message": str(e)}
 
-    # 3. 清除 CA 選民名冊
+    # 3. 清除 voter_client 本地待送出信封佇列（<3 新增，修正幽靈選票問題）
+    try:
+        resp = http_requests.post(f"{VOTER_URL}/api/admin/reset", json={}, headers=_admin_headers(), timeout=10, **_ADMIN_MTLS)
+        results['voter'] = resp.json()
+    except Exception as e:
+        results['voter'] = {"status": "error", "message": str(e)}
+
+    # 4. 清除 CA 選民名冊
     try:
         resp = http_requests.post(f"{CA_URL}/api/admin/reset_voter_registry", json={}, headers=_admin_headers(), timeout=10, **_ADMIN_MTLS)  # <3
         results['ca'] = resp.json()
     except Exception as e:
         results['ca'] = {"status": "error", "message": str(e)}
 
-    # 4. 清除 CC 開票狀態（<3 新增，修正無法重新開票的問題）
+    # 5. 清除 CC 開票狀態（<3 新增，修正無法重新開票的問題）
     try:
         resp = http_requests.post(f"{CC_URL}/api/admin/reset_tally", json={}, headers=_admin_headers(), timeout=10, **_ADMIN_MTLS)
         results['cc'] = resp.json()
     except Exception as e:
         results['cc'] = {"status": "error", "message": str(e)}
 
-    # 5. 清除 BB 公告狀態（<3 新增，修正 BB 停留在上一輪結果的問題）
+    # 6. 清除 BB 公告狀態（<3 新增，修正 BB 停留在上一輪結果的問題）
     try:
         resp = http_requests.post(f"{BB_URL}/api/admin/reset", json={}, headers=_admin_headers(), timeout=10, **_ADMIN_MTLS)
         results['bb'] = resp.json()
     except Exception as e:
         results['bb'] = {"status": "error", "message": str(e)}
 
-    # 6. 清除本地名冊
+    # 7. 清除本地名冊
     row = db.fetchone("SELECT COUNT(*) as cnt FROM voter_roster")
     count = row['cnt'] if row else 0
     db.execute("DELETE FROM voter_roster")
     results['admin'] = {"status": "success", "deleted": count}
 
-    print(f"[Admin] 新一輪重置完成。本地刪除 {count} 筆。TA: {results['ta']}  TPA: {results['tpa']}  CA: {results['ca']}  CC: {results['cc']}  BB: {results['bb']}")
+    print(f"[Admin] 新一輪重置完成。本地刪除 {count} 筆。TA: {results['ta']}  TPA: {results['tpa']}  Voter: {results['voter']}  CA: {results['ca']}  CC: {results['cc']}  BB: {results['bb']}")
     return jsonify({"status": "success", "results": results}), 200
 
 

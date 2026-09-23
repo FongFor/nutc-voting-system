@@ -46,6 +46,7 @@ from shared.config_loader import get_candidates as cfg_get_candidates, make_relo
 from shared.key_manager import load_or_fetch_ca_cert, verify_cert_chain_and_cn, get_public_key_from_cert  # <3 v4.0
 from shared.crypto_utils import verify_signature
 from shared.tls_utils import load_or_request_tls_certificate, build_mtls_server_context, mtls_client_kwargs  # <3 v4.0：mTLS
+from shared.admin_auth import check_admin_token, admin_auth_error  # <3 v4.0：保護 /api/admin/reset
 
 # ============================================================
 # 常數設定
@@ -406,6 +407,34 @@ def proxy_bb_results():
 @app.route('/api/candidates', methods=['GET'])
 def api_candidates():
     return jsonify({"status": "success", "candidates": _get_candidates()}), 200
+
+
+@app.route('/api/admin/reset', methods=['POST'])
+def api_admin_reset():
+    """
+    [POST] 清空本地待送出信封佇列（新一輪前使用）。
+
+    v4.0 修正：admin_tool 的 /api/new_round 原本完全沒有呼叫 voter_client，
+    導致 pending_envelope 這個「還沒湊滿批次、尚未送到 CC」的本地佇列
+    永遠不會被清空。實測發現真實後果：選民 A 在某一輪投票，剛好卡在
+    佇列裡還沒送出，這期間執行了新一輪重置（TA/TPA/CA/CC/BB 全部清空），
+    但這筆卡住的舊信封完全沒被動到；等它終於湊滿批次或到了新一輪的
+    截止時間被送出時，CC 的防重複機制是全新的空表，會把這筆「其實屬於
+    上一輪」的舊選票當成合法新票收下——造成新一輪的開票結果多出不屬於
+    這一輪任何一位選民的幽靈選票。
+    存取控制比照 BB 的 /api/admin/reset：voter_client 本身不要求 mTLS
+    用戶端憑證（選民瀏覽器沒有這種憑證），改用 Admin Bearer Token
+    單獨保護這個端點。 <3
+    """
+    if not check_admin_token():
+        return jsonify(admin_auth_error()), 401  # <3
+
+    pending_count = db.count("pending_envelope")
+    db.execute("DELETE FROM pending_envelope")
+
+    print(f"[Voter] 本地待送出信封佇列已清空（清除 {pending_count} 筆）。")
+    return jsonify({"status": "success", "deleted_pending": pending_count}), 200
+
 
 @app.route('/api/submit_envelope', methods=['POST'])
 @limiter.limit(os.environ.get("RATE_LIMIT_AUTH", "10 per minute"))  # <3
