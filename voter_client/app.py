@@ -76,9 +76,6 @@ TPA_URL  = os.environ.get("TPA_URL", "https://localhost:5000")
 TA_URL   = os.environ.get("TA_URL",  "https://localhost:5002")
 CC_URL   = os.environ.get("CC_URL",  "https://localhost:5003")
 BB_URL   = os.environ.get("BB_URL",  "https://localhost:5004")
-# <3 v4.0 新增：BB 實際對外的公開網域，跟內部呼叫用的 BB_URL（容器間
-# https://bb:5004）不同——這個是給瀏覽器點擊連結用的，不能用 BB_URL。
-BB_ADDRESS = os.environ.get("BB_ADDRESS", "localhost:5004")
 
 # v4.0 新增：先快取 CA 根憑證，才有材料可以驗證 CA 自己的 TLS 伺服器
 # 憑證，也才有東西可以驗證後續其他實體的憑證鏈——順序必須在申請 TLS
@@ -1083,14 +1080,7 @@ _VOTE_HTML = """<!DOCTYPE html>
   <div id="votedBanner" class="hidden mb-6 bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800/50 rounded-xl p-5 text-center">
     <p class="text-green-700 dark:text-green-400 font-semibold mb-1">您已完成投票</p>
     <p class="text-xs text-gray-500 dark:text-gray-400">m_hex：<span id="votedMhex" class="font-mono break-all"></span></p>
-    <div class="mt-3 flex items-center justify-center gap-4">
-      <a href="/status" class="text-xs text-msblue hover:underline">查看完整回執 →</a>
-      <a id="votedBbLink" href="#" target="_blank" rel="noopener"
-        class="inline-flex items-center gap-1 text-xs px-3 py-1.5 rounded-lg bg-msblue hover:bg-msblueHover text-white font-medium transition">
-        前往公告板驗證
-        <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"/></svg>
-      </a>
-    </div>
+    <a href="/status" class="mt-3 inline-block text-xs text-msblue hover:underline">查看完整回執 →</a>
   </div>
 
   <!-- 投票表單 -->
@@ -1116,14 +1106,7 @@ _VOTE_HTML = """<!DOCTYPE html>
       請放心，這是正常流程。開票後可用 m_hex 到公告板（BB）驗證是否已計入：
     </p>
     <code id="successMhex" class="block bg-gray-100 dark:bg-gray-800/60 rounded-lg p-3 text-xs font-mono break-all text-gray-700 dark:text-gray-300 mt-2"></code>
-    <div class="mt-4 flex items-center gap-4">
-      <a href="/status" class="text-xs text-msblue hover:underline">查看完整回執 →</a>
-      <a id="successBbLink" href="#" target="_blank" rel="noopener"
-        class="inline-flex items-center gap-1 text-xs px-3 py-1.5 rounded-lg bg-msblue hover:bg-msblueHover text-white font-medium transition">
-        前往公告板驗證
-        <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14"/></svg>
-      </a>
-    </div>
+    <a href="/status" class="mt-4 inline-block text-xs text-msblue hover:underline">查看完整回執 →</a>
   </div>
 
   <!-- 錯誤提示 -->
@@ -1131,9 +1114,6 @@ _VOTE_HTML = """<!DOCTYPE html>
 </div>
 
 <script>
-const BB_ADDRESS = "{{ bb_address }}";  // <3 v4.0：公告板公開網域，用來組「前往公告板驗證」連結
-function bbVerifyUrl(mHex) { return `https://${BB_ADDRESS}/verify?m_hex=${encodeURIComponent(mHex)}`; }
-
 let _selectedCandidate = null;
 let _privateKey = null, _certPem = null, _voterId = null;
 
@@ -1168,7 +1148,6 @@ async function init() {
   if (voteReceipt) {
     document.getElementById('votedBanner').classList.remove('hidden');
     document.getElementById('votedMhex').textContent = voteReceipt.m_hex;
-    document.getElementById('votedBbLink').href = bbVerifyUrl(voteReceipt.m_hex);
     document.getElementById('voteForm').classList.add('hidden');
     return;
   }
@@ -1369,7 +1348,6 @@ async function doVote() {
 
     document.getElementById('successCard').classList.remove('hidden');
     document.getElementById('successMhex').textContent = m_hex;
-    document.getElementById('successBbLink').href = bbVerifyUrl(m_hex);
     document.getElementById('voteForm').classList.add('opacity-50', 'pointer-events-none');
 
   } catch(e) {
@@ -1471,7 +1449,7 @@ _STATUS_HTML = """<!DOCTYPE html>
 
 @app.route('/')
 def index():
-    return render_template_string(_VOTE_HTML, bb_address=BB_ADDRESS)
+    return render_template_string(_VOTE_HTML)
 
 @app.route('/register')
 def register_page():
