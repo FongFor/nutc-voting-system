@@ -1315,7 +1315,16 @@ async function doVote() {
     addStep('封裝 AES-GCM + RSA-OAEP 數位信封...');
     const inner_enc_b64 = await rsaOaepEncryptWithKey(ta_key, innerHash + '|' + candidate);
     const aes_pt        = inner_enc_b64 + '|' + s_prime_hex + '|' + m_hex;
-    const aad_str       = 'voting-system-v2|' + _voterId + '|' + sn;
+    // <3 v4.0 修正：AAD 原本直接放明文 voter_id + sn。AES-GCM 的 AAD 設計上
+    // 本來就是明文傳輸（只綁完整性，不提供機密性），CC 端也從未解讀過 AAD
+    // 內容、純粹當不透明位元組傳給解密函式驗證——但這代表任何拿得到信封
+    // 原始資料的人（例如直接查 CC 資料庫），把 aad 欄位 Base64 解碼就能
+    // 直接看到是哪個選民送出這封信，完全繞過整套盲簽章架構要保護的匿名性。
+    // AAD 真正需要的只是「加密/解密兩端用同一組值」，內容本身不需要有
+    // 意義，改用純隨機值即可達到同樣的密碼學綁定效果，且沒有任何可反推
+    // 回選民身分的資訊。 <3
+    const aad_nonce     = bytesToHex(crypto.getRandomValues(new Uint8Array(16)));
+    const aad_str       = 'voting-system-v2|' + aad_nonce;
     const { k, iv, c_data, tag, aad } = await aesGcmEncrypt(aes_pt, aad_str);
     const c_key  = await rsaOaepEncryptWithKey(cc_key, k);
     // v2.0 修正：之前 token_hash 寫死空字串，CC 端的一人一票去重機制對所有
