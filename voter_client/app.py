@@ -397,8 +397,13 @@ def proxy_ca_voter_status():
 @app.route('/api/proxy/ca/ca_cert', methods=['GET'])
 def proxy_ca_ca_cert():
     """v3.0 新增：讓選民端瀏覽器能拿到 CA 根憑證，作為驗證 TA/CC/TPA
-    憑證鏈的信任錨點。"""
-    return _proxy("GET", f"{CA_URL}/api/ca_cert")
+    憑證鏈的信任錨點。
+
+    允許跨網域讀取：BB 的驗證頁要向「投票網站」（而不是 BB 自己）取得 CA
+    根憑證來驗 CC 的簽章。根憑證本來就是公開資料，開放讀取沒有風險。"""
+    resp, status = _proxy("GET", f"{CA_URL}/api/ca_cert")
+    resp.headers["Access-Control-Allow-Origin"] = "*"
+    return resp, status
 
 @app.route('/api/proxy/tpa/public_key', methods=['GET'])
 def proxy_tpa_pk():

@@ -22,6 +22,7 @@ import sys
 import json
 import time
 import datetime
+import threading
 
 # 確保 shared/ 可被 import
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -38,6 +39,10 @@ from shared.key_manager import load_or_fetch_ca_cert, verify_cert_chain_and_cn  
 from shared.admin_auth import check_admin_token, admin_auth_error  # <3 v4.0：保護 /api/admin/reset
 from shared.tls_utils import load_or_request_tls_certificate, build_mtls_server_context  # <3 v4.0：mTLS
 from cryptography import x509
+
+# 驗證頁在瀏覽器驗 CC 簽章時所用的 CA 根憑證來源：投票網站（voter_client），
+# 刻意不由 BB 自己提供——BB 若被入侵，可以連同假的 CA 根憑證一起送出。
+CA_CERT_URL_FOR_BROWSER = f"https://{os.environ.get('SITE_ADDRESS', 'localhost')}/api/proxy/ca/ca_cert"
 
 # ============================================================
 # 常數設定
@@ -490,7 +495,8 @@ _VERIFY_HTML = """<!DOCTYPE html>
         </div>
         <div>
           <p id="localVerifyTitle" class="font-semibold text-gray-600 dark:text-gray-400 text-sm">瀏覽器本機獨立驗證中...</p>
-          <p class="text-gray-500 dark:text-gray-500 text-xs mt-1">不依賴、也不信任 BB 伺服器的判斷結果，在您的瀏覽器裡用相同的雜湊規則重新計算一次 Merkle Root 並比對，即使 BB 被入侵並謊報「驗證通過」，這裡也會如實顯示不符。</p>
+          <p class="text-gray-500 dark:text-gray-500 text-xs mt-1">不依賴、也不信任 BB 伺服器的判斷結果：先向投票網站取得 CA 根憑證，確認開票結果包確實由 CA 認證的 CC 簽章，再用結果包裡的 Merkle Root 重新計算您的驗證路徑。BB 若竄改結果或謊報「驗證通過」，這裡會如實顯示不符。</p>
+          <ul id="localVerifySteps" class="text-xs mt-2 space-y-0.5 text-gray-600 dark:text-gray-400"></ul>
         </div>
       </div>
       <script>
@@ -527,15 +533,114 @@ _VERIFY_HTML = """<!DOCTYPE html>
             return current === rootOfficial;
           }
 
+
+          // ── 驗證 CC 簽章用的工具（與 voter_client 的同名函式相同邏輯）──
+          // 本頁是 BB 自己提供的，BB 送來的任何資料（root、proof、結果包）
+          // 都不能直接相信：root 必須來自「CC 簽過章、且 CC 憑證由 CA 簽發」
+          // 的結果包，CA 根憑證則向投票網站（不是 BB）索取。
+          function pemToDer(pem) {
+            const b64 = pem.split(/-----[^-]+-----/).join('').split('').filter(c => c.trim()).join('');
+            return Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+          }
+          function b64decode(b64) { return Uint8Array.from(atob(b64), c => c.charCodeAt(0)); }
+          function bytesToHexStr(bytes) { return Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join(''); }
+          function derReadTLV(bytes, offset) {
+            const lenByte = bytes[offset + 1];
+            let lenOfLen = 0, length;
+            if (lenByte & 0x80) {
+              lenOfLen = lenByte & 0x7f;
+              length = 0;
+              for (let i = 0; i < lenOfLen; i++) length = (length << 8) | bytes[offset + 2 + i];
+            } else {
+              length = lenByte;
+            }
+            const contentStart = offset + 2 + lenOfLen;
+            return { tag: bytes[offset], start: offset, end: contentStart + length, contentStart, contentEnd: contentStart + length };
+          }
+          function derChildren(bytes, start, end) {
+            const out = [];
+            for (let o = start; o < end;) { const t = derReadTLV(bytes, o); out.push(t); o = t.end; }
+            return out;
+          }
+          function derFindOid(bytes, oid, start, end) {
+            search:
+            for (let i = start; i + 2 + oid.length <= end; i++) {
+              if (bytes[i] !== 0x06 || bytes[i + 1] !== oid.length) continue;
+              for (let j = 0; j < oid.length; j++) if (bytes[i + 2 + j] !== oid[j]) continue search;
+              return derReadTLV(bytes, derReadTLV(bytes, i).end);
+            }
+            return null;
+          }
+          function parseCertificate(certPem) {
+            const der = pemToDer(certPem);
+            const top = derReadTLV(der, 0);
+            const [tbs, , sigValTlv] = derChildren(der, top.contentStart, top.contentEnd);
+            const sigValue = der.slice(sigValTlv.contentStart + 1, sigValTlv.contentEnd);
+            const tbsBytes = der.slice(tbs.start, tbs.end);
+            let kids = derChildren(der, tbs.contentStart, tbs.contentEnd);
+            if (kids[0].tag === 0xa0) kids = kids.slice(1);
+            const subjectTlv = kids[4], spkiTlv = kids[5];
+            const cnTlv = derFindOid(der, [0x55, 0x04, 0x03], subjectTlv.contentStart, subjectTlv.contentEnd);
+            return {
+              tbsBytes, sigValue,
+              spkiBytes: der.slice(spkiTlv.start, spkiTlv.end),
+              commonName: cnTlv ? new TextDecoder().decode(der.slice(cnTlv.contentStart, cnTlv.contentEnd)) : null,
+            };
+          }
+          async function verifyCertChain(certPem, expectedCN, caKey) {
+            const { tbsBytes, sigValue, spkiBytes, commonName } = parseCertificate(certPem);
+            if (commonName !== expectedCN) throw new Error(`憑證 CN 不符（預期 ${expectedCN}，實際 ${commonName}）`);
+            const ok = await crypto.subtle.verify({ name: 'RSASSA-PKCS1-v1_5' }, caKey, sigValue, tbsBytes);
+            if (!ok) throw new Error(`${expectedCN} 憑證不是由 CA 簽發，可能遭偽造`);
+            return spkiBytes;
+          }
+          // 與 Python padding.PSS.MAX_LENGTH 一致：emLen - hLen(32) - 2
+          function pssMaxSaltLength(spkiBytes) {
+            const top = derReadTLV(spkiBytes, 0);
+            const [, bitStr] = derChildren(spkiBytes, top.contentStart, top.contentEnd);
+            const rsa = spkiBytes.slice(bitStr.contentStart + 1, bitStr.contentEnd);
+            const rsaTop = derReadTLV(rsa, 0);
+            const [nTlv] = derChildren(rsa, rsaTop.contentStart, rsaTop.contentEnd);
+            const modulusBits = BigInt('0x' + bytesToHexStr(rsa.slice(nTlv.contentStart, nTlv.contentEnd))).toString(2).length;
+            return Math.ceil((modulusBits - 1) / 8) - 32 - 2;
+          }
+
           (async function () {
             const mHex        = {{ result.m_hex | tojson }};
             const proof       = {{ result.proof | tojson }};
-            const rootOfficial = {{ result.root | tojson }};
+            const caCertUrl   = {{ ca_cert_url | tojson }};
             const icon  = document.getElementById('localVerifyIcon');
             const title = document.getElementById('localVerifyTitle');
             const banner = document.getElementById('localVerifyBanner');
+            const steps = document.getElementById('localVerifySteps');
+            function step(text) {
+              const li = document.createElement('li');
+              li.textContent = '✓ ' + text;
+              steps.appendChild(li);
+            }
             try {
+              // 1. CA 根憑證：向投票網站索取，不向 BB 索取
+              const caResp = await fetch(caCertUrl, { cache: 'no-store' }).then(r => r.json());
+              if (caResp.status !== 'success' || !caResp.ca_certificate) throw new Error('無法從投票網站取得 CA 根憑證');
+              const caKey = await crypto.subtle.importKey('spki', parseCertificate(caResp.ca_certificate).spkiBytes,
+                { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' }, false, ['verify']);
+              step('已從投票網站取得 CA 根憑證');
+
+              // 2. CC 憑證鏈 + 結果包簽章
+              const sb = await fetch('/api/signed_bundle', { cache: 'no-store' }).then(r => r.json());
+              if (sb.status !== 'success') throw new Error(sb.message || '公告板沒有提供 CC 簽章的結果包');
+              const ccSpki = await verifyCertChain(sb.cc_cert_pem, 'CC', caKey);
+              step('CC 憑證由 CA 簽發');
+              const ccKey = await crypto.subtle.importKey('spki', ccSpki, { name: 'RSA-PSS', hash: 'SHA-256' }, false, ['verify']);
+              const sigOk = await crypto.subtle.verify({ name: 'RSA-PSS', saltLength: pssMaxSaltLength(ccSpki) },
+                ccKey, b64decode(sb.signature), new TextEncoder().encode(sb.signed_bundle));
+              if (!sigOk) throw new Error('結果包的 CC 簽章無效，公告內容可能遭竄改');
+              step('開票結果包的 CC 簽章有效');
+
+              // 3. 只使用簽過章的 root
+              const rootOfficial = JSON.parse(sb.signed_bundle).root_official;
               const ok = await verifyProofLocally(mHex, proof, rootOfficial);
+              if (ok) step('您的選票驗證路徑可算出 CC 簽章的 Merkle Root');
               icon.classList.remove('animate-spin');
               if (ok) {
                 banner.classList.remove('bg-gray-50/80', 'dark:bg-[#0a0a0a]', 'border-gray-200', 'dark:border-gray-800');
@@ -631,9 +736,13 @@ _VERIFY_HTML = """<!DOCTYPE html>
           </div>
         </div>
 
+        {% if tree_data %}
         <div id="tree-scroll-wrap" class="border border-gray-200 dark:border-gray-800/80">
           <canvas id="tree-canvas"></canvas>
         </div>
+        {% else %}
+        <p class="text-xs text-gray-500 dark:text-gray-400 text-center py-6">本次公告共有 {{ result.leaf_count }} 張選票，超過 {{ viz_max_leaves }} 張時不繪製完整樹狀圖（瀏覽器負擔太大）；上方的驗證路徑與本機驗證不受影響。</p>
+        {% endif %}
 
         <p class="text-[11px] text-gray-500 dark:text-gray-600 mt-3 text-center flex items-center justify-center gap-1">
           <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
@@ -663,7 +772,7 @@ _VERIFY_HTML = """<!DOCTYPE html>
     <div class="panel-meta" id="panel-meta"></div>
   </div>
 
-  {% if result and result.valid %}
+  {% if result and result.valid and tree_data %}
   <script>
   // ════════════════════════════════════════════════════════════
   //  完美的金字塔佈局 — 自底向上精準尋跡 + Root 絕對置中演算法
@@ -1287,6 +1396,8 @@ def verify_page():
         m_hex=m_hex,
         result=result,
         tree_data=tree_data,
+        ca_cert_url=CA_CERT_URL_FOR_BROWSER,
+        viz_max_leaves=VIZ_MAX_LEAVES,
     )
 
 
@@ -1312,6 +1423,7 @@ def api_admin_reset():
     vote_count = db.count("published_votes")
     db.execute("DELETE FROM published_votes")
     db.execute("DELETE FROM bb_state")
+    _invalidate_tree_cache()
 
     print(f"[BB] 公告板狀態已重置（清除 {vote_count} 筆已公告選票）。")
     return jsonify({"status": "success", "deleted_votes": vote_count}), 200
@@ -1460,6 +1572,12 @@ def api_publish():
     db.execute("INSERT OR REPLACE INTO bb_state (key, value) VALUES ('tallied_at', ?)", (str(tallied_at),))
     db.execute("INSERT OR REPLACE INTO bb_state (key, value) VALUES ('cc_signature', ?)", (signature_b64,))
     db.execute("INSERT OR REPLACE INTO bb_state (key, value) VALUES ('cc_cert_pem', ?)", (cert_pem,))  # <3
+    # 原封不動保存 CC 簽章的那串 canonical JSON。以前只存了結果包裡的部分
+    # 欄位（少了 deadline、cc_id），任何人都無法重組出被簽章的原文，公開的
+    # cc_signature 等於沒人驗得了。瀏覽器直接對這串原文驗章，也不用擔心
+    # JS 與 Python 的 JSON 序列化細節（中文、欄位排序）不一致。
+    db.execute("INSERT OR REPLACE INTO bb_state (key, value) VALUES ('signed_bundle', ?)", (bundle_json,))
+    _invalidate_tree_cache()
 
     # 日誌使用人類可讀格式
     print(f"[BB] ✅ 結果已驗證並公告（Unix ts：{tallied_at}  →  {ts_to_human(tallied_at)}）")
@@ -1505,6 +1623,27 @@ def api_results():
     }), 200
 
 
+@app.route('/api/signed_bundle', methods=['GET'])
+def api_signed_bundle():
+    """[GET] 回傳 CC 簽章的結果包原文、簽章與 CC 憑證，供任何人獨立驗章。
+
+    驗證方式：用 CA 根憑證驗證 cc_cert_pem（CN 必須是 CC），再用其公鑰以
+    RSA-PSS（SHA-256、MGF1-SHA-256、salt 長度 = PSS.MAX_LENGTH）驗證
+    signature 是否為 signed_bundle 這串 UTF-8 原文的簽章。
+    """
+    row = db.fetchone("SELECT value FROM bb_state WHERE key = 'signed_bundle'")
+    if not row:
+        return jsonify({"status": "error", "message": "尚未公告，或這次公告沒有保存簽章原文"}), 404
+    sig_row  = db.fetchone("SELECT value FROM bb_state WHERE key = 'cc_signature'")
+    cert_row = db.fetchone("SELECT value FROM bb_state WHERE key = 'cc_cert_pem'")
+    return jsonify({
+        "status":        "success",
+        "signed_bundle": row['value'],
+        "signature":     sig_row['value'] if sig_row else "",
+        "cc_cert_pem":   cert_row['value'] if cert_row else "",
+    }), 200
+
+
 @app.route('/api/merkle_proof/<path:m_hex>', methods=['GET'])
 def api_merkle_proof(m_hex: str):
     """
@@ -1534,6 +1673,37 @@ make_reload_endpoint(app)
 # 內部函式
 # ============================================================
 
+# ── Merkle Tree 快取 ─────────────────────────────────────────
+# 以前每次驗證都從資料庫讀出全部 m_hex、重建整棵樹，再用 list.index() 逐一
+# 找位置；公告後大家同時來驗證時，每個請求都要重做一次。公告內容在下次
+# 公告或重置前不會變，改成第一次查詢時建好樹與「m_hex → 位置」對照表，
+# 以官方 root 當快取鍵，之後直接查表。只有重建出的 root 等於官方 root 時
+# 才會放進快取。
+VIZ_MAX_LEAVES = 256
+_tree_cache = {"root": None, "tree": None, "index_of": None}
+_tree_cache_lock = threading.Lock()
+
+
+def _invalidate_tree_cache():
+    with _tree_cache_lock:
+        _tree_cache.update(root=None, tree=None, index_of=None)
+
+
+def _get_tree(official_root: str):
+    """回傳 (MerkleTree, {m_hex: index})；資料重建出的 root 與官方 root 不符時回傳 (None, {})。"""
+    with _tree_cache_lock:
+        if _tree_cache["root"] == official_root and _tree_cache["tree"] is not None:
+            return _tree_cache["tree"], _tree_cache["index_of"]
+        votes = db.fetchall("SELECT m_hex FROM published_votes ORDER BY id")
+        m_hex_list = [v['m_hex'] for v in votes]
+        tree = MerkleTree(m_hex_list)
+        if tree.get_root() != official_root:
+            return None, {}
+        index_of = {m: i for i, m in enumerate(m_hex_list)}
+        _tree_cache.update(root=official_root, tree=tree, index_of=index_of)
+        return tree, index_of
+
+
 def _verify_m_hex(m_hex: str) -> dict:
     """驗證 m_hex 是否在 Merkle Tree 中，回傳驗證結果 dict"""
     published_row = db.fetchone("SELECT value FROM bb_state WHERE key = 'published'")
@@ -1554,22 +1724,17 @@ def _verify_m_hex(m_hex: str) -> dict:
     if not official_root:
         return {"valid": False, "message": "找不到官方公告的 Merkle Root"}
 
-    votes = db.fetchall("SELECT m_hex FROM published_votes ORDER BY id")
-    m_hex_list = [v['m_hex'] for v in votes]
-
-    if m_hex not in m_hex_list:
-        return {"valid": False, "message": "找不到此 m_hex，可能選票無效或尚未計入"}
-
-    index = m_hex_list.index(m_hex)
-    tree  = MerkleTree(m_hex_list)
-    proof = tree.get_proof(index)
-    recomputed_root = tree.get_root()
-
-    if recomputed_root != official_root:  # <3
+    tree, index_of = _get_tree(official_root)
+    if tree is None:  # <3 現有選票資料重建出的 root 與官方 root 不符
         return {
             "valid": False,
             "message": "資料完整性異常：現有選票資料與官方公告之 Merkle Root 不符，公告板資料可能遭竄改",
         }
+
+    index = index_of.get(m_hex)
+    if index is None:
+        return {"valid": False, "message": "找不到此 m_hex，可能選票無效或尚未計入"}
+    proof = tree.get_proof(index)
 
     # 驗證 Merkle Proof（用官方 root，不是現場重算出來的 root）
     is_valid = MerkleTree.verify_proof(m_hex, proof, official_root)  # <3
@@ -1582,6 +1747,7 @@ def _verify_m_hex(m_hex: str) -> dict:
             "proof":     proof,
             "root":      official_root,  # <3
             "index":     index,
+            "leaf_count": len(index_of),
         }
     else:
         return {"valid": False, "message": "Merkle Proof 驗證失敗"}
@@ -1596,14 +1762,14 @@ def _build_tree_data(m_hex: str) -> dict:
       - proof_path: 每個節點的角色（target/sibling/path/normal）
       - root: Root_official
     """
-    votes = db.fetchall("SELECT m_hex FROM published_votes ORDER BY id")
-    m_hex_list = [v['m_hex'] for v in votes]
-
-    if m_hex not in m_hex_list:
+    root_row = db.fetchone("SELECT value FROM bb_state WHERE key = 'merkle_root'")
+    tree, index_of = _get_tree(root_row['value']) if root_row else (None, {})
+    # 樹狀圖會把整棵樹的每個節點都送到瀏覽器繪製，票數多時頁面過大、瀏覽器
+    # 畫不動，只在票數不多時提供。
+    if tree is None or m_hex not in index_of or len(index_of) > VIZ_MAX_LEAVES:
         return None
 
-    index = m_hex_list.index(m_hex)
-    tree  = MerkleTree(m_hex_list)
+    index = index_of[m_hex]
     proof = tree.get_proof(index)
     root  = tree.get_root()
 

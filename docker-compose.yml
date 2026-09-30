@@ -202,6 +202,8 @@ services:
       <<: *common-env
       CA_URL: https://ca:5001
       CC_URL: https://cc:5003
+      # 驗證頁向投票網站取得 CA 根憑證（見 bb_server/app.py 的 CA_CERT_URL_FOR_BROWSER）
+      SITE_ADDRESS: ${SITE_ADDRESS:-localhost}
     volumes:
       - ./config.json:/app/config.json:ro
       # v4.0 新增：BB 現在也持有一把 TLS 專用金鑰對（見
