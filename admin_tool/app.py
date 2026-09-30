@@ -28,7 +28,7 @@ import urllib.parse
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from flask import Flask, request, jsonify, render_template_string
+from flask import Flask, request, jsonify, render_template_string, Response
 import requests as http_requests
 import qrcode
 import qrcode.image.svg  # <3 v4.0：純向量、不需要 Pillow，QR 內容完全本地生成，不經過任何第三方服務
@@ -176,7 +176,7 @@ _BASE_CSS = """
   .mono { font-family: 'Courier New', Courier, monospace; }
   .otp-blur { filter: blur(4px); transition: filter 0.2s; cursor: pointer; }
   .otp-blur:hover { filter: none; }
-  .qr-thumb svg { width: 100%; height: 100%; display: block; }
+  .qr-thumb svg, #qrModalContent svg { width: 100%; height: 100%; display: block; }
   @media print {
     .no-print { display: none !important; }
     body { background: white !important; color: black !important; }
@@ -397,9 +397,9 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
               <span class="otp-blur font-mono text-xs text-gray-700 dark:text-gray-300 bg-gray-100 dark:bg-gray-800 px-2 py-1 rounded" title="懸停顯示">{{ v.otp }}</span>
             </td>
             <td class="px-5 py-4">
-              {% if v.qr_svg %}
-              <div class="qr-thumb w-12 h-12 p-1 bg-white rounded cursor-pointer hover:ring-2 hover:ring-msblue transition"
-                data-voter-id="{{ v.voter_id }}" onclick="openQrModal(this)" title="點擊放大，供選民掃描">{{ v.qr_svg | safe }}</div>
+              {% if v.ca_status != 'registered' %}
+              <button type="button" class="text-xs px-2.5 py-1 rounded border border-gray-300 dark:border-gray-700 text-gray-600 dark:text-gray-300 hover:ring-2 hover:ring-msblue transition"
+                data-voter-id="{{ v.voter_id }}" onclick="openQrModal(this)" title="點擊顯示 QR，供選民掃描">顯示 QR</button>
               {% else %}
               <span class="text-xs text-gray-400">—</span>
               {% endif %}
@@ -455,10 +455,24 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
 </div>
 
 <script>
-function openQrModal(el) {
-  document.getElementById('qrModalContent').innerHTML = el.innerHTML;
-  document.getElementById('qrModalVoterId').textContent = el.dataset.voterId;
+// QR 改成點開時才向伺服器要（/qr/<voter_id>），不再隨頁面一次產生全部選民的
+// QR——2500 人時整頁會變成約 39MB、伺服器端要花 30 秒以上產生。
+async function openQrModal(el) {
+  const voterId = el.dataset.voterId;
+  const content = document.getElementById('qrModalContent');
+  content.textContent = '產生中...';
+  document.getElementById('qrModalVoterId').textContent = voterId;
   document.getElementById('qrModal').classList.remove('hidden');
+  try {
+    const resp = await fetch('/qr/' + encodeURIComponent(voterId), { cache: 'no-store' });
+    if (!resp.ok) {
+      content.textContent = resp.status === 404 ? '此選民已完成認證，OTP 已失效' : '無法產生 QR（HTTP ' + resp.status + '）';
+      return;
+    }
+    content.innerHTML = await resp.text();
+  } catch (e) {
+    content.textContent = '無法產生 QR：' + e.message;
+  }
 }
 
 function closeQrModal() {
@@ -695,33 +709,40 @@ _PRINT_HTML = """<!DOCTYPE html>
 
 @app.route('/')
 def dashboard():
+    # 從 CA 同步選民認證狀態（把 CA 端已完成的 registered 狀態寫回本地）
+    # 原本是對 CA 名冊裡每一位已註冊選民各呼叫一次 db.execute()——每次都
+    # 是獨立的連線＋交易＋commit，2500 人實測約 20 秒，期間一直佔著 SQLite
+    # 寫入鎖；而且同步排在讀名單之後，畫面上的狀態永遠落後一次重新整理。
+    # 改成先算出「CA 已註冊、本地還不是」的差集，只更新這些、一次交易完成，
+    # 再讀名單。
+    try:
+        ca_resp = http_requests.get(f"{CA_URL}/api/admin/voter_registry", headers=_admin_headers(), timeout=3, **_ADMIN_MTLS)  # <3
+        ca_data = ca_resp.json()
+        if ca_data.get("status") == "success":
+            registered_on_ca = {row["voter_id"] for row in ca_data.get("voters", []) if row.get("status") == "registered"}
+            local_unregistered = {
+                row["voter_id"] for row in db.fetchall("SELECT voter_id FROM voter_roster WHERE ca_status != 'registered'")
+            }
+            to_update = registered_on_ca & local_unregistered
+            if to_update:
+                db.executemany(
+                    "UPDATE voter_roster SET ca_status = 'registered' WHERE voter_id = ?",
+                    [(voter_id,) for voter_id in to_update],
+                )
+    except Exception:
+        pass
+
+    # QR 不在這裡產生，改由 /qr/<voter_id> 在點開時才產生（見 openQrModal）
     voters = db.fetchall(
         "SELECT id, voter_id, otp, otp_hash, ca_status, created_at, distributed FROM voter_roster ORDER BY id DESC"
     )
     for v in voters:
         v['created_at_str'] = _ts_fmt(v['created_at'])
-        # <3 v4.0：只有還沒完成 CA 註冊的選民，QR 裡的 OTP 才還能用；
-        # 已註冊的話 OTP 已經永久失效，秀出一個掃了也沒用的 QR 沒有意義。
-        v['qr_svg'] = _build_register_qr_svg(v['voter_id'], v['otp']) if v['ca_status'] != 'registered' else None
 
     total      = len(voters)
     pending    = sum(1 for v in voters if v['ca_status'] == 'pending')
     registered = sum(1 for v in voters if v['ca_status'] == 'registered')
     distributed = sum(1 for v in voters if v['distributed'])
-
-    # 從 CA 同步選民認證狀態（把 CA 端已完成的 registered 狀態寫回本地）
-    try:
-        ca_resp = http_requests.get(f"{CA_URL}/api/admin/voter_registry", headers=_admin_headers(), timeout=3, **_ADMIN_MTLS)  # <3
-        ca_data = ca_resp.json()
-        if ca_data.get("status") == "success":
-            for row in ca_data.get("voters", []):
-                if row.get("status") == "registered":
-                    db.execute(
-                        "UPDATE voter_roster SET ca_status = 'registered' WHERE voter_id = ? AND ca_status != 'registered'",
-                        (row["voter_id"],),
-                    )
-    except Exception:
-        pass
 
     # 查詢選舉狀態（供 UI 顯示）
     election_state = 'standby'
@@ -741,6 +762,23 @@ def dashboard():
         stats=dict(total=total, pending=pending, registered=registered, distributed=distributed),
         election_state=election_state,
         election_deadline_str=election_deadline_str,
+    )
+
+
+@app.route('/qr/<voter_id>')
+def voter_qr(voter_id: str):
+    """回傳單一選民的報到 QR（SVG），供儀表板點開時才載入。
+
+    <3 v4.0：只有還沒完成 CA 註冊的選民，QR 裡的 OTP 才還能用；已註冊的
+    話 OTP 已經永久失效，回 404。QR 內含明文 OTP，禁止瀏覽器快取。
+    """
+    row = db.fetchone("SELECT voter_id, otp, ca_status FROM voter_roster WHERE voter_id = ?", (voter_id,))
+    if not row or row['ca_status'] == 'registered':
+        return jsonify({"status": "error", "message": "查無此選民或已完成認證"}), 404
+    return Response(
+        _build_register_qr_svg(row['voter_id'], row['otp']),
+        mimetype='image/svg+xml',
+        headers={"Cache-Control": "no-store"},
     )
 
 
