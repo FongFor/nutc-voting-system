@@ -25,6 +25,7 @@ import json
 import secrets
 import hashlib
 import datetime
+import threading
 import sqlite3  # <3 新增：用於捕捉 token_hash UNIQUE 約束衝突，做原子化去重
 
 # 確保 shared/ 可被 import
@@ -127,6 +128,9 @@ db.execute("""
         value       TEXT NOT NULL
     )
 """)
+# CC 是單一程序，啟動時殘留的 'running' 一定是上次開票中途當掉留下的，
+# 不清掉的話之後的開票請求會永遠被判定為「進行中」。
+db.execute("DELETE FROM tally_state WHERE key IN ('running', 'progress')")
 db.execute("""
     CREATE TABLE IF NOT EXISTS used_token_hashes (
         id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -430,42 +434,20 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
         <div class="px-5 py-4 border-b border-gray-100 dark:border-gray-800/60 bg-gray-50/50 dark:bg-[#0a0a0a]/50">
           <h2 class="font-medium text-gray-800 dark:text-gray-200 text-sm flex items-center gap-2">
             <svg class="w-4 h-4 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
-            合法選票記錄
+            選票驗證統計
           </h2>
         </div>
-        {% if valid_votes %}
-        <div class="overflow-x-auto flex-1">
-          <table class="w-full text-sm">
-            <thead class="bg-gray-50 dark:bg-[#0a0a0a] text-gray-500 dark:text-gray-500 text-[11px] uppercase tracking-wider">
-              <tr>
-                <th class="px-5 py-3 text-left font-medium">#</th>
-                <th class="px-5 py-3 text-left font-medium">內容</th>
-                <th class="px-5 py-3 text-left font-medium">m_hex (前 20)</th>
-                <th class="px-5 py-3 text-left font-medium">驗證時間</th>
-              </tr>
-            </thead>
-            <tbody class="divide-y divide-gray-100 dark:divide-gray-800/60">
-              {% for v in valid_votes %}
-              <tr class="hover:bg-gray-50 dark:hover:bg-[#1a1a1a] transition-colors">
-                <td class="px-5 py-3.5 text-gray-400 dark:text-gray-600 text-[11px]">{{ loop.index }}</td>
-                <td class="px-5 py-3.5 font-mono text-gray-800 dark:text-gray-300 font-medium text-xs">{{ v.vote }}</td>
-                <td class="px-5 py-3.5 font-mono text-gray-500 dark:text-gray-500 text-[11px]">{{ v.m_hex[:20] }}...</td>
-                <td class="px-5 py-3.5">
-                  <p class="text-gray-600 dark:text-gray-400 text-[11px] font-mono">{{ v.verified_at | ts_to_str }}</p>
-                  <p class="text-gray-400 dark:text-gray-600 text-[10px]">{{ v.verified_at }}</p>
-                </td>
-              </tr>
-              {% endfor %}
-            </tbody>
-          </table>
+        {# 刻意不逐張列出「候選人 + m_hex」：m_hex 印在選民的投票回執上，列出對應
+           關係等於讓看得到這頁、又知道某人 m_hex 的人查出他投給誰；按收件順序
+           排列也會抵銷批次打亂與洗牌的效果。各候選人得票數見上方開票結果。 #}
+        <div class="px-5 py-5 grid grid-cols-2 gap-3 text-sm">
+          {% for key, label in [('verified', '合法'), ('invalid', '無效'), ('m_duplicate', '重複'), ('pending', '待開票')] %}
+          <div class="rounded-lg border border-gray-200 dark:border-gray-800 bg-gray-50/60 dark:bg-[#0a0a0a] px-4 py-3">
+            <p class="text-[11px] text-gray-500 dark:text-gray-500">{{ label }}</p>
+            <p class="font-mono text-lg text-gray-800 dark:text-gray-200">{{ envelope_status_counts.get(key, 0) }}</p>
+          </div>
+          {% endfor %}
         </div>
-        {% else %}
-        <div class="px-5 py-16 text-center text-gray-500 dark:text-gray-600 flex-1 flex flex-col justify-center">
-          <svg class="w-10 h-10 mx-auto text-gray-300 dark:text-gray-700 mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path></svg>
-          <p class="text-sm">尚無合法選票</p>
-          <p class="text-xs mt-1 text-gray-400">（需先觸發開票）</p>
-        </div>
-        {% endif %}
       </div>
 
       <div class="bg-white/70 dark:bg-cardblack/80 backdrop-blur-lg rounded-xl border border-gray-200 dark:border-gray-800 shadow-md overflow-hidden flex flex-col">
@@ -534,7 +516,9 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
 @app.route('/')
 def dashboard():
     envelopes  = db.fetchall("SELECT id, c_data, status, received_at FROM envelopes ORDER BY id DESC")
-    valid_votes = db.fetchall("SELECT id, vote, m_hex, verified_at FROM valid_votes ORDER BY id")
+    envelope_status_counts = {
+        r['status']: r['n'] for r in db.fetchall("SELECT status, COUNT(*) AS n FROM envelopes GROUP BY status")
+    }
     envelope_count = db.count("envelopes")
     valid_count    = db.count("valid_votes")
 
@@ -566,7 +550,7 @@ def dashboard():
     return render_template_string(
         _DASHBOARD_HTML,
         envelopes=envelopes,
-        valid_votes=valid_votes,
+        envelope_status_counts=envelope_status_counts,
         envelope_count=envelope_count,
         valid_count=valid_count,
         tally_done=tally_done,
@@ -588,7 +572,9 @@ def ui_tally():
     """
     if not is_internal_ip(request.remote_addr):
         return jsonify(admin_auth_error()), 403  # <3
-    _do_tally()
+    if _get_state('done') != '1' and _claim_tally():
+        db.execute("DELETE FROM tally_state WHERE key IN ('last_result', 'progress')")
+        threading.Thread(target=_tally_job, daemon=True).start()
     return redirect('/')
 
 
@@ -729,11 +715,65 @@ def api_tally():
     """
     if not is_internal_ip(request.remote_addr) or not check_admin_token():
         return jsonify(admin_auth_error()), 403  # <3
-    result = _do_tally()
+    if not _claim_tally():
+        return jsonify({"status": "running", "message": "開票正在進行中"}), 409
+    try:
+        result = _run_tally_and_record()
+    finally:
+        _release_tally()
     if result.get('status') == 'success':
         return jsonify(result), 200
     else:
         return jsonify(result), 400
+
+
+@app.route('/api/tally/start', methods=['POST'])
+def api_tally_start():
+    """
+    [POST] 在背景開始開票，立即回傳 202，進度用 /api/tally/status 查詢。
+
+    同步的 /api/tally 要等整個開票（解密每一張票、建 Merkle Tree、推送 BB）
+    做完才回應，票數一多就會超過呼叫端（Admin）的逾時時間——CC 其實還在
+    繼續開票，但 Admin 畫面顯示錯誤，容易讓人誤以為開票失敗。Admin 改呼叫
+    這支，再輪詢進度。存取控制同 /api/tally。
+    """
+    if not is_internal_ip(request.remote_addr) or not check_admin_token():
+        return jsonify(admin_auth_error()), 403
+    if _get_state('done') == '1':
+        return jsonify({"status": "already_done", "message": "已完成開票"}), 200
+    if not _claim_tally():
+        return jsonify({"status": "running", "message": "開票正在進行中"}), 202
+    db.execute("DELETE FROM tally_state WHERE key IN ('last_result', 'progress')")
+    threading.Thread(target=_tally_job, daemon=True).start()
+    return jsonify({"status": "started", "message": "已開始開票"}), 202
+
+
+@app.route('/api/tally/status', methods=['GET'])
+def api_tally_status():
+    """[GET] 查詢開票狀態：idle / running / done / error，附進度與結果。"""
+    if not is_internal_ip(request.remote_addr) or not check_admin_token():
+        return jsonify(admin_auth_error()), 403
+    # 順序很重要：先看 'running'，再讀結果。背景執行緒是「先寫 last_result、
+    # 再釋放 running」，所以一旦看到 running 已經不在，結果一定已經寫好；
+    # 反過來先讀結果的話，執行緒剛好在兩次讀取之間完成時，會回報「已完成」
+    # 卻沒有結果。
+    running  = _get_state('running')
+    progress = _get_state('progress')
+    last     = _get_state('last_result')
+    if running:
+        state = 'running'
+    elif _get_state('done') == '1':
+        state = 'done'
+    elif last:
+        state = 'error'
+    else:
+        state = 'idle'
+    return jsonify({
+        "status":   "success",
+        "state":    state,
+        "progress": json.loads(progress) if progress else None,
+        "result":   json.loads(last) if last else None,
+    }), 200
 
 
 @app.route('/api/admin/reset_tally', methods=['POST'])
@@ -834,6 +874,41 @@ def _set_state(key: str, value: str):
         "INSERT OR REPLACE INTO tally_state (key, value) VALUES (?, ?)",
         (key, value),
     )
+
+
+# ── 開票互斥鎖 ────────────────────────────────────────────────
+# 原本只靠 _do_tally() 開頭檢查 done=='1'，兩個開票請求同時進來時都會
+# 通過檢查、一起開票。現在用 tally_state 的 PRIMARY KEY 做原子搶佔：
+# INSERT 'running' 成功的才能開票，其他請求直接回「開票進行中」。
+def _claim_tally() -> bool:
+    try:
+        db.execute("INSERT INTO tally_state (key, value) VALUES ('running', ?)", (str(int(time.time())),))
+        return True
+    except sqlite3.IntegrityError:
+        return False
+
+
+def _release_tally():
+    db.execute("DELETE FROM tally_state WHERE key = 'running'")
+
+
+def _run_tally_and_record() -> dict:
+    """執行開票並把結果存進 tally_state，供 /api/tally/status 查詢。
+    呼叫前必須已經 _claim_tally()。"""
+    try:
+        result = _do_tally()
+    except Exception as e:
+        result = {"status": "error", "message": f"開票過程發生未預期錯誤：{e}"}
+    _set_state('last_result', json.dumps(result, ensure_ascii=False))
+    return result
+
+
+def _tally_job():
+    """背景開票執行緒（/api/tally/start、/ui/tally）。"""
+    try:
+        _run_tally_and_record()
+    finally:
+        _release_tally()
 
 
 def _do_tally() -> dict:
@@ -953,13 +1028,27 @@ def _do_tally() -> dict:
                 "message": "TA 釋放的私鑰與其認證公鑰不匹配，拒絕使用（可能遭偽冒攻擊）"}  # <3
 
     # 步驟 4：解密驗證所有暫存信封
+    # 走到這裡代表本輪還沒開票完成（done != '1'，且已取得開票鎖）。valid_votes
+    # 若有資料，一定是上次開票中途失敗留下的：全部清掉、信封退回 pending
+    # 重新驗證。這樣 valid_votes 只會有「這次」驗證通過的票，寫入後才能逐筆
+    # 比對（見下方讀回比對）。信封本身才是資料來源，重新驗證不會有損失。
+    with db.transaction() as conn:
+        conn.execute("DELETE FROM valid_votes")
+        conn.execute("UPDATE envelopes SET status = 'pending' WHERE status IN ('verified', 'invalid', 'm_duplicate')")
+
     pending_envelopes = db.fetchall(
         "SELECT id, c_data, iv, tag, aad, k FROM envelopes WHERE status = 'pending'"
     )
     now = int(time.time())
-    valid_count = 0
+    total = len(pending_envelopes)
+    _set_state('progress', json.dumps({"processed": 0, "total": total}))
 
-    for env in pending_envelopes:
+    # 解密（CPU 密集）與寫入分開：先全部解密完，再在同一個交易裡一次寫完。
+    # 原本每張票各做 2 次獨立交易（INSERT valid_votes + UPDATE envelopes），
+    # 每次都要等 commit 落盤，票數上千時光是資料庫就要好幾分鐘。整批寫入
+    # 也讓開票變成全有或全無：中途出錯不會留下寫了一半的結果，可以重跑。
+    outcomes = []  # (envelope id, 解密結果或 None, 錯誤訊息)
+    for i, env in enumerate(pending_envelopes, 1):
         pending = {
             'c_data': env['c_data'],
             'iv':     env['iv'],
@@ -968,44 +1057,66 @@ def _do_tally() -> dict:
             'k':      env['k'],
         }
         try:
-            result = open_envelope_layer2(pending, ta_private_key, tpa_e, tpa_n)
+            outcomes.append((env['id'], open_envelope_layer2(pending, ta_private_key, tpa_e, tpa_n), None))
+        except Exception as exc:
+            outcomes.append((env['id'], None, str(exc)))
+        if i % 100 == 0 or i == total:
+            _set_state('progress', json.dumps({"processed": i, "total": total}))
+
+    # 這次驗證通過的選票，留在記憶體裡作為計票與簽章的唯一依據
+    verified = []          # [{"id", "vote", "m_hex"}]，依寫入順序（= id 遞增）
+    invalid_reasons = {}   # 錯誤訊息 → 張數
+    duplicate_count = 0
+    with db.transaction() as conn:
+        for env_id, result, error in outcomes:
+            if result is None:
+                conn.execute("UPDATE envelopes SET status = 'invalid' WHERE id = ?", (env_id,))
+                invalid_reasons[error] = invalid_reasons.get(error, 0) + 1
+                continue
 
             # v2.0 修正：原本沒有做 m_hex（選票流水號雜湊）去重，重放同一張
             # 已簽章選票的最後一道防線是空的。現在靠 valid_votes.m_hex 的
             # UNIQUE 索引在資料庫層原子化擋下重複，用 IntegrityError 判斷。 <3
             try:
-                db.execute(
+                cur = conn.execute(
                     "INSERT INTO valid_votes (vote, m_hex, verified_at) VALUES (?, ?, ?)",
                     (result['vote'], result['m_hex'], now),
                 )
             except sqlite3.IntegrityError:
-                db.execute(
-                    "UPDATE envelopes SET status = 'm_duplicate' WHERE id = ?",
-                    (env['id'],),
-                )
-                print(f"[CC] 選票重複（m_hex 已存在，視為非法）：{result['m_hex'][:16]}...")
+                conn.execute("UPDATE envelopes SET status = 'm_duplicate' WHERE id = ?", (env_id,))
+                duplicate_count += 1
                 continue  # <3
 
-            db.execute(
-                "UPDATE envelopes SET status = 'verified' WHERE id = ?",
-                (env['id'],),
-            )
-            valid_count += 1
-            # 日誌使用人類可讀格式
-            print(f"[CC] 選票合法：{result['vote']}（Unix ts：{now}  →  {ts_to_human(now)}）")
-        except Exception as exc:
-            db.execute(
-                "UPDATE envelopes SET status = 'invalid' WHERE id = ?",
-                (env['id'],),
-            )
-            print(f"[CC] 選票無效：{exc}")
+            conn.execute("UPDATE envelopes SET status = 'verified' WHERE id = ?", (env_id,))
+            verified.append({"id": cur.lastrowid, "vote": result['vote'], "m_hex": result['m_hex']})
+    valid_count = len(verified)
+
+    # 日誌只記統計數字。以前每張合法票都印一行「選票合法：<候選人>」，順序就是
+    # CC 收到信封的順序——voter_client 的批次打亂與開票後的洗牌，都是為了切斷
+    # 「提交順序 ↔ 選票內容」的關聯，逐張依序記錄候選人等於把這層保護寫進日誌。
+    print(f"[CC] 解密驗證完成：共 {total} 封，合法 {valid_count}，無效 {sum(invalid_reasons.values())}，重複 {duplicate_count}")
+    for reason, count in sorted(invalid_reasons.items(), key=lambda kv: -kv[1]):
+        print(f"[CC]   無效原因：{reason} × {count}")
+
+    # 寫入後立刻讀回，逐筆比對資料庫與這次驗證的結果。
+    # 以前計票、洗牌、建 Merkle Tree 都是「重新從資料庫讀 valid_votes」，只要
+    # 有人能改 CC 的資料庫檔案，在寫入與讀取之間塞一筆沒經過驗證的票，就會
+    # 被計入並由 CC 正式簽章。現在計票與簽章只用記憶體裡的 verified；這裡的
+    # 比對用來偵測竄改——不一致就中止開票，不簽章、不公告。
+    stored = db.fetchall("SELECT id, vote, m_hex FROM valid_votes ORDER BY id")
+    if [(r['id'], r['vote'], r['m_hex']) for r in stored] != [(v['id'], v['vote'], v['m_hex']) for v in verified]:
+        print(f"[CC] 嚴重警告：valid_votes 與本次驗證結果不一致（資料庫 {len(stored)} 筆、驗證通過 {valid_count} 筆），已中止開票")
+        return {
+            "status":  "error",
+            "code":    "VALID_VOTES_MISMATCH",
+            "message": "資料庫中的有效選票與本次驗證結果不一致，可能遭竄改，已中止開票（未簽章、未公告）",
+        }
 
     # 步驟 5：Secure Shuffle + 建構 Merkle Tree
     # 將合法選票以密碼學安全隨機順序洗牌，斷絕「提交順序 → 選民」關聯
-    valid_votes_raw = db.fetchall("SELECT id, vote, m_hex FROM valid_votes ORDER BY id")
-
-    # Fisher-Yates shuffle（使用 secrets CSPRNG）
-    valid_votes = list(valid_votes_raw)
+    # Fisher-Yates shuffle（使用 secrets CSPRNG）——對象是記憶體裡驗證通過的清單，
+    # 不重新讀資料庫（理由見上方讀回比對）
+    valid_votes = list(verified)
     for i in range(len(valid_votes) - 1, 0, -1):
         j = secrets.randbelow(i + 1)
         valid_votes[i], valid_votes[j] = valid_votes[j], valid_votes[i]
@@ -1015,8 +1126,10 @@ def _do_tally() -> dict:
     # /api/merkle_proof/<index> 又是用未洗牌的 id 順序重建 Merkle Tree，
     # 算出來的 root 會跟這裡簽章、推送給 BB 的 root_official 對不上，
     # 選民拿 CC 給的 proof 去驗證會失敗。現在把洗牌後的順序寫回 shuffle_seq。 <3
-    for seq, v in enumerate(valid_votes):
-        db.execute("UPDATE valid_votes SET shuffle_seq = ? WHERE id = ?", (seq, v['id']))  # <3
+    db.executemany(
+        "UPDATE valid_votes SET shuffle_seq = ? WHERE id = ?",
+        [(seq, v['id']) for seq, v in enumerate(valid_votes)],
+    )  # <3 一次交易寫完，不再逐筆 commit
 
     m_hex_list = [v['m_hex'] for v in valid_votes]
 

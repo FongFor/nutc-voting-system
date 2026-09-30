@@ -528,7 +528,7 @@ async function startElection() {
 async function triggerTally() {
   if (!confirm('確定要觸發開票？\\n\\nCC 只有在投票確實已截止時才會真的執行開票，若尚未截止會被拒絕，可放心先試。')) return;
   const msg = document.getElementById('electionMsg');
-  showMsg(msg, '正在向 CC 發送開票指令（可能需要幾秒到數十秒）...', 'info');
+  showMsg(msg, '正在向 CC 發送開票指令...', 'info');
   try {
     const resp = await fetch('/api/trigger_tally', {
       method: 'POST',
@@ -536,16 +536,44 @@ async function triggerTally() {
       body: JSON.stringify({}),
     });
     const data = await resp.json();
-    if (data.status === 'success') {
-      const bbOk = data.bb_published ? '[成功]' : `[警告：${data.bb_publish_warning || '未確認公告成功'}]`;
-      showMsg(msg, `[成功] 開票完成！合法選票：${data.valid_count}，Merkle Root：${(data.merkle_root||'').slice(0,20)}...，BB 公告：${bbOk}`, 'success');
-    } else if (data.status === 'already_done') {
+    if (data.status === 'already_done') {
       showMsg(msg, '[資訊] 本輪已完成開票，無需重複觸發', 'warn');
+    } else if (data.status === 'started' || data.status === 'running') {
+      pollTallyStatus(msg);
     } else {
       showMsg(msg, `[錯誤] ${data.message || data.code}`, 'error');
     }
   } catch (e) {
     showMsg(msg, `[錯誤] 請求失敗：${e.message}`, 'error');
+  }
+}
+
+// 開票在 CC 背景執行，這裡每 2 秒查一次進度，直到完成或失敗
+async function pollTallyStatus(msg) {
+  while (true) {
+    await new Promise(r => setTimeout(r, 2000));
+    let data;
+    try {
+      data = await (await fetch('/api/tally_status', { cache: 'no-store' })).json();
+    } catch (e) {
+      showMsg(msg, `[警告] 暫時查不到開票進度（${e.message}），重試中...`, 'warn');
+      continue;
+    }
+    if (data.state === 'running') {
+      const p = data.progress;
+      showMsg(msg, p ? `開票中... 已解密 ${p.processed} / ${p.total} 張` : '開票中...', 'info');
+      continue;
+    }
+    const r = data.result || {};
+    if (data.state === 'done' && r.status === 'success') {
+      const bbOk = r.bb_published ? '[成功]' : `[警告：${r.bb_publish_warning || '未確認公告成功'}]`;
+      showMsg(msg, `[成功] 開票完成！合法選票：${r.valid_count}，Merkle Root：${(r.merkle_root||'').slice(0,20)}...，BB 公告：${bbOk}`, 'success');
+    } else if (data.state === 'done') {
+      showMsg(msg, '[資訊] 本輪已完成開票', 'warn');
+    } else {
+      showMsg(msg, `[錯誤] ${r.message || r.code || data.message || '開票失敗'}`, 'error');
+    }
+    return;
   }
 }
 
@@ -1025,9 +1053,23 @@ def api_trigger_tally():
     修法：比照本檔案呼叫 CA/TA 的既有模式，用 Admin 自己已經持有的
     mTLS 用戶端憑證（_ADMIN_MTLS）代為呼叫 CC/api/tally，讓瀏覽器不需要
     持有內部 PKI 憑證，一樣能透過 Admin 這個中介觸發開票。 <3
+
+    改為呼叫 CC 的 /api/tally/start 在背景開票、立即回應，前端再用
+    /api/tally_status 輪詢進度。原本同步呼叫 /api/tally 最多只等 120 秒，
+    票數上千時 CC 還在開票，Admin 卻先逾時顯示錯誤。
     """
     try:
-        resp = http_requests.post(f"{CC_URL}/api/tally", json={}, headers=_admin_headers(), timeout=120, **_ADMIN_MTLS)
+        resp = http_requests.post(f"{CC_URL}/api/tally/start", json={}, headers=_admin_headers(), timeout=15, **_ADMIN_MTLS)
+        return jsonify(resp.json()), resp.status_code
+    except Exception as e:
+        return jsonify({"status": "error", "message": f"無法連接 CC：{e}"}), 502
+
+
+@app.route('/api/tally_status', methods=['GET'])
+def api_tally_status():
+    """[GET] 代為查詢 CC 的開票進度（瀏覽器無法直接連 CC，理由同上）。"""
+    try:
+        resp = http_requests.get(f"{CC_URL}/api/tally/status", headers=_admin_headers(), timeout=10, **_ADMIN_MTLS)
         return jsonify(resp.json()), resp.status_code
     except Exception as e:
         return jsonify({"status": "error", "message": f"無法連接 CC：{e}"}), 502

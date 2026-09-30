@@ -52,6 +52,17 @@ class Database:
             cursor = conn.execute(sql, params)
             return cursor.rowcount  # <3
 
+    @contextmanager
+    def transaction(self):
+        """在同一個交易裡執行多個寫入，離開時一次 commit、出錯整批 rollback。
+
+        execute() 每次呼叫都是獨立的連線＋交易＋commit，逐筆大量寫入時
+        光等 commit 落盤就很慢；需要一次寫很多筆時改用這個。
+        單一語句的 IntegrityError 可以在區塊內自行捕捉，不會中斷整個交易。
+        """
+        with self._get_conn() as conn:
+            yield conn
+
     def executemany(self, sql: str, params_list: list) -> None:
         """批次執行 DML"""
         with self._get_conn() as conn:
