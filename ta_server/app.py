@@ -35,6 +35,7 @@ from shared.key_manager import (
 from shared.tls_utils import load_or_request_tls_certificate, build_mtls_server_context  # <3 v4.0：mTLS
 from shared.format_utils import int_to_hex, ts_to_human
 from shared.db_utils import Database
+from shared.ui_style import UI_HEAD, THEME_TOGGLE
 from shared.config_loader import make_reload_endpoint, get_vote_duration, get_delta_t, get_service_registration_token
 from shared.admin_auth import check_admin_token, admin_auth_error  # <3 v4.0：保護 start_election/reset_election
 from shared.crypto_utils import verify_signature  # <3 v4.0：release_key 簽章驗證改用共用函式
@@ -149,239 +150,95 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
 <html lang="zh-TW">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>TA 時間授權中心</title>
-  <script src="https://cdn.tailwindcss.com"></script>
-  <script>
-    tailwind.config = {
-      darkMode: 'class',
-      theme: {
-        extend: {
-          colors: {
-            msblue: '#0078D4',
-            msblueHover: '#0060A8',
-            deepblack: '#050505',
-            cardblack: '#111111'
-          }
-        }
-      }
-    }
-  </script>
-  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet">
-  <style>
-    body { font-family: 'Noto Sans', sans-serif; }
-  </style>
-  <script>
-    if (localStorage.getItem('theme') === 'dark' || (!('theme' in localStorage) && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
-      document.documentElement.classList.add('dark');
-    } else {
-      document.documentElement.classList.remove('dark');
-    }
-    function toggleTheme() {
-      if (document.documentElement.classList.contains('dark')) {
-        document.documentElement.classList.remove('dark');
-        localStorage.setItem('theme', 'light');
-      } else {
-        document.documentElement.classList.add('dark');
-        localStorage.setItem('theme', 'dark');
-      }
-    }
-  </script>
+  <title>時間授權中心｜NUTC 線上投票</title>""" + UI_HEAD + """
 </head>
-<body class="bg-gray-50 dark:bg-deepblack text-gray-800 dark:text-gray-100 min-h-screen transition-colors duration-300">
-  <div class="max-w-4xl mx-auto px-4 py-10">
+<body>
+<header class="topbar">
+  <div class="container-wide topbar-inner">
+    <a class="brand" href="/">
+      <span class="brand-name">NUTC 線上投票</span>
+      <span class="brand-sub">時間授權中心（TA）</span>
+    </a>
+    <div class="topbar-actions">
+      {% if election_state == 'standby' %}<span class="badge badge-warn">待命中</span>{% elif is_expired %}<span class="badge badge-err">投票已截止</span>{% else %}<span class="badge badge-ok">投票進行中</span>{% endif %}
+      """ + THEME_TOGGLE + """
+    </div>
+  </div>
+</header>
 
-    <div class="flex items-center gap-4 mb-8">
-      <div class="w-12 h-12 rounded-xl bg-white/70 dark:bg-cardblack/80 backdrop-blur-md shadow-sm flex items-center justify-center border border-gray-200 dark:border-gray-800">
-        <svg class="w-6 h-6 text-msblue" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
-      </div>
-      <div>
-        <h1 class="text-2xl font-semibold text-gray-900 dark:text-white">時間授權中心 (TA)</h1>
-        <p class="text-gray-500 dark:text-gray-400 text-sm">NUTC Voting System · Time Authority</p>
-      </div>
-      
-      <div class="ml-auto flex items-center gap-3">
-        <span id="status-badge" class="px-3 py-1.5 rounded-full text-[11px] font-medium border backdrop-blur-sm shadow-sm flex items-center
-          {% if election_state == 'standby' %}bg-amber-50 dark:bg-amber-900/20 text-amber-700 dark:text-amber-400 border-amber-200 dark:border-amber-800/50{% elif is_expired %}bg-red-50 dark:bg-red-900/20 text-red-700 dark:text-red-400 border-red-200 dark:border-red-800/50{% else %}bg-green-50 dark:bg-green-900/20 text-green-700 dark:text-green-400 border-green-200 dark:border-green-800/50{% endif %}">
-          <span class="inline-block w-1.5 h-1.5 rounded-full mr-1.5 {% if election_state == 'standby' %}bg-amber-400 shadow-[0_0_4px_#f59e0b]{% elif is_expired %}bg-red-500 shadow-[0_0_4px_#ef4444]{% else %}bg-green-500 shadow-[0_0_4px_#22c55e]{% endif %}"></span>
-          {% if election_state == 'standby' %}待命中{% elif is_expired %}投票已截止{% else %}投票進行中{% endif %}
-        </span>
-        
-        <button onclick="toggleTheme()" class="p-2 rounded-lg bg-white/70 dark:bg-cardblack/80 border border-gray-200 dark:border-gray-800 shadow-sm hover:bg-gray-100 dark:hover:bg-gray-900 transition-colors text-gray-600 dark:text-gray-300 focus:outline-none focus:ring-2 focus:ring-msblue/50">
-          <svg class="w-4 h-4 hidden dark:block" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z"></path></svg>
-          <svg class="w-4 h-4 block dark:hidden" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z"></path></svg>
-        </button>
-      </div>
+<main>
+  <div class="container-wide stack-lg">
+    <div class="stack-sm">
+      <h1>時間授權中心（TA）</h1>
+      <p class="lead">保管開票私鑰（SK_TA），投票截止後才會釋放給計票中心。</p>
     </div>
 
-    <div class="bg-white/70 dark:bg-cardblack/80 backdrop-blur-lg rounded-2xl border border-gray-200 dark:border-gray-800 shadow-md p-8 mb-8 text-center relative overflow-hidden">
+    <section class="card stack text-center" aria-live="polite">
       {% if election_state == 'standby' %}
-      <div class="absolute top-0 left-0 w-full h-1 bg-amber-400"></div>
-      <div class="w-16 h-16 bg-amber-50 dark:bg-amber-900/20 rounded-full flex items-center justify-center mx-auto mb-4 border border-amber-100 dark:border-amber-900/50">
-        <svg class="w-8 h-8 text-amber-500 dark:text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 9v6m4-6v6m7-3a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
-      </div>
-      <p class="text-amber-600 dark:text-amber-400 text-xl font-semibold mb-2">⏸ 等待管理員啟動選舉</p>
-      <p class="text-gray-500 dark:text-gray-400 text-sm">選舉尚未啟動，所有投票業務目前凍結中</p>
-      <div class="mt-8 flex justify-center gap-4 sm:gap-6">
-        <div class="bg-gray-50/80 dark:bg-[#0a0a0a] rounded-xl p-5 w-24 border border-gray-200 dark:border-gray-800 shadow-sm"><p class="text-4xl font-light font-mono text-amber-400 dark:text-amber-500">--</p><p class="text-[11px] text-gray-500 mt-2 uppercase tracking-wider">時</p></div>
-        <div class="bg-gray-50/80 dark:bg-[#0a0a0a] rounded-xl p-5 w-24 border border-gray-200 dark:border-gray-800 shadow-sm"><p class="text-4xl font-light font-mono text-amber-400 dark:text-amber-500">--</p><p class="text-[11px] text-gray-500 mt-2 uppercase tracking-wider">分</p></div>
-        <div class="bg-gray-50/80 dark:bg-[#0a0a0a] rounded-xl p-5 w-24 border border-gray-200 dark:border-gray-800 shadow-sm"><p class="text-4xl font-light font-mono text-amber-400 dark:text-amber-500">--</p><p class="text-[11px] text-gray-500 mt-2 uppercase tracking-wider">秒</p></div>
-        <div class="bg-gray-50/80 dark:bg-[#0a0a0a] rounded-xl p-5 w-24 border border-gray-200 dark:border-gray-800 shadow-sm"><p class="text-4xl font-light font-mono text-amber-400 dark:text-amber-500">--</p><p class="text-[11px] text-gray-500 mt-2 uppercase tracking-wider">毫秒</p></div>
-      </div>
+      <p class="eyebrow">選舉尚未啟動</p>
+      <p class="stat-value">等待管理員啟動選舉</p>
+      <p class="small muted">所有投票業務目前暫停。</p>
       {% elif is_expired %}
-      <div class="absolute top-0 left-0 w-full h-1 bg-red-500"></div>
-      <div class="w-16 h-16 bg-red-50 dark:bg-red-900/20 rounded-full flex items-center justify-center mx-auto mb-4 border border-red-100 dark:border-red-900/50">
-        <svg class="w-8 h-8 text-red-500 dark:text-red-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"></path></svg>
+      <p class="eyebrow">投票已截止</p>
+      <p class="stat-value">00:00:00</p>
+      <p class="small muted">開票私鑰已解鎖，可釋放給計票中心（CC）開票。</p>
+      {% else %}
+      <p class="eyebrow">距離投票截止</p>
+      <p class="stat-value mono" style="font-size:2.4rem" id="countdown">
+        <span id="cd-hours">--</span>:<span id="cd-minutes">--</span>:<span id="cd-seconds">--</span>
+      </p>
+      <p class="small muted">截止時間 {{ deadline_str }}</p>
+      {% endif %}
+    </section>
+
+    <div class="grid grid-2">
+      <div class="stat"><div class="stat-label">開票私鑰（SK_TA）</div>
+        <div class="stat-value" style="font-size:1.15rem">
+          {% if election_state == 'standby' %}<span class="muted">待命中</span>{% elif is_expired %}<span class="text-ok">可釋放</span>{% else %}<span class="text-warn">鎖定中</span>{% endif %}
+        </div>
       </div>
-      <p class="text-red-600 dark:text-red-400 text-xl font-semibold mb-2">投票已截止</p>
-      <p class="text-gray-500 dark:text-gray-400 text-sm">SK_TA 私鑰已解鎖，可釋放給計票中心（CC）進行開票</p>
-      
-      <div class="mt-8 flex justify-center gap-4 sm:gap-6">
-        <div class="bg-gray-50/80 dark:bg-[#0a0a0a] rounded-xl p-5 w-24 border border-gray-200 dark:border-gray-800 shadow-sm"><p class="text-4xl font-light font-mono text-red-500 dark:text-red-400">00</p><p class="text-[11px] text-gray-500 mt-2 uppercase tracking-wider">時</p></div>
-        <div class="bg-gray-50/80 dark:bg-[#0a0a0a] rounded-xl p-5 w-24 border border-gray-200 dark:border-gray-800 shadow-sm"><p class="text-4xl font-light font-mono text-red-500 dark:text-red-400">00</p><p class="text-[11px] text-gray-500 mt-2 uppercase tracking-wider">分</p></div>
-        <div class="bg-gray-50/80 dark:bg-[#0a0a0a] rounded-xl p-5 w-24 border border-gray-200 dark:border-gray-800 shadow-sm"><p class="text-4xl font-light font-mono text-red-500 dark:text-red-400">00</p><p class="text-[11px] text-gray-500 mt-2 uppercase tracking-wider">秒</p></div>
-        <div class="bg-gray-50/80 dark:bg-[#0a0a0a] rounded-xl p-5 w-24 border border-gray-200 dark:border-gray-800 shadow-sm"><p class="text-4xl font-light font-mono text-red-500 dark:text-red-400">00</p><p class="text-[11px] text-gray-500 mt-2 uppercase tracking-wider">毫秒</p></div>
+      <div class="stat"><div class="stat-label">釋放請求次數</div><div class="stat-value">{{ release_count }}</div></div>
+    </div>
+
+    <section class="card card-flush" aria-labelledby="relTitle">
+      <div class="card-head"><h2 id="relTitle" class="section-title">金鑰釋放紀錄</h2><span class="small muted">最新 {{ release_logs|length }} 筆</span></div>
+      {% if release_logs %}
+      <div class="table-wrap">
+        <table class="table table-stack">
+          <thead><tr><th class="num">#</th><th>結果</th><th>原因</th><th>時間</th></tr></thead>
+          <tbody>
+            {% for log in release_logs %}
+            <tr>
+              <td class="num muted hide-sm" data-label="#">{{ loop.index }}</td>
+              <td data-label="結果">{% if log.status == 'released' %}<span class="badge badge-ok">已釋放</span>{% else %}<span class="badge badge-err">拒絕</span>{% endif %}</td>
+              <td class="small" data-label="原因">{{ log.reason or '—' }}</td>
+              <td class="small muted nowrap" data-label="時間">{{ log.requested_at | ts_to_str }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
       </div>
       {% else %}
-      <div class="absolute top-0 left-0 w-full h-1 bg-msblue"></div>
-      <p class="text-gray-800 dark:text-gray-200 text-lg font-medium mb-3 flex items-center justify-center gap-2">
-        <svg class="w-5 h-5 text-msblue" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
-        距離投票截止
-      </p>
-      <div class="inline-flex items-center gap-3 bg-gray-50 dark:bg-[#0a0a0a] px-4 py-2 rounded-lg border border-gray-200 dark:border-gray-800/80 mb-2">
-        <p class="text-gray-500 dark:text-gray-400 text-[13px]">截止時間</p>
-        <div class="w-px h-3 bg-gray-300 dark:bg-gray-700"></div>
-        <p class="text-msblue dark:text-[#3399FF] font-mono text-sm font-medium">{{ deadline_str }}</p>
-      </div>
-      <p class="text-gray-400 dark:text-gray-600 text-[11px] mb-8 font-mono">Unix ts: {{ deadline_ts }}</p>
-      
-      <div class="flex justify-center gap-3 sm:gap-6" id="countdown">
-        <div class="bg-gray-50/80 dark:bg-[#0a0a0a] rounded-xl p-4 sm:p-5 w-20 sm:w-24 border border-gray-200 dark:border-gray-800 shadow-sm flex flex-col justify-center transition-all">
-          <p class="text-3xl sm:text-4xl font-light font-mono text-msblue dark:text-[#3399FF]" id="cd-hours">--</p>
-          <p class="text-[10px] sm:text-[11px] text-gray-500 mt-2 uppercase tracking-wider font-medium">時</p>
-        </div>
-        <div class="bg-gray-50/80 dark:bg-[#0a0a0a] rounded-xl p-4 sm:p-5 w-20 sm:w-24 border border-gray-200 dark:border-gray-800 shadow-sm flex flex-col justify-center transition-all">
-          <p class="text-3xl sm:text-4xl font-light font-mono text-msblue dark:text-[#3399FF]" id="cd-minutes">--</p>
-          <p class="text-[10px] sm:text-[11px] text-gray-500 mt-2 uppercase tracking-wider font-medium">分</p>
-        </div>
-        <div class="bg-gray-50/80 dark:bg-[#0a0a0a] rounded-xl p-4 sm:p-5 w-20 sm:w-24 border border-gray-200 dark:border-gray-800 shadow-sm flex flex-col justify-center transition-all">
-          <p class="text-3xl sm:text-4xl font-light font-mono text-msblue dark:text-[#3399FF]" id="cd-seconds">--</p>
-          <p class="text-[10px] sm:text-[11px] text-gray-500 mt-2 uppercase tracking-wider font-medium">秒</p>
-        </div>
-        <div class="bg-gray-50/80 dark:bg-[#0a0a0a] rounded-xl p-4 sm:p-5 w-20 sm:w-24 border border-gray-200 dark:border-gray-800 shadow-sm flex flex-col justify-center transition-all">
-          <p class="text-3xl sm:text-4xl font-light font-mono text-gray-400 dark:text-gray-500" id="cd-ms">--</p>
-          <p class="text-[10px] sm:text-[11px] text-gray-500 mt-2 uppercase tracking-wider font-medium">毫秒</p>
-        </div>
-      </div>
+      <div class="card-body muted">尚無釋放紀錄。</div>
       {% endif %}
-    </div>
-
-    <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
-      
-      <div class="md:col-span-1 space-y-6">
-        <div class="bg-white/70 dark:bg-cardblack/80 backdrop-blur-lg rounded-xl border border-gray-200 dark:border-gray-800 shadow-sm p-5 flex flex-col justify-center">
-          <p class="text-gray-500 dark:text-gray-400 text-xs font-medium uppercase tracking-wider mb-2 flex items-center gap-1.5">
-            <svg class="w-3.5 h-3.5 text-msblue" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z"></path></svg>
-            SK_TA 狀態
-          </p>
-          {% if election_state == 'standby' %}
-          <div class="flex items-center gap-2 text-amber-600 dark:text-amber-400">
-            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"></path></svg>
-            <span class="text-lg font-semibold">待命中</span>
-          </div>
-          {% elif is_expired %}
-          <div class="flex items-center gap-2 text-red-600 dark:text-red-400">
-            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 11V7a4 4 0 118 0m-4 8v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2z"></path></svg>
-            <span class="text-lg font-semibold">可釋放</span>
-          </div>
-          {% else %}
-          <div class="flex items-center gap-2 text-green-600 dark:text-green-500">
-            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"></path></svg>
-            <span class="text-lg font-semibold">鎖定中</span>
-          </div>
-          {% endif %}
-        </div>
-        
-        <div class="bg-white/70 dark:bg-cardblack/80 backdrop-blur-lg rounded-xl border border-gray-200 dark:border-gray-800 shadow-sm p-5 flex flex-col justify-center">
-          <p class="text-gray-500 dark:text-gray-400 text-xs font-medium uppercase tracking-wider mb-2 flex items-center gap-1.5">
-            <svg class="w-3.5 h-3.5 text-msblue" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 5l7 7-7 7M5 5l7 7-7 7"></path></svg>
-            釋放請求次數
-          </p>
-          <p class="text-3xl font-semibold text-gray-900 dark:text-white">{{ release_count }}</p>
-        </div>
-      </div>
-
-      <div class="md:col-span-2 bg-white/70 dark:bg-cardblack/80 backdrop-blur-lg rounded-xl border border-gray-200 dark:border-gray-800 shadow-md overflow-hidden flex flex-col">
-        <div class="px-5 py-4 border-b border-gray-100 dark:border-gray-800/60 bg-gray-50/50 dark:bg-[#0a0a0a]/50 flex items-center justify-between">
-          <h2 class="font-medium text-gray-800 dark:text-gray-200 text-sm flex items-center gap-2">
-            <svg class="w-4 h-4 text-msblue" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path></svg>
-            金鑰釋放記錄
-          </h2>
-        </div>
-        {% if release_logs %}
-        <div class="overflow-x-auto flex-1">
-          <table class="w-full text-sm">
-            <thead class="bg-gray-50 dark:bg-[#0a0a0a] text-gray-500 dark:text-gray-500 text-[11px] uppercase tracking-wider">
-              <tr>
-                <th class="px-5 py-3 text-left font-medium">#</th>
-                <th class="px-5 py-3 text-left font-medium">狀態</th>
-                <th class="px-5 py-3 text-left font-medium">原因</th>
-                <th class="px-5 py-3 text-left font-medium">時間</th>
-              </tr>
-            </thead>
-            <tbody class="divide-y divide-gray-100 dark:divide-gray-800/60">
-              {% for log in release_logs %}
-              <tr class="hover:bg-gray-50 dark:hover:bg-[#1a1a1a] transition-colors">
-                <td class="px-5 py-3.5 text-gray-400 dark:text-gray-600 text-[11px]">{{ loop.index }}</td>
-                <td class="px-5 py-3.5">
-                  {% if log.status == 'released' %}
-                  <span class="px-2 py-0.5 rounded text-[10px] font-medium bg-green-50 dark:bg-green-900/30 text-green-700 dark:text-green-400 border border-green-200 dark:border-green-800 flex inline-flex items-center gap-1"><svg class="w-2.5 h-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path></svg>已釋放</span>
-                  {% else %}
-                  <span class="px-2 py-0.5 rounded text-[10px] font-medium bg-red-50 dark:bg-red-900/30 text-red-700 dark:text-red-400 border border-red-200 dark:border-red-800">拒絕</span>
-                  {% endif %}
-                </td>
-                <td class="px-5 py-3.5 text-gray-600 dark:text-gray-400 text-xs">{{ log.reason or '—' }}</td>
-                <td class="px-5 py-3.5">
-                  <p class="text-gray-600 dark:text-gray-400 text-[11px] font-mono">{{ log.requested_at | ts_to_str }}</p>
-                  <p class="text-gray-400 dark:text-gray-600 text-[10px]">{{ log.requested_at }}</p>
-                </td>
-              </tr>
-              {% endfor %}
-            </tbody>
-          </table>
-        </div>
-        {% else %}
-        <div class="px-5 py-12 text-center text-gray-500 dark:text-gray-600 flex-1 flex flex-col justify-center">
-          <svg class="w-10 h-10 mx-auto text-gray-300 dark:text-gray-700 mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path></svg>
-          <p class="text-sm">尚無釋放記錄</p>
-        </div>
-        {% endif %}
-      </div>
-      
-    </div>
-
+    </section>
   </div>
-
-  {% if election_state == 'running' and not is_expired %}
-  <script>
-    const deadline = {{ deadline_ts }} * 1000;
-    function update() {
-      const now = Date.now();
-      const diff = Math.max(0, deadline - now);
-      if (diff === 0) { location.reload(); return; }
-      const h  = Math.floor(diff / 3600000);
-      const m  = Math.floor((diff % 3600000) / 60000);
-      const s  = Math.floor((diff % 60000) / 1000);
-      const ms = Math.floor((diff % 1000) / 10);
-      document.getElementById('cd-hours').textContent   = String(h).padStart(2,'0');
-      document.getElementById('cd-minutes').textContent = String(m).padStart(2,'0');
-      document.getElementById('cd-seconds').textContent = String(s).padStart(2,'0');
-      document.getElementById('cd-ms').textContent      = String(ms).padStart(2,'0');
-    }
-    setInterval(update, 50);
-    update();
-  </script>
-  {% endif %}
+</main>
+{% if election_state == 'running' and not is_expired %}
+<script>
+  const deadline = {{ deadline_ts }} * 1000;
+  function update() {
+    const diff = Math.max(0, deadline - Date.now());
+    if (diff === 0) { location.reload(); return; }
+    const h = Math.floor(diff / 3600000), m = Math.floor((diff % 3600000) / 60000), s = Math.floor((diff % 60000) / 1000);
+    document.getElementById('cd-hours').textContent   = String(h).padStart(2, '0');
+    document.getElementById('cd-minutes').textContent = String(m).padStart(2, '0');
+    document.getElementById('cd-seconds').textContent = String(s).padStart(2, '0');
+  }
+  setInterval(update, 1000);
+  update();
+</script>
+{% endif %}
 </body>
 </html>"""
 # ── Jinja2 自訂過濾器：Unix timestamp → 人類可讀 ──────────────

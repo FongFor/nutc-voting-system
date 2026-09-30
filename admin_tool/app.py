@@ -32,6 +32,7 @@ from flask import Flask, request, jsonify, render_template_string, Response
 import requests as http_requests
 import qrcode
 import qrcode.image.svg  # <3 v4.0：純向量、不需要 Pillow，QR 內容完全本地生成，不經過任何第三方服務
+from shared.ui_style import UI_HEAD, THEME_TOGGLE
 
 from shared.db_utils import Database
 from shared.config_loader import get_admin_api_token, get_service_registration_token  # <3 呼叫 CA/CC 的 Admin 端點需要帶 Bearer Token
@@ -153,304 +154,142 @@ def _register_to_ca(voter_id: str, otp_hash: str) -> dict:
 app = Flask(__name__)
 
 # ── HTML 模板 ──────────────────────────────────────────────
-_BASE_CSS = """
-<script src="https://cdn.tailwindcss.com"></script>
-<script>
-  tailwind.config = {
-    darkMode: 'class',
-    theme: {
-      extend: {
-        colors: {
-          msblue: '#0078D4',
-          msblueHover: '#0060A8',
-          deepblack: '#050505',
-          cardblack: '#111111'
-        }
-      }
-    }
-  }
-</script>
-<link href="https://fonts.googleapis.com/css2?family=Noto+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+_BASE_CSS = UI_HEAD + """
 <style>
-  body { font-family: 'Noto Sans', sans-serif; }
-  .mono { font-family: 'Courier New', Courier, monospace; }
-  .otp-blur { filter: blur(4px); transition: filter 0.2s; cursor: pointer; }
-  .otp-blur:hover { filter: none; }
-  .qr-thumb svg, #qrModalContent svg { width: 100%; height: 100%; display: block; }
-  @media print {
-    .no-print { display: none !important; }
-    body { background: white !important; color: black !important; }
-    .print-card { border: 1px solid #ccc !important; break-inside: avoid; }
-  }
+  /* OTP 預設模糊，滑鼠移上或點一下（取得焦點）才顯示 */
+  .otp-blur { filter: blur(5px); cursor: pointer; border-radius: 4px; }
+  .otp-blur:hover, .otp-blur:focus { filter: none; outline: none; }
+  .qr-modal { position: fixed; inset: 0; z-index: 50; display: flex; align-items: center; justify-content: center;
+              padding: 16px; background: rgba(0, 0, 0, 0.6); }
+  .qr-box { width: 100%; max-width: 320px; }
+  #qrModalContent { width: 240px; height: 240px; max-width: 100%; margin: 0 auto; background: #fff; padding: 8px; border-radius: 4px; }
+  #qrModalContent svg { width: 100%; height: 100%; display: block; }
 </style>
-<script>
-  if (localStorage.getItem('theme') === 'dark' ||
-      (!('theme' in localStorage) && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
-    document.documentElement.classList.add('dark');
-  }
-  function toggleTheme() {
-    document.documentElement.classList.toggle('dark');
-    localStorage.setItem('theme', document.documentElement.classList.contains('dark') ? 'dark' : 'light');
-  }
-</script>
 """
 
 _DASHBOARD_HTML = """<!DOCTYPE html>
 <html lang="zh-TW">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>admin</title>
+  <title>選務管理｜NUTC 線上投票</title>
   """ + _BASE_CSS + """
 </head>
-<body class="bg-gray-50 dark:bg-deepblack text-gray-800 dark:text-gray-100 min-h-screen transition-colors duration-300">
-<div class="max-w-6xl mx-auto px-4 py-10">
-
-  <!-- 頁首 -->
-  <div class="flex items-center gap-4 mb-8">
-    <div class="w-12 h-12 rounded-xl bg-white/70 dark:bg-cardblack/80 backdrop-blur-md shadow-sm flex items-center justify-center border border-gray-200 dark:border-gray-800">
-      <svg class="w-6 h-6 text-msblue" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-          d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z"/>
-      </svg>
-    </div>
-    <div>
-      <h1 class="text-2xl font-semibold text-gray-900 dark:text-white">Admin</h1>
-    </div>
-    <div class="ml-auto flex items-center gap-3">
-      <a href="/api/export" target="_blank"
-        class="no-print px-4 py-2 rounded-lg bg-green-600 hover:bg-green-700 text-sm text-white shadow-sm flex items-center gap-2 transition">
-        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/>
-        </svg>
-        匯出
-      </a>
-      <a href="/print" target="_blank"
-        class="no-print px-4 py-2 rounded-lg bg-white/70 dark:bg-cardblack/80 border border-gray-200 dark:border-gray-800 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-900 shadow-sm flex items-center gap-2 transition">
-        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 17h2a2 2 0 002-2v-4a2 2 0 00-2-2H5a2 2 0 00-2 2v4a2 2 0 002 2h2m2 4h6a2 2 0 002-2v-4a2 2 0 00-2-2H9a2 2 0 00-2 2v4a2 2 0 002 2zm8-12V5a2 2 0 00-2-2H9a2 2 0 00-2 2v4h10z"/>
-        </svg>
-        列印
-      </a>
-      <button onclick="toggleTheme()" class="p-2 rounded-lg bg-white/70 dark:bg-cardblack/80 border border-gray-200 dark:border-gray-800 shadow-sm hover:bg-gray-100 dark:hover:bg-gray-900 transition text-gray-600 dark:text-gray-300">
-        <svg class="w-4 h-4 hidden dark:block" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z"/></svg>
-        <svg class="w-4 h-4 block dark:hidden" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z"/></svg>
-      </button>
+<body>
+<header class="topbar">
+  <div class="container-wide topbar-inner">
+    <a class="brand" href="/">
+      <span class="brand-name">NUTC 線上投票</span>
+      <span class="brand-sub">選務管理</span>
+    </a>
+    <div class="topbar-actions">
+      <a class="btn btn-sm" href="/print" target="_blank" rel="noopener">列印 OTP</a>
+      <a class="btn btn-sm" href="/api/export" target="_blank" rel="noopener">匯出資料</a>
+      """ + THEME_TOGGLE + """
     </div>
   </div>
+</header>
 
+<main>
+  <div class="container-wide stack-lg">
+    <div class="grid grid-4">
+      <div class="stat"><div class="stat-label">名冊人數</div><div class="stat-value">{{ stats.total }}</div></div>
+      <div class="stat"><div class="stat-label">待綁定</div><div class="stat-value">{{ stats.pending }}</div></div>
+      <div class="stat"><div class="stat-label">已完成綁定</div><div class="stat-value">{{ stats.registered }}</div></div>
+      <div class="stat"><div class="stat-label">已派發 OTP</div><div class="stat-value">{{ stats.distributed }}</div></div>
+    </div>
 
-
-  <!-- 統計卡片 -->
-  <div class="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-8">
-    <div class="bg-white/70 dark:bg-cardblack/80 backdrop-blur-lg rounded-xl border border-gray-200 dark:border-gray-800 shadow-md p-4">
-      <p class="text-gray-500 dark:text-gray-400 text-xs font-medium uppercase tracking-wider mb-1">名冊總數</p>
-      <p class="text-3xl font-semibold text-gray-900 dark:text-white">{{ stats.total }}</p>
-    </div>
-    <div class="bg-white/70 dark:bg-cardblack/80 backdrop-blur-lg rounded-xl border border-gray-200 dark:border-gray-800 shadow-md p-4">
-      <p class="text-gray-500 dark:text-gray-400 text-xs font-medium uppercase tracking-wider mb-1">待領取</p>
-      <p class="text-3xl font-semibold text-amber-500">{{ stats.pending }}</p>
-    </div>
-    <div class="bg-white/70 dark:bg-cardblack/80 backdrop-blur-lg rounded-xl border border-gray-200 dark:border-gray-800 shadow-md p-4">
-      <p class="text-gray-500 dark:text-gray-400 text-xs font-medium uppercase tracking-wider mb-1">已完成認證</p>
-      <p class="text-3xl font-semibold text-green-500">{{ stats.registered }}</p>
-    </div>
-    <div class="bg-white/70 dark:bg-cardblack/80 backdrop-blur-lg rounded-xl border border-gray-200 dark:border-gray-800 shadow-md p-4">
-      <p class="text-gray-500 dark:text-gray-400 text-xs font-medium uppercase tracking-wider mb-1">已派發 OTP</p>
-      <p class="text-3xl font-semibold text-msblue">{{ stats.distributed }}</p>
-    </div>
-  </div>
-
-  <!-- 選舉控制 -->
-  <div class="mb-8 bg-white/70 dark:bg-cardblack/80 backdrop-blur-lg rounded-xl border border-gray-200 dark:border-gray-800 shadow-md p-6">
-    <h2 class="font-medium text-gray-800 dark:text-gray-200 mb-4 text-sm uppercase tracking-wider flex items-center gap-2">
-      <svg class="w-4 h-4 text-msblue" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/>
-      </svg>選舉控制
-    </h2>
-    <div class="flex flex-wrap items-center gap-4">
-      <div class="flex items-center gap-2">
+    <section class="card stack" aria-labelledby="electionTitle">
+      <div class="row-between">
+        <h2 id="electionTitle" class="section-title">選舉控制</h2>
         {% if election_state == 'standby' %}
-        <span class="w-2.5 h-2.5 rounded-full bg-amber-400 shrink-0"></span>
-        <span class="text-amber-700 dark:text-amber-400 font-medium text-sm">待命</span>
+        <span class="badge">待命中</span>
         {% else %}
-        <span class="w-2.5 h-2.5 rounded-full bg-green-500 shrink-0 shadow-[0_0_6px_#22c55e]"></span>
-        <span class="text-green-700 dark:text-green-400 font-medium text-sm">進行中</span>
-        {% if election_deadline_str %}
-        <span class="text-gray-500 dark:text-gray-400 text-xs ml-1">（截止：{{ election_deadline_str }}）</span>
-        {% endif %}
+        <span class="badge badge-ok">投票進行中{% if election_deadline_str %}・截止 {{ election_deadline_str }}{% endif %}</span>
         {% endif %}
       </div>
-      <div class="ml-auto flex gap-3">
+      <div class="row">
         {% if election_state == 'standby' %}
-        <button onclick="newRound()"
-          class="px-4 py-2.5 bg-white dark:bg-cardblack hover:bg-red-50 dark:hover:bg-red-900/20 border border-gray-300 dark:border-gray-700 hover:border-red-300 dark:hover:border-red-700 rounded-lg text-red-600 dark:text-red-400 font-medium text-sm transition shadow-sm flex items-center gap-2">
-          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
-          </svg>
-          重設名單
-        </button>
-        <button onclick="startElection()"
-          class="px-5 py-2.5 bg-msblue hover:bg-msblueHover rounded-lg text-white font-medium text-sm transition shadow-md flex items-center gap-2 focus:outline-none focus:ring-2 focus:ring-msblue/50">
-          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z"/>
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
-          </svg>
-          啟動
-        </button>
+        <button type="button" class="btn btn-primary" onclick="startElection()">啟動選舉</button>
+        <button type="button" class="btn btn-danger" onclick="newRound()">重設名單</button>
         {% else %}
-        <button onclick="triggerTally()"
-          class="ml-auto px-5 py-2.5 bg-msblue hover:bg-msblueHover rounded-lg text-white font-medium text-sm transition shadow-md flex items-center gap-2 focus:outline-none focus:ring-2 focus:ring-msblue/50">
-          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 15l-2 5L9 9l11 4-5 2zm0 0l5 5M7.188 2.239l.777 2.897M5.136 7.965l-2.898-.777M13.95 4.05l-2.122 2.122m-5.657 5.656l-2.12 2.122"/>
-          </svg>
-          觸發開票
-        </button>
-        <button onclick="newRound()"
-          class="px-5 py-2.5 bg-red-600 hover:bg-red-700 rounded-lg text-white font-medium text-sm transition shadow-md flex items-center gap-2 focus:outline-none focus:ring-2 focus:ring-red-500/50">
-          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
-          </svg>
-          結束本輪 · 重置新一輪
-        </button>
+        <button type="button" class="btn btn-primary" onclick="triggerTally()">開票</button>
+        <button type="button" class="btn btn-danger" onclick="newRound()">結束本輪並重置</button>
         {% endif %}
       </div>
+      <div id="electionMsg" class="alert hidden" role="status" aria-live="polite"></div>
+    </section>
+
+    <div class="grid grid-2">
+      <section class="card stack" aria-labelledby="addTitle">
+        <h2 id="addTitle" class="section-title">新增選民</h2>
+        <div class="field">
+          <label for="singleVoterId">學號</label>
+          <input id="singleVoterId" class="input mono" type="text" placeholder="例如 S11200001" autocomplete="off" spellcheck="false">
+        </div>
+        <button type="button" class="btn btn-primary btn-block" onclick="addSingleVoter()">產生 OTP 並登錄至 CA</button>
+        <div id="singleMsg" class="alert hidden" role="status" aria-live="polite"></div>
+      </section>
+
+      <section class="card stack" aria-labelledby="batchTitle">
+        <h2 id="batchTitle" class="section-title">批次匯入</h2>
+        <div class="field">
+          <label for="batchIds">學號清單</label>
+          <textarea id="batchIds" class="input mono" rows="5" placeholder="每行一個學號，或以逗號分隔" spellcheck="false"></textarea>
+        </div>
+        <button type="button" class="btn btn-primary btn-block" onclick="addBatch()">批次產生 OTP 並登錄至 CA</button>
+        <div id="batchMsg" class="alert hidden" role="status" aria-live="polite"></div>
+      </section>
     </div>
-    <div id="electionMsg" class="mt-3 text-sm hidden"></div>
-  </div>
 
-  <div class="grid grid-cols-1 lg:grid-cols-3 gap-8 mb-8">
-
-    <!-- 新增單一 -->
-    <div class="bg-white/70 dark:bg-cardblack/80 backdrop-blur-lg rounded-xl border border-gray-200 dark:border-gray-800 shadow-md p-6">
-      <h2 class="font-medium text-gray-800 dark:text-gray-200 mb-4 text-sm uppercase tracking-wider flex items-center gap-2">
-        <svg class="w-4 h-4 text-msblue" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6"/>
-        </svg>新增
-      </h2>
-      <div class="space-y-3">
-        <input type="text" id="singleVoterId" placeholder="學號 / VOTER_ID"
-          class="w-full px-4 py-2.5 rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-[#1a1a1a] text-sm text-gray-800 dark:text-gray-200 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-msblue/50 focus:border-msblue transition font-mono">
-        <button onclick="addSingleVoter()"
-          class="w-full py-2.5 bg-msblue hover:bg-msblueHover rounded-lg text-white font-medium text-sm transition shadow-md flex items-center justify-center gap-2">
-          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z"/>
-          </svg>
-          生成 OTP 並註冊至 CA
-        </button>
+    <section class="card card-flush" aria-labelledby="rosterTitle">
+      <div class="card-head">
+        <h2 id="rosterTitle" class="section-title">選民名冊</h2>
+        <span class="small muted">OTP 預設遮蔽，滑鼠移上或點一下即可顯示</span>
       </div>
-      <div id="singleMsg" class="mt-3 text-sm hidden"></div>
-    </div>
-
-    <!-- 批次新增 -->
-    <div class="lg:col-span-2 bg-white/70 dark:bg-cardblack/80 backdrop-blur-lg rounded-xl border border-gray-200 dark:border-gray-800 shadow-md p-6">
-      <h2 class="font-medium text-gray-800 dark:text-gray-200 mb-4 text-sm uppercase tracking-wider flex items-center gap-2">
-        <svg class="w-4 h-4 text-msblue" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 10h16M4 14h7"/>
-        </svg>批次匯入
-      </h2>
-      <p class="text-xs text-gray-500 dark:text-gray-400 mb-3">每行輸入一個學號，或以逗號分隔。</p>
-      <textarea id="batchIds" rows="5" placeholder="VOTER_001&#10;VOTER_002&#10;VOTER_003"
-        class="w-full px-4 py-3 rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-[#1a1a1a] text-sm text-gray-800 dark:text-gray-200 placeholder-gray-400 font-mono focus:outline-none focus:ring-2 focus:ring-msblue/50 focus:border-msblue transition resize-none"></textarea>
-      <button onclick="addBatch()"
-        class="mt-3 w-full py-2.5 bg-white dark:bg-cardblack hover:bg-gray-50 dark:hover:bg-gray-900 border border-gray-300 dark:border-gray-700 rounded-lg text-gray-700 dark:text-gray-300 font-medium text-sm transition shadow-sm flex items-center justify-center gap-2">
-        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"/>
-        </svg>
-        批次生成 OTP 並全部註冊至 CA
-      </button>
-      <div id="batchMsg" class="mt-3 text-sm hidden"></div>
-    </div>
+      {% if voters %}
+      <div class="table-wrap">
+        <table class="table table-stack">
+          <thead>
+            <tr><th class="num">#</th><th>學號</th><th>OTP</th><th>報到 QR</th><th>綁定狀態</th><th>建立時間</th><th>派發</th></tr>
+          </thead>
+          <tbody>
+            {% for v in voters %}
+            <tr>
+              <td class="num muted hide-sm" data-label="#">{{ loop.index }}</td>
+              <td class="mono strong" data-label="學號">{{ v.voter_id }}</td>
+              <td data-label="OTP"><span class="otp-blur mono" tabindex="0" title="點一下顯示">{{ v.otp }}</span></td>
+              <td data-label="報到 QR">
+                {% if v.ca_status != 'registered' %}
+                <button type="button" class="btn btn-sm" data-voter-id="{{ v.voter_id }}" onclick="openQrModal(this)">顯示 QR</button>
+                {% else %}<span class="muted">—</span>{% endif %}
+              </td>
+              <td data-label="綁定狀態">
+                {% if v.ca_status == 'registered' %}<span class="badge badge-ok">已綁定</span>{% else %}<span class="badge badge-warn">待綁定</span>{% endif %}
+              </td>
+              <td class="small muted nowrap" data-label="建立時間">{{ v.created_at_str }}</td>
+              <td data-label="派發">
+                {% if v.distributed %}<span class="small text-ok strong">已派發</span>
+                {% else %}<button type="button" class="btn btn-sm" onclick="markDistributed({{ v.id }})">標記已派發</button>{% endif %}
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% else %}
+      <div class="card-body muted text-center">尚未新增任何選民，請使用上方表單新增。</div>
+      {% endif %}
+    </section>
   </div>
+</main>
 
-  <!-- 選民名冊表格 -->
-  <div class="bg-white/70 dark:bg-cardblack/80 backdrop-blur-lg rounded-xl border border-gray-200 dark:border-gray-800 shadow-md overflow-hidden">
-    <div class="px-6 py-4 border-b border-gray-100 dark:border-gray-800/60 bg-gray-50/50 dark:bg-[#0a0a0a]/50 flex items-center justify-between">
-      <h2 class="font-medium text-gray-800 dark:text-gray-200 flex items-center gap-2 text-sm">
-        <svg class="w-4 h-4 text-msblue" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"/>
-        </svg>
-        選民名冊
-      </h2>
-      <span class="text-xs text-gray-400 dark:text-gray-500">OTP 欄位懸停以顯示明文</span>
-    </div>
-    {% if voters %}
-    <div class="overflow-x-auto">
-      <table class="w-full text-sm">
-        <thead class="bg-gray-50 dark:bg-[#0a0a0a] text-gray-500 dark:text-gray-400 text-xs uppercase tracking-wider">
-          <tr>
-            <th class="px-5 py-3.5 text-left font-medium">#</th>
-            <th class="px-5 py-3.5 text-left font-medium">選民 ID</th>
-            <th class="px-5 py-3.5 text-left font-medium">OTP（懸停顯示）</th>
-            <th class="px-5 py-3.5 text-left font-medium">QR（現場掃碼登記）</th>
-            <th class="px-5 py-3.5 text-left font-medium">CA 狀態</th>
-            <th class="px-5 py-3.5 text-left font-medium">建立時間</th>
-            <th class="px-5 py-3.5 text-left font-medium">派發</th>
-          </tr>
-        </thead>
-        <tbody class="divide-y divide-gray-100 dark:divide-gray-800">
-          {% for v in voters %}
-          <tr class="hover:bg-gray-50 dark:hover:bg-[#1a1a1a] transition-colors">
-            <td class="px-5 py-4 text-gray-400 text-xs">{{ loop.index }}</td>
-            <td class="px-5 py-4 font-mono font-medium text-msblue dark:text-[#3399FF]">{{ v.voter_id }}</td>
-            <td class="px-5 py-4">
-              <span class="otp-blur font-mono text-xs text-gray-700 dark:text-gray-300 bg-gray-100 dark:bg-gray-800 px-2 py-1 rounded" title="懸停顯示">{{ v.otp }}</span>
-            </td>
-            <td class="px-5 py-4">
-              {% if v.ca_status != 'registered' %}
-              <button type="button" class="text-xs px-2.5 py-1 rounded border border-gray-300 dark:border-gray-700 text-gray-600 dark:text-gray-300 hover:ring-2 hover:ring-msblue transition"
-                data-voter-id="{{ v.voter_id }}" onclick="openQrModal(this)" title="點擊顯示 QR，供選民掃描">顯示 QR</button>
-              {% else %}
-              <span class="text-xs text-gray-400">—</span>
-              {% endif %}
-            </td>
-            <td class="px-5 py-4">
-              {% if v.ca_status == 'registered' %}
-              <span class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium bg-green-50 dark:bg-green-900/20 text-green-700 dark:text-green-400 border border-green-200 dark:border-green-800/50">
-                <span class="w-1.5 h-1.5 rounded-full bg-green-500"></span> 已完成認證
-              </span>
-              {% else %}
-              <span class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium bg-amber-50 dark:bg-amber-900/20 text-amber-700 dark:text-amber-400 border border-amber-200 dark:border-amber-800/50">
-                <span class="w-1.5 h-1.5 rounded-full bg-amber-400"></span> 待領取
-              </span>
-              {% endif %}
-            </td>
-            <td class="px-5 py-4 text-gray-500 dark:text-gray-400 text-xs font-mono">{{ v.created_at_str }}</td>
-            <td class="px-5 py-4">
-              {% if v.distributed %}
-              <span class="text-xs text-green-600 dark:text-green-400 font-medium">已派發</span>
-              {% else %}
-              <button onclick="markDistributed({{ v.id }})"
-                class="text-xs px-3 py-1.5 rounded-lg border border-gray-300 dark:border-gray-700 text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800 transition">
-                標記已派發
-              </button>
-              {% endif %}
-            </td>
-          </tr>
-          {% endfor %}
-        </tbody>
-      </table>
-    </div>
-    {% else %}
-    <div class="px-6 py-16 text-center">
-      <svg class="w-12 h-12 mx-auto text-gray-300 dark:text-gray-700 mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z"/>
-      </svg>
-      <p class="text-gray-500 dark:text-gray-500">尚未新增任何選民，請在上方表單輸入學號。</p>
-    </div>
-    {% endif %}
-  </div>
-
-</div>
-
-<!-- QR 放大彈窗，方便現場選民掃描 -->
-<div id="qrModal" class="hidden fixed inset-0 bg-black/70 z-50 flex items-center justify-center p-4" onclick="closeQrModal()">
-  <div class="bg-white dark:bg-cardblack rounded-2xl p-6 max-w-xs w-full text-center" onclick="event.stopPropagation()">
-    <p id="qrModalVoterId" class="font-mono text-sm text-gray-600 dark:text-gray-300 mb-3"></p>
-    <div id="qrModalContent" class="mx-auto bg-white p-2 rounded-lg" style="width:240px;height:240px"></div>
-    <p class="text-xs text-gray-400 mt-3">請選民用手機相機或掃碼 App 掃描，將自動開啟投票頁並帶入學號與 OTP</p>
-    <button onclick="closeQrModal()"
-      class="mt-4 text-xs px-4 py-2 rounded-lg border border-gray-300 dark:border-gray-700 text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 transition">關閉</button>
+<!-- QR 放大彈窗，供現場選民掃描 -->
+<div id="qrModal" class="qr-modal hidden" onclick="closeQrModal()">
+  <div class="card qr-box stack text-center" onclick="event.stopPropagation()" role="dialog" aria-modal="true" aria-labelledby="qrModalVoterId">
+    <p id="qrModalVoterId" class="mono strong"></p>
+    <div id="qrModalContent"></div>
+    <p class="small muted">請選民用手機相機掃描，會自動開啟投票網站並帶入學號與 OTP。</p>
+    <button type="button" class="btn btn-block" onclick="closeQrModal()">關閉</button>
   </div>
 </div>
 
@@ -638,15 +477,10 @@ async function markDistributed(id) {
 }
 
 function showMsg(el, text, type) {
-  el.classList.remove('hidden');
-  const styles = {
-    success: 'text-green-700 dark:text-green-400 bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800/50',
-    error:   'text-red-700 dark:text-red-400 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800/50',
-    warn:    'text-amber-700 dark:text-amber-400 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800/50',
-    info:    'text-blue-700 dark:text-blue-400 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800/50',
-  };
-  el.className = `mt-3 text-sm p-3 rounded-lg ${styles[type] || styles.info}`;
-  el.textContent = text;
+  const cls = { success: 'alert-ok', error: 'alert-err', warn: 'alert-warn', info: 'alert-info' };
+  el.className = 'alert ' + (cls[type] || 'alert-info');
+  // 顏色已表達成功／錯誤，去掉訊息開頭的「[成功]」「✗」等標記
+  el.textContent = text.replace(/^(\\[[^\\]]+\\]|[✓✗])\\s*/, '');
 }
 </script>
 </body>
@@ -656,59 +490,53 @@ _PRINT_HTML = """<!DOCTYPE html>
 <html lang="zh-TW">
 <head>
   <meta charset="UTF-8">
-  <title>選民 OTP 密碼表（列印版）</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>選民 OTP 密碼表</title>
   <style>
-    @import url('https://fonts.googleapis.com/css2?family=Noto+Sans:wght@400;500;600;700&display=swap');
     * { box-sizing: border-box; margin: 0; padding: 0; }
-    body { font-family: 'Noto Sans', sans-serif; background: #f8f9fa; color: #1a1a1a; padding: 20px; }
-    .no-print { margin-bottom: 20px; }
+    body { font-family: -apple-system, "PingFang TC", "Noto Sans TC", "Microsoft JhengHei", system-ui, sans-serif;
+           background: #f6f5f1; color: #1c1b19; padding: 24px 16px; line-height: 1.5; }
+    .wrap { max-width: 900px; margin: 0 auto; }
+    .no-print { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin-bottom: 24px; }
+    .btn { min-height: 44px; padding: 10px 20px; border-radius: 6px; font: inherit; font-weight: 600; cursor: pointer;
+           border: 1px solid #1f4e79; background: #1f4e79; color: #fff; }
+    a { color: #1f4e79; }
     h1 { font-size: 1.4rem; font-weight: 700; margin-bottom: 4px; }
-    .subtitle { color: #666; font-size: 0.8rem; margin-bottom: 20px; }
-    .warning-box {
-      border: 2px solid #dc2626; border-radius: 8px; padding: 12px 16px;
-      margin-bottom: 24px; background: #fef2f2; color: #7f1d1d;
-      font-size: 0.8rem; line-height: 1.5;
-    }
-    .cards { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; }
-    .card {
-      border: 1.5px solid #d1d5db; border-radius: 10px; padding: 16px 20px;
-      background: white; page-break-inside: avoid;
-    }
-    .card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
-    .card-label { font-size: 0.65rem; text-transform: uppercase; letter-spacing: .06em; color: #6b7280; font-weight: 600; }
-    .voter-id { font-family: 'Courier New', monospace; font-size: 1rem; font-weight: 700; color: #0078D4; }
-    .otp-label { font-size: 0.65rem; text-transform: uppercase; letter-spacing: .06em; color: #6b7280; font-weight: 600; margin-bottom: 4px; }
-    .otp-value { font-family: 'Courier New', monospace; font-size: 0.95rem; font-weight: 600; color: #1a1a1a; letter-spacing: .04em; word-break: break-all; }
-    .otp-hash { font-family: 'Courier New', monospace; font-size: 0.6rem; color: #9ca3af; word-break: break-all; margin-top: 6px; }
-    .footer { font-size: 0.65rem; color: #9ca3af; margin-top: 6px; }
-    .status-badge { font-size: 0.6rem; padding: 2px 8px; border-radius: 20px; font-weight: 600; }
-    .status-pending    { background: #fffbeb; color: #92400e; border: 1px solid #fde68a; }
-    .status-registered { background: #f0fdf4; color: #166534; border: 1px solid #bbf7d0; }
+    .subtitle { color: #5d5a53; font-size: 0.85rem; margin-bottom: 16px; }
+    .warning-box { border: 1px solid #a8261b; border-left-width: 4px; border-radius: 6px; padding: 12px 14px;
+                   margin-bottom: 24px; background: #fbeae8; font-size: 0.85rem; }
+    .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; }
+    .card { border: 1px solid #b5afa2; border-radius: 6px; padding: 16px; background: #fff; break-inside: avoid; page-break-inside: avoid; }
+    .card-header { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; margin-bottom: 12px; }
+    .card-label, .otp-label { font-size: 0.75rem; color: #5d5a53; font-weight: 600; }
+    .voter-id { font-family: ui-monospace, Consolas, monospace; font-size: 1.1rem; font-weight: 700; }
+    .otp-value { font-family: ui-monospace, Consolas, monospace; font-size: 1.05rem; font-weight: 700; letter-spacing: 0.04em; word-break: break-all; }
+    .otp-hash { font-family: ui-monospace, Consolas, monospace; font-size: 0.65rem; color: #8a867d; word-break: break-all; margin-top: 8px; }
+    .footer { font-size: 0.7rem; color: #8a867d; margin-top: 6px; }
+    .status-badge { font-size: 0.7rem; padding: 2px 8px; border-radius: 999px; font-weight: 600; border: 1px solid; white-space: nowrap; }
+    .status-pending    { color: #875800; background: #fbf1dc; }
+    .status-registered { color: #1d6b3a; background: #e7f2ea; }
     @media print {
-      body { background: white; padding: 10px; }
+      body { background: #fff; padding: 0; }
       .no-print { display: none !important; }
+      .cards { grid-template-columns: repeat(2, 1fr); }
     }
   </style>
 </head>
 <body>
+<div class="wrap">
 
 <div class="no-print">
-  <button onclick="window.print()"
-    style="padding:10px 24px;background:#0078D4;color:white;border:none;border-radius:8px;font-size:0.9rem;cursor:pointer;font-weight:600;">
-    列印 / 儲存 PDF
-  </button>
-  <a href="/" style="margin-left:12px;color:#0078D4;font-size:0.9rem;">← 返回管理介面</a>
+  <button class="btn" type="button" onclick="window.print()">列印／儲存 PDF</button>
+  <a href="/">返回選務管理</a>
 </div>
 
-<h1>NUTC 投票系統 — 選民 OTP 密碼表</h1>
-<p class="subtitle">列印日期：{{ now_str }} · 本文件屬機密，請安全保管</p>
+<h1>NUTC 線上投票｜選民 OTP 密碼表</h1>
+<p class="subtitle">列印日期：{{ now_str }}・本文件屬機密，請妥善保管</p>
 
-  <div class="warning-box">
-    <strong>[警告] 安全提醒：</strong>
-    本密碼表為選民進行身分認證的唯一憑據，請以實體信件或加密管道派發，嚴禁以明文電子郵件或通訊軟體傳遞。
-    每位選民應在收到後立即使用，並請求信封銷毀。本表中的 OTP <strong>僅可使用一次</strong>，
-    使用後系統自動失效。
-  </div>
+<div class="warning-box">
+  <strong>安全提醒：</strong>OTP 是選民完成身分綁定的唯一憑據，請以實體信件或加密管道派發，不要用明文電子郵件或通訊軟體傳送。每組 OTP <strong>只能使用一次</strong>，使用後自動失效。
+</div>
 
 <div class="cards">
 {% for v in voters %}
@@ -719,15 +547,17 @@ _PRINT_HTML = """<!DOCTYPE html>
       <div class="voter-id">{{ v.voter_id }}</div>
     </div>
     <span class="status-badge {% if v.ca_status == 'registered' %}status-registered{% else %}status-pending{% endif %}">
-      {% if v.ca_status == 'registered' %}已完成{% else %}未領取{% endif %}
+      {% if v.ca_status == 'registered' %}已綁定{% else %}未綁定{% endif %}
     </span>
   </div>
   <div class="otp-label">一次性密碼 / OTP（請妥善保管）</div>
   <div class="otp-value">{{ v.otp }}</div>
   <div class="otp-hash">H(OTP) = {{ v.otp_hash[:32] }}...</div>
-  <div class="footer">生成時間：{{ v.created_at_str }}  ·  NUTC Voting System v2.0</div>
+  <div class="footer">產生時間：{{ v.created_at_str }}</div>
 </div>
 {% endfor %}
+</div>
+
 </div>
 
 </body>

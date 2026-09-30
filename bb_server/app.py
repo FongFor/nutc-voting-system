@@ -39,6 +39,7 @@ from shared.key_manager import load_or_fetch_ca_cert, verify_cert_chain_and_cn  
 from shared.admin_auth import check_admin_token, admin_auth_error  # <3 v4.0：保護 /api/admin/reset
 from shared.tls_utils import load_or_request_tls_certificate, build_mtls_server_context  # <3 v4.0：mTLS
 from cryptography import x509
+from shared.ui_style import UI_HEAD, THEME_TOGGLE
 
 # 驗證頁在瀏覽器驗 CC 簽章時所用的 CA 根憑證來源：投票網站（voter_client），
 # 刻意不由 BB 自己提供——BB 若被入侵，可以連同假的 CA 根憑證一起送出。
@@ -128,377 +129,182 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
 <html lang="zh-TW">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>BB 公告板</title>
-  <script src="https://cdn.tailwindcss.com"></script>
-  <script>
-    tailwind.config = {
-      darkMode: 'class',
-      theme: {
-        extend: {
-          colors: {
-            msblue: '#0078D4',
-            msblueHover: '#0060A8',
-            deepblack: '#050505',
-            cardblack: '#111111'
-          }
-        }
-      }
-    }
-  </script>
-  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
-  <style>
-    body { font-family: 'Noto Sans', sans-serif; }
-  </style>
-  <script>
-    // 避免畫面閃爍的深色模式初始化
-    if (localStorage.getItem('theme') === 'dark' || (!('theme' in localStorage) && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
-      document.documentElement.classList.add('dark');
-    } else {
-      document.documentElement.classList.remove('dark');
-    }
-    function toggleTheme() {
-      if (document.documentElement.classList.contains('dark')) {
-        document.documentElement.classList.remove('dark');
-        localStorage.setItem('theme', 'light');
-      } else {
-        document.documentElement.classList.add('dark');
-        localStorage.setItem('theme', 'dark');
-      }
-    }
-  </script>
-  <meta http-equiv="refresh" content="20">
+  <title>開票公告｜NUTC 線上投票</title>""" + UI_HEAD + """
+  {% if not published %}<meta http-equiv="refresh" content="20">{% endif %}
 </head>
-<body class="bg-gray-50 dark:bg-deepblack text-gray-800 dark:text-gray-100 min-h-screen transition-colors duration-300">
-  <div class="max-w-5xl mx-auto px-4 py-10">
+<body>
+<header class="topbar">
+  <div class="container-wide topbar-inner">
+    <a class="brand" href="/">
+      <span class="brand-name">NUTC 線上投票</span>
+      <span class="brand-sub">開票公告板</span>
+    </a>
+    <div class="topbar-actions">
+      {% if published %}<span class="badge badge-ok">已公告</span>{% else %}<span class="badge badge-warn">等待開票</span>{% endif %}
+      """ + THEME_TOGGLE + """
+    </div>
+  </div>
+</header>
 
-    <div class="flex items-center gap-4 mb-8">
-      <div class="w-12 h-12 rounded-xl bg-white/70 dark:bg-cardblack/80 backdrop-blur-md shadow-sm flex items-center justify-center border border-gray-200 dark:border-gray-800">
-        <svg class="w-6 h-6 text-msblue" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path></svg>
-      </div>
-      <div>
-        <h1 class="text-2xl font-semibold text-gray-900 dark:text-white">公告板 (BB)</h1>
-        <p class="text-gray-500 dark:text-gray-400 text-sm">Bulletin Board</p>
-      </div>
-      
-      <div class="ml-auto flex items-center gap-3">
-        <span class="px-3 py-1.5 rounded-full text-xs font-medium border backdrop-blur-sm flex items-center
-          {% if published %}bg-green-50 dark:bg-green-900/20 text-green-700 dark:text-green-400 border-green-200 dark:border-green-800/50{% else %}bg-yellow-50 dark:bg-yellow-900/20 text-yellow-700 dark:text-yellow-400 border-yellow-200 dark:border-yellow-800/50{% endif %}">
-          <span class="inline-block w-1.5 h-1.5 rounded-full mr-1.5 {% if published %}bg-green-500 shadow-[0_0_4px_#22c55e]{% else %}bg-yellow-500 shadow-[0_0_4px_#eab308]{% endif %}"></span>
-          {% if published %}已公告{% else %}等待結果{% endif %}
-        </span>
-
-        <button onclick="toggleTheme()" class="p-2 rounded-lg bg-white/70 dark:bg-cardblack/80 border border-gray-200 dark:border-gray-800 shadow-sm hover:bg-gray-100 dark:hover:bg-gray-900 transition-colors text-gray-600 dark:text-gray-300 focus:outline-none focus:ring-2 focus:ring-msblue/50">
-          <svg class="w-4 h-4 hidden dark:block" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z"></path></svg>
-          <svg class="w-4 h-4 block dark:hidden" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z"></path></svg>
-        </button>
-      </div>
+<main>
+  <div class="container-wide stack-lg">
+  {% if published %}
+    <div class="stack-sm">
+      <h1>開票結果</h1>
+      <p class="lead">合法選票 {{ valid_count }} 張{% if tallied_at %}・公告時間 {{ tallied_at | ts_to_str }}{% endif %}</p>
     </div>
 
-    {% if published %}
-    <div class="bg-white/70 dark:bg-cardblack/80 backdrop-blur-lg rounded-2xl border border-gray-200 dark:border-gray-800 shadow-md p-6 mb-6">
-      <h2 class="font-medium text-gray-800 dark:text-gray-200 mb-5 text-sm uppercase tracking-wider flex items-center gap-2">
-        <svg class="w-4 h-4 text-msblue" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"></path></svg>
-        最終計票結果
-      </h2>
-      {% if tally %}
-      <div class="space-y-4">
-        {% set total = valid_count %}
-        {% for candidate, count in tally.items() %}
-        <div>
-          <div class="flex justify-between text-sm mb-1.5">
-            <span class="font-mono text-gray-700 dark:text-gray-300 font-medium">{{ candidate }}</span>
-            <span class="text-gray-900 dark:text-white font-semibold">{{ count }} 票
-              <span class="text-gray-500 dark:text-gray-500 font-normal text-xs ml-1">
-                ({{ "%.1f"|format(count / total * 100) if total > 0 else 0 }}%)
-              </span>
-            </span>
+    <div class="grid grid-main-side">
+      <section class="card stack" aria-labelledby="tallyTitle">
+        <h2 id="tallyTitle" class="section-title">各候選人得票</h2>
+        {% for candidate, count in tally | dictsort(by='value', reverse=true) %}
+        {% set pct = (count / valid_count * 100) if valid_count > 0 else 0 %}
+        <div class="stack-sm">
+          <div class="row-between">
+            <span class="strong">{{ candidate }}</span>
+            <span><span class="strong">{{ count }}</span> 票 <span class="muted small">{{ "%.1f"|format(pct) }}%</span></span>
           </div>
-          <div class="w-full bg-gray-100 dark:bg-[#1a1a1a] rounded-full h-2 overflow-hidden">
-            <div class="bg-msblue h-2 rounded-full transition-all duration-500 ease-out"
-              style="width: {{ (count / total * 100) | int if total > 0 else 0 }}%"></div>
-          </div>
+          <div class="bar" role="img" aria-label="{{ candidate }} 得票率 {{ '%.1f'|format(pct) }}%"><span style="width: {{ pct }}%"></span></div>
         </div>
         {% endfor %}
-      </div>
-      <div class="mt-6 pt-4 border-t border-gray-100 dark:border-gray-800 flex justify-between items-center text-sm">
-        <span class="text-gray-500 dark:text-gray-400">合計合法選票</span>
-        <span class="font-semibold text-lg text-gray-900 dark:text-white">{{ valid_count }} <span class="text-xs font-normal text-gray-500">票</span></span>
-      </div>
-      {% endif %}
+        <div class="row-between" style="border-top:1px solid var(--border); padding-top:14px">
+          <span class="muted">合法選票合計</span><span class="strong">{{ valid_count }} 票</span>
+        </div>
+      </section>
+
+      <section class="card stack" aria-labelledby="verifyTitle">
+        <h2 id="verifyTitle" class="section-title">驗證您的選票</h2>
+        <p class="small muted">輸入投票回執上的選票識別碼（m_hex），確認您的票已被計入。驗證過程不會透露您投給誰。</p>
+        <form method="GET" action="/verify" class="stack-sm">
+          <label class="sr-only" for="mhexInput">選票識別碼（m_hex）</label>
+          <input id="mhexInput" class="input mono" type="text" name="m_hex" placeholder="貼上 64 位的 m_hex"
+                 autocomplete="off" autocapitalize="off" spellcheck="false" required>
+          <button type="submit" class="btn btn-primary btn-block">驗證</button>
+        </form>
+      </section>
     </div>
 
-    <div class="bg-white/70 dark:bg-cardblack/80 backdrop-blur-lg rounded-xl border border-msblue/30 dark:border-msblue/40 shadow-md p-5 mb-6 relative overflow-hidden">
-      <div class="absolute top-0 left-0 w-1.5 h-full bg-msblue"></div>
-      <div class="flex items-center gap-2 mb-3">
-        <svg class="w-4 h-4 text-msblue" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"></path></svg>
-        <span class="text-msblue dark:text-[#3399FF] text-sm font-semibold tracking-wide">Root_official</span>
-        <span class="text-[11px] text-gray-400 dark:text-gray-500 border-l border-gray-200 dark:border-gray-700 pl-2">Merkle Root</span>
+    <section class="card stack-sm" aria-labelledby="rootTitle">
+      <div class="row-between">
+        <h2 id="rootTitle" class="section-title">官方 Merkle Root</h2>
+        <a class="small" href="/api/signed_bundle">下載 CC 簽章的結果包</a>
       </div>
-      <p class="font-mono text-xs sm:text-sm text-gray-700 dark:text-gray-300 break-all bg-gray-50 dark:bg-[#0a0a0a] rounded-lg border border-gray-100 dark:border-gray-800/80 px-4 py-3 shadow-inner">{{ merkle_root }}</p>
-      {% if tallied_at %}
-      <div class="flex items-center gap-2 mt-3 text-xs text-gray-500 dark:text-gray-500">
-        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
-        <span>公告時間：<span class="font-mono text-gray-600 dark:text-gray-400">{{ tallied_at | ts_to_str }}</span> <span class="opacity-50 ml-1">(Unix ts: {{ tallied_at }})</span></span>
-      </div>
-      {% endif %}
-    </div>
+      <code class="hash">{{ merkle_root }}</code>
+      <p class="small muted">由計票中心（CC）簽章公告。每一張選票的驗證路徑，都必須能算出這個值。</p>
+    </section>
 
-    <div class="bg-white/70 dark:bg-cardblack/80 backdrop-blur-lg rounded-xl border border-gray-200 dark:border-gray-800 shadow-md p-5 mb-6">
-      <h2 class="font-medium text-gray-800 dark:text-gray-200 mb-4 text-sm flex items-center gap-2">
-        <svg class="w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path></svg>
-        驗證選票
-      </h2>
-      <form method="GET" action="/verify" class="flex flex-col sm:flex-row gap-3">
-        <input type="text" name="m_hex" placeholder="輸入您的 m_hex 值..."
-          class="flex-1 bg-gray-50 dark:bg-[#0a0a0a] border border-gray-300 dark:border-gray-700 rounded-lg px-4 py-2.5 text-sm text-gray-800 dark:text-gray-200 placeholder-gray-400 dark:placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-msblue/50 focus:border-msblue transition-all shadow-inner">
-        <button type="submit"
-          class="px-6 py-2.5 bg-msblue hover:bg-msblueHover text-white rounded-lg text-sm font-medium shadow-sm transition-colors flex items-center justify-center gap-2 whitespace-nowrap">
-          <span>驗證 + 視覺化</span>
-        </button>
-      </form>
-    </div>
-
-    <div class="bg-white/70 dark:bg-cardblack/80 backdrop-blur-lg rounded-xl border border-gray-200 dark:border-gray-800 shadow-md overflow-hidden">
-      <div class="px-6 py-4 border-b border-gray-100 dark:border-gray-800/60 bg-gray-50/50 dark:bg-[#0a0a0a]/50 flex items-center justify-between">
-        <h2 class="font-medium text-gray-800 dark:text-gray-200 text-sm">合法選票清單</h2>
-        <span class="text-[11px] text-gray-500 dark:text-gray-500 flex items-center gap-1.5">
-          <span class="relative flex h-2 w-2">
-            <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-msblue opacity-40"></span>
-            <span class="relative inline-flex rounded-full h-2 w-2 bg-msblue"></span>
-          </span>
-          自動更新
-        </span>
+    <section class="card card-flush" aria-labelledby="listTitle">
+      <div class="card-head">
+        <h2 id="listTitle" class="section-title">合法選票清單</h2>
+        <span class="small muted">共 {{ valid_count }} 張{% if valid_count > votes|length %}，顯示前 {{ votes|length }} 張{% endif %}・<a href="/api/results">下載完整清單（JSON）</a></span>
       </div>
       {% if votes %}
-      <div class="overflow-x-auto">
-        <table class="w-full text-sm">
-          <thead class="bg-gray-50 dark:bg-[#0a0a0a] text-gray-500 dark:text-gray-500 text-xs uppercase tracking-wider">
-            <tr>
-              <th class="px-6 py-3.5 text-left font-medium">#</th>
-              <!-- v2.0 修正：移除「投票內容」欄位，BB 不得公開 vote 與 m_hex 的一一對應（規格書 §19.5） <3 -->
-              <th class="px-6 py-3.5 text-left font-medium">m_hex（前 24 字元）</th>
-              <th class="px-6 py-3.5 text-left font-medium">葉節點 H(m)</th>
-              <th class="px-6 py-3.5 text-left font-medium text-right">操作</th>
-            </tr>
-          </thead>
-          <tbody class="divide-y divide-gray-100 dark:divide-gray-800/60">
+      <div class="table-wrap">
+        <table class="table">
+          <thead><tr><th class="num">#</th><th>選票識別碼（m_hex）</th><th><span class="sr-only">操作</span></th></tr></thead>
+          <tbody>
             {% for v in votes %}
-            <tr class="hover:bg-gray-50 dark:hover:bg-[#1a1a1a] transition-colors">
-              <td class="px-6 py-4 text-gray-400 dark:text-gray-600 text-xs">{{ loop.index }}</td>
-              <td class="px-6 py-4 font-mono text-gray-500 dark:text-gray-500 text-xs">{{ v.m_hex[:24] }}...</td>
-              <td class="px-6 py-4 font-mono text-gray-400 dark:text-gray-600 text-xs">{{ v.leaf_hash[:24] }}...</td>
-              <td class="px-6 py-4 text-right">
-                <a href="/verify?m_hex={{ v.m_hex }}"
-                  class="inline-flex items-center text-xs font-medium text-msblue hover:text-msblueHover dark:text-[#3399FF] dark:hover:text-white transition-colors">
-                  驗證 <svg class="w-3.5 h-3.5 ml-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"></path></svg>
-                </a>
-              </td>
+            <tr>
+              <td class="num muted">{{ loop.index }}</td>
+              <td><span class="hash-inline">{{ v.m_hex }}</span></td>
+              <td class="nowrap"><a href="/verify?m_hex={{ v.m_hex }}">驗證</a></td>
             </tr>
             {% endfor %}
           </tbody>
         </table>
       </div>
       {% else %}
-      <div class="px-6 py-14 text-center text-gray-500 dark:text-gray-600">
-        <svg class="w-10 h-10 mx-auto text-gray-300 dark:text-gray-700 mb-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path></svg>
-        <p class="text-sm">尚無合法選票</p>
-      </div>
+      <div class="card-body muted">沒有合法選票。</div>
       {% endif %}
-    </div>
-
-    {% else %}
-    <div class="bg-white/70 dark:bg-cardblack/80 backdrop-blur-lg rounded-2xl border border-gray-200 dark:border-gray-800 shadow-md p-16 text-center">
-      <div class="w-16 h-16 bg-gray-50 dark:bg-[#1a1a1a] rounded-full flex items-center justify-center mx-auto mb-4 border border-gray-100 dark:border-gray-800">
-        <svg class="w-8 h-8 text-gray-400 dark:text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
-      </div>
-      <h2 class="text-lg font-medium text-gray-800 dark:text-gray-200 mb-2">等待計票結果</h2>
-      <p class="text-gray-500 dark:text-gray-500 text-sm">計票中心（CC）尚未公告結果。</p>
-    </div>
-    {% endif %}
-
+    </section>
+  {% else %}
+    <section class="card text-center stack" style="padding:56px 24px">
+      <h1>等待開票</h1>
+      <p class="lead">投票截止並完成開票後，計票中心（CC）會在這裡公告結果。</p>
+      <p class="small muted">此頁每 20 秒自動重新整理。</p>
+    </section>
+  {% endif %}
   </div>
+</main>
+<footer class="footer">
+  <div class="container-wide">公告內容由計票中心簽章；任何人都可以下載結果包與完整選票清單，自行重算 Merkle Root 驗證。</div>
+</footer>
 </body>
 </html>"""
+
 
 _VERIFY_HTML = """<!DOCTYPE html>
 <html lang="zh-TW">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>BB · Merkle Proof 視覺化驗證</title>
-  <script src="https://cdn.tailwindcss.com"></script>
-  <script>
-    tailwind.config = {
-      darkMode: 'class',
-      theme: {
-        extend: {
-          colors: {
-            msblue: '#0078D4',
-            msblueHover: '#0060A8',
-            deepblack: '#050505',
-            cardblack: '#111111'
-          }
-        }
-      }
-    }
-  </script>
-  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <title>驗證選票｜NUTC 線上投票</title>""" + UI_HEAD + """
   <style>
-    body { font-family: 'Noto Sans', sans-serif; }
-    
-    /* ── Canvas 固定滾動容器 (overflow:hidden + 純拖曳，無捲軸) ── */
-    #tree-scroll-wrap {
-      overflow: hidden;
-      background: rgba(31, 41, 55, 0.02);
-      border-radius: 12px;
-      cursor: grab;
-      position: relative;
-      /* 固定高度：不隨 canvas 縮放而改變，防止死亡迴圈 */
-      width: 100%;
-      height: 65vh;
-      min-height: 450px;
-      box-shadow: inset 0 2px 10px rgba(0,0,0,0.03);
-    }
-    .dark #tree-scroll-wrap { 
-      background: rgba(10, 10, 10, 0.4); 
-      box-shadow: inset 0 2px 15px rgba(0,0,0,0.3); 
-    }
+    /* 樹狀圖畫布：固定高度的拖曳容器，由 JS 控制畫布位置與縮放 */
+    #tree-scroll-wrap { position: relative; width: 100%; height: 60vh; min-height: 360px; overflow: hidden;
+      background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius); cursor: grab; touch-action: none; }
     #tree-scroll-wrap:active { cursor: grabbing; }
-    
-    /* Canvas 用絕對定位，由 JS 控制 left/top 實現拖曳與置中 */
-    #tree-canvas { 
-      display: block;
-      position: absolute;
-      top: 0;
-      left: 0;
-    }
-
-    /* ── 節點資訊浮動面板 ── */
-    #node-panel {
-      display: none;
-      position: fixed;
-      z-index: 200;
-      background: rgba(255, 255, 255, 0.95);
-      backdrop-filter: blur(8px);
-      border: 1px solid rgba(229, 231, 235, 1);
-      border-radius: 10px;
-      padding: 14px 16px;
-      font-family: 'Courier New', monospace;
-      font-size: 12px;
-      color: #1f2937;
-      box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.1);
-      max-width: 420px;
-      pointer-events: none;
-    }
-    .dark #node-panel {
-      background: rgba(17, 17, 17, 0.95);
-      border-color: rgba(51, 51, 51, 1);
-      color: #e5e7eb;
-      box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.5);
-    }
-    #node-panel .panel-title { font-size: 11px; font-weight: 600; margin-bottom: 6px; font-family: 'Noto Sans', sans-serif; }
-    #node-panel .panel-hash { word-break: break-all; color: #0078D4; font-size: 11px; line-height: 1.6; }
-    .dark #node-panel .panel-hash { color: #3399FF; }
-    #node-panel .panel-meta { color: #6b7280; font-size: 10px; margin-top: 6px; font-family: 'Noto Sans', sans-serif; }
-    .dark #node-panel .panel-meta { color: #9ca3af; }
-
-    /* ── 縮放控制 ── */
-    #zoom-controls { display: flex; gap: 6px; align-items: center; }
-    .zoom-btn {
-      width: 30px; height: 30px; border-radius: 6px;
-      background: rgba(0, 0, 0, 0.03); border: 1px solid rgba(0, 0, 0, 0.1);
-      color: #4b5563; font-size: 16px; cursor: pointer;
-      display: flex; align-items: center; justify-content: center;
-      transition: all 0.2s;
-    }
-    .dark .zoom-btn { background: rgba(255, 255, 255, 0.05); border-color: rgba(255, 255, 255, 0.1); color: #9ca3af; }
-    .zoom-btn:hover { background: rgba(0, 120, 212, 0.1); color: #0078D4; border-color: #0078D4; }
-    .dark .zoom-btn:hover { background: rgba(51, 153, 255, 0.1); color: #3399FF; border-color: #3399FF; }
-    #zoom-label { font-size: 12px; font-weight: 500; min-width: 40px; text-align: center; color: #4B5563; }
-    .dark #zoom-label { color: #9CA3AF; }
-
-    /* ── 圖例 ── */
-    .legend-dot { width: 10px; height: 10px; border-radius: 3px; flex-shrink: 0; }
+    #tree-canvas { display: block; position: absolute; top: 0; left: 0; max-width: none; }
+    #node-panel { display: none; position: fixed; z-index: 200; max-width: min(420px, calc(100vw - 24px)); pointer-events: none;
+      background: var(--surface); border: 1px solid var(--border-strong); border-radius: var(--radius); padding: 12px 14px; }
+    #node-panel .panel-title { font-weight: 700; font-size: 0.85rem; margin-bottom: 4px; }
+    #node-panel .panel-hash { font-family: var(--mono); font-size: 0.8rem; color: var(--accent); word-break: break-all; }
+    #node-panel .panel-meta { color: var(--muted); font-size: 0.8rem; margin-top: 4px; }
+    #zoom-controls { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+    #zoom-label { min-width: 48px; text-align: center; font-size: 0.85rem; color: var(--muted); font-variant-numeric: tabular-nums; }
+    .legend { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 0.85rem; color: var(--muted); }
+    .legend span { display: inline-flex; align-items: center; gap: 6px; }
+    .legend i { width: 12px; height: 12px; border-radius: 3px; border: 2px solid; display: inline-block; }
+    .proof-step { display: grid; grid-template-columns: auto auto minmax(0, 1fr); gap: 4px 10px; align-items: baseline; padding: 8px 0; border-bottom: 1px solid var(--border); }
+    .proof-step:last-child { border-bottom: 0; }
   </style>
   <script>
-    if (localStorage.getItem('theme') === 'dark' || (!('theme' in localStorage) && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
-      document.documentElement.classList.add('dark');
-    } else {
-      document.documentElement.classList.remove('dark');
-    }
-    function toggleTheme() {
-      if (document.documentElement.classList.contains('dark')) {
-        document.documentElement.classList.remove('dark');
-        localStorage.setItem('theme', 'light');
-      } else {
-        document.documentElement.classList.add('dark');
-        localStorage.setItem('theme', 'dark');
-      }
-      if(typeof draw === 'function') draw(); 
-    }
+    // 切換深色模式後重畫樹狀圖（畫布顏色由 JS 決定）
+    (function () { var t = window.toggleTheme; window.toggleTheme = function () { t(); if (typeof draw === 'function') draw(); }; })();
   </script>
 </head>
-<body class="bg-gray-50 dark:bg-deepblack text-gray-800 dark:text-gray-100 min-h-screen transition-colors duration-300">
-  <div class="max-w-6xl mx-auto px-4 py-10">
+<body>
+<header class="topbar">
+  <div class="container-wide topbar-inner">
+    <a class="brand" href="/">
+      <span class="brand-name">NUTC 線上投票</span>
+      <span class="brand-sub">驗證選票</span>
+    </a>
+    <div class="topbar-actions">
+      <a class="btn btn-sm" href="/">回公告板</a>
+      """ + THEME_TOGGLE + """
+    </div>
+  </div>
+</header>
 
-    <div class="flex items-center justify-between mb-8">
-      <div class="flex items-center gap-4">
-        <a href="/" class="p-2 -ml-2 rounded-lg text-gray-400 hover:text-msblue hover:bg-msblue/10 transition-colors" title="返回公告板">
-          <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18"></path></svg>
-        </a>
-        <div class="w-10 h-10 rounded-xl bg-white/70 dark:bg-cardblack/80 shadow-sm flex items-center justify-center border border-gray-200 dark:border-gray-800">
-          <svg class="w-5 h-5 text-msblue" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
-        </div>
-        <div>
-          <h1 class="text-xl font-semibold text-gray-900 dark:text-white">Merkle Proof 驗證</h1>
-          <p class="text-gray-500 dark:text-gray-500 text-xs mt-0.5">Merkle Tree 視覺化</p>
-        </div>
-      </div>
-      
-      <button onclick="toggleTheme()" class="p-2 rounded-lg bg-white/70 dark:bg-cardblack/80 border border-gray-200 dark:border-gray-800 shadow-sm hover:bg-gray-100 dark:hover:bg-gray-900 transition-colors text-gray-600 dark:text-gray-300 focus:outline-none focus:ring-2 focus:ring-msblue/50">
-        <svg class="w-4 h-4 hidden dark:block" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z"></path></svg>
-        <svg class="w-4 h-4 block dark:hidden" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z"></path></svg>
-      </button>
+<main>
+  <div class="container-wide stack-lg">
+    <div class="stack-sm">
+      <h1>驗證選票</h1>
+      <p class="lead">確認您的選票已包含在計票結果中，而且不必透露您投給誰。</p>
     </div>
 
     {% if result %}
-    <div class="bg-white/70 dark:bg-cardblack/80 backdrop-blur-lg rounded-2xl border border-gray-200 dark:border-gray-800 shadow-md p-6 mb-6">
-      <div class="flex items-start gap-4 mb-5 p-4 rounded-xl {% if result.valid %}bg-green-50/80 dark:bg-green-900/10 border border-green-200 dark:border-green-900/50{% else %}bg-red-50/80 dark:bg-red-900/10 border border-red-200 dark:border-red-900/50{% endif %}">
-        {% if result.valid %}
-        <div class="mt-0.5">
-           <svg class="w-5 h-5 text-green-600 dark:text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
-        </div>
-        <div>
-          <p class="font-semibold text-green-800 dark:text-green-400 text-sm">驗證通過</p>
-          <p class="text-green-600 dark:text-green-500/80 text-xs mt-1">您的選票已包含在合法計票結果中</p>
-        </div>
-        {% else %}
-        <div class="mt-0.5">
-           <svg class="w-5 h-5 text-red-600 dark:text-red-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
-        </div>
-        <div>
-          <p class="font-semibold text-red-800 dark:text-red-400 text-sm">驗證失敗</p>
-          <p class="text-red-600 dark:text-red-500/80 text-xs mt-1">{{ result.message }}</p>
-        </div>
-        {% endif %}
+    <div class="stack">
+      {% if result.valid %}
+      <div class="alert alert-ok">
+        <p class="alert-title">公告板回報：找到您的選票</p>
+        <p class="small">這是公告板伺服器的判斷。下方會在您的瀏覽器裡獨立再驗證一次，不依賴公告板。</p>
       </div>
+      {% else %}
+      <div class="alert alert-err" role="alert">
+        <p class="alert-title">驗證失敗</p>
+        <p class="small">{{ result.message }}</p>
+      </div>
+      {% endif %}
 
       {% if result.valid %}
-      <!-- v3.0 新增：瀏覽器本機獨立驗證。上面那個「驗證通過」是 BB 伺服器
-           自己算完才回傳的結論，選民只是在相信 BB 說的話；這裡改成瀏覽器
-           自己用 Web Crypto API 重新算一次 Merkle Root 並比對，不依賴、
-           也不用信任 BB 的判斷，真正做到端到端可驗證。 -->
-      <div id="localVerifyBanner" class="flex items-start gap-3 mb-5 p-4 rounded-xl border bg-gray-50/80 dark:bg-[#0a0a0a] border-gray-200 dark:border-gray-800">
-        <div class="mt-0.5">
-          <svg id="localVerifyIcon" class="w-5 h-5 text-gray-400 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
-        </div>
-        <div>
-          <p id="localVerifyTitle" class="font-semibold text-gray-600 dark:text-gray-400 text-sm">瀏覽器本機獨立驗證中...</p>
-          <p class="text-gray-500 dark:text-gray-500 text-xs mt-1">不依賴、也不信任 BB 伺服器的判斷結果：先向投票網站取得 CA 根憑證，確認開票結果包確實由 CA 認證的 CC 簽章，再用結果包裡的 Merkle Root 重新計算您的驗證路徑。BB 若竄改結果或謊報「驗證通過」，這裡會如實顯示不符。</p>
-          <ul id="localVerifySteps" class="text-xs mt-2 space-y-0.5 text-gray-600 dark:text-gray-400"></ul>
-        </div>
-      </div>
+      <!-- 瀏覽器本機獨立驗證：向投票網站取得 CA 根憑證、驗證 CC 簽章，再用簽過章的
+           Merkle Root 重算驗證路徑，不依賴也不信任公告板伺服器的判斷。 -->
+      <section id="localVerifyBanner" class="alert stack-sm" aria-live="polite">
+        <p class="row"><span id="localVerifyIcon" class="spin" aria-hidden="true"></span><span id="localVerifyTitle" class="alert-title">正在您的瀏覽器中獨立驗證…</span></p>
+        <p class="small muted">先向投票網站（不是公告板）取得 CA 根憑證，確認開票結果包確實由 CA 認證的計票中心簽章，再用結果包裡的 Merkle Root 重新計算您的驗證路徑。公告板若竄改結果或謊報，這裡會顯示不符。</p>
+        <ul id="localVerifySteps" class="steps"></ul>
+      </section>
       <script>
         (function () {
           async function sha256Hex(bytes) {
@@ -615,7 +421,13 @@ _VERIFY_HTML = """<!DOCTYPE html>
             const steps = document.getElementById('localVerifySteps');
             function step(text) {
               const li = document.createElement('li');
-              li.textContent = '✓ ' + text;
+              li.className = 'step-ok';
+              const mark = document.createElement('span');
+              mark.className = 'mark';
+              mark.textContent = '✓';
+              const t = document.createElement('span');
+              t.textContent = text;
+              li.append(mark, t);
               steps.appendChild(li);
             }
             try {
@@ -641,130 +453,89 @@ _VERIFY_HTML = """<!DOCTYPE html>
               const rootOfficial = JSON.parse(sb.signed_bundle).root_official;
               const ok = await verifyProofLocally(mHex, proof, rootOfficial);
               if (ok) step('您的選票驗證路徑可算出 CC 簽章的 Merkle Root');
-              icon.classList.remove('animate-spin');
+              icon.className = 'hidden';
               if (ok) {
-                banner.classList.remove('bg-gray-50/80', 'dark:bg-[#0a0a0a]', 'border-gray-200', 'dark:border-gray-800');
-                banner.classList.add('bg-emerald-50/80', 'dark:bg-emerald-900/10', 'border-emerald-200', 'dark:border-emerald-900/50');
-                title.className = 'font-semibold text-emerald-800 dark:text-emerald-400 text-sm';
-                title.textContent = '瀏覽器本機獨立驗證：通過（未使用 BB 的判斷結果）';
-                icon.innerHTML = '<path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path>';
-                icon.setAttribute('class', 'w-5 h-5 text-emerald-600 dark:text-emerald-500');
+                banner.className = 'alert alert-ok stack-sm';
+                title.textContent = '瀏覽器本機獨立驗證：通過（未使用公告板的判斷結果）';
               } else {
-                banner.classList.add('bg-red-50/80', 'dark:bg-red-900/10', 'border-red-200', 'dark:border-red-900/50');
-                title.className = 'font-semibold text-red-800 dark:text-red-400 text-sm';
-                title.textContent = '⚠ 瀏覽器本機獨立驗證：與 BB 公告結果不符，請勿信任上方「驗證通過」訊息並立即通報';
+                banner.className = 'alert alert-err stack-sm';
+                title.textContent = '瀏覽器本機獨立驗證：與公告結果不符。請勿相信上方的「找到您的選票」，並立即通報選務人員。';
               }
             } catch (e) {
-              title.textContent = '本機獨立驗證發生錯誤：' + e.message;
+              icon.className = 'hidden';
+              banner.className = 'alert alert-err stack-sm';
+              title.textContent = '本機獨立驗證失敗：' + e.message;
             }
           })();
         })();
       </script>
 
-      <details class="mb-6 group">
-        <summary class="cursor-pointer text-[13px] font-medium text-gray-500 dark:text-gray-400 hover:text-msblue dark:hover:text-white select-none py-2 flex items-center transition-colors">
-          <svg class="w-3.5 h-3.5 mr-2 transform transition-transform group-open:rotate-90" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"></path></svg>
-          展開查看詳細雜湊資訊
-        </summary>
-        <div class="grid grid-cols-1 gap-3 mt-3 pl-5 border-l border-gray-100 dark:border-gray-800 ml-1">
-          <div class="bg-gray-50/80 dark:bg-[#0a0a0a] rounded-lg p-3.5 border border-gray-200 dark:border-gray-800 shadow-sm relative overflow-hidden">
-            <div class="absolute top-0 left-0 w-1 h-full bg-amber-500"></div>
-            <div class="flex flex-col sm:flex-row sm:items-center gap-2 mb-2">
-              <p class="text-[11px] text-gray-700 dark:text-gray-300 font-semibold tracking-wider">m_hex（選票包雜湊值）</p>
-              <span class="text-[10px] text-gray-400 dark:text-gray-600">— 驗證輸入</span>
-            </div>
-            <p class="font-mono text-[11px] text-gray-600 dark:text-gray-500 break-all">{{ result.m_hex }}</p>
-          </div>
-          <div class="bg-gray-50/80 dark:bg-[#0a0a0a] rounded-lg p-3.5 border border-gray-200 dark:border-gray-800 shadow-sm relative overflow-hidden">
-            <div class="absolute top-0 left-0 w-1 h-full bg-amber-400"></div>
-            <div class="flex flex-col sm:flex-row sm:items-center gap-2 mb-2">
-              <p class="text-[11px] text-gray-700 dark:text-gray-300 font-semibold tracking-wider">H_leaf(m)（Domain-Separated 葉節點雜湊）</p>
-              <span class="text-[10px] text-gray-400 dark:text-gray-600">— 樹中目標葉節點值 = H(0x00 ‖ m_hex)</span>
-            </div>
-            <p class="font-mono text-[11px] text-gray-600 dark:text-gray-500 break-all">{{ result.leaf_hash }}</p>
-          </div>
-          <div class="bg-gray-50/80 dark:bg-[#0a0a0a] rounded-lg p-3.5 border border-gray-200 dark:border-gray-800 shadow-sm relative overflow-hidden">
-            <div class="absolute top-0 left-0 w-1 h-full bg-emerald-500"></div>
-            <div class="flex flex-col sm:flex-row sm:items-center gap-2 mb-3">
-              <p class="text-[11px] text-gray-700 dark:text-gray-300 font-semibold tracking-wider">Sibling Array（Merkle Proof 路徑）</p>
-              <span class="text-[10px] text-gray-400 dark:text-gray-600">— {{ result.proof | length }} 步驟，從葉到根</span>
-            </div>
-            <div class="space-y-1">
+      <details class="card">
+        <summary>詳細雜湊資訊</summary>
+        <dl class="dl" style="margin-top:16px">
+          <div><dt>m_hex（您的選票識別碼）</dt><dd><code class="hash">{{ result.m_hex }}</code></dd></div>
+          <div><dt>葉節點 H_leaf(m) = H(0x00 ‖ m_hex)</dt><dd><code class="hash">{{ result.leaf_hash }}</code></dd></div>
+          <div>
+            <dt>驗證路徑（由葉到根，共 {{ result.proof | length }} 步）</dt>
+            <dd>
               {% for step in result.proof %}
-              <div class="flex flex-col sm:flex-row sm:items-center gap-2 py-1.5 {% if not loop.last %}border-b border-gray-200/60 dark:border-gray-800/80{% endif %}">
-                <div class="flex items-center gap-2 shrink-0 w-24">
-                  <span class="text-[10px] font-medium text-gray-500">步驟 {{ loop.index }}</span>
-                  <span class="px-1.5 py-0.5 rounded text-[10px] font-mono {% if step.position == 'right' %}bg-blue-100/50 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400{% else %}bg-purple-100/50 text-purple-700 dark:bg-purple-900/30 dark:text-purple-400{% endif %}">{{ step.position }}</span>
-                </div>
-                <span class="font-mono text-[11px] text-gray-600 dark:text-gray-500 break-all">{{ step.sibling }}</span>
+              <div class="proof-step">
+                <span class="small muted nowrap">步驟 {{ loop.index }}</span>
+                <span class="badge {% if step.position == 'right' %}badge-info{% else %}badge-warn{% endif %}">{{ '右' if step.position == 'right' else '左' }}</span>
+                <span class="hash-inline small">{{ step.sibling }}</span>
               </div>
               {% endfor %}
-            </div>
+            </dd>
           </div>
-          <div class="bg-gray-50/80 dark:bg-[#0a0a0a] rounded-lg p-3.5 border border-gray-200 dark:border-gray-800 shadow-sm relative overflow-hidden">
-            <div class="absolute top-0 left-0 w-1 h-full bg-msblue"></div>
-            <div class="flex flex-col sm:flex-row sm:items-center gap-2 mb-2">
-              <p class="text-[11px] text-gray-700 dark:text-gray-300 font-semibold tracking-wider">Root_official（Merkle Root）</p>
-              <span class="text-[10px] text-gray-400 dark:text-gray-600">— 零信任驗證樹根，由 CC 公告</span>
-            </div>
-            <p class="font-mono text-[11px] text-gray-600 dark:text-gray-500 break-all">{{ result.root }}</p>
-          </div>
-        </div>
+          <div><dt>官方 Merkle Root（由計票中心公告）</dt><dd><code class="hash">{{ result.root }}</code></dd></div>
+        </dl>
       </details>
 
-      <div class="bg-white/50 dark:bg-[#0a0a0a]/50 rounded-xl border border-gray-200 dark:border-gray-800/80 p-3 sm:p-5 shadow-inner">
-        <div class="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-4">
-          <h3 class="font-medium text-gray-800 dark:text-gray-200 text-sm flex items-center gap-2">
-             <svg class="w-4 h-4 text-msblue" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16V4m0 0L3 8m4-4l4 4m6 0v12m0 0l4-4m-4 4l-4-4"></path></svg>
-             視覺化樹狀圖
-          </h3>
-          <div class="flex flex-wrap items-center gap-3 text-[11px] bg-white dark:bg-cardblack px-3 py-1.5 rounded-md border border-gray-200 dark:border-gray-800 shadow-sm">
-            <span class="flex items-center gap-1.5"><span class="legend-dot" style="background:#f59e0b;border:1.5px solid #d97706;"></span><span class="text-gray-700 dark:text-gray-300 font-semibold">目標節點</span></span>
-            <span class="flex items-center gap-1.5"><span class="legend-dot" style="background:#10b981;border:1.5px solid #059669;"></span><span class="text-gray-700 dark:text-gray-300 font-semibold">Sibling</span></span>
-            <span class="flex items-center gap-1.5"><span class="legend-dot" style="background:#6366f1;border:1.5px solid #4f46e5;"></span><span class="text-gray-700 dark:text-gray-300 font-semibold">驗證路徑</span></span>
-            <span class="flex items-center gap-1.5"><span class="legend-dot" style="background:#0ea5e9;border:1.5px solid #0284c7;"></span><span class="text-gray-700 dark:text-gray-300 font-semibold">Root</span></span>
-            <span class="flex items-center gap-1.5"><span class="legend-dot" style="background:transparent;border:1.5px dashed #9ca3af;"></span><span class="text-gray-500 dark:text-gray-500">虛擬佔位</span></span>
-          </div>
+      <section class="card stack" aria-labelledby="treeTitle">
+        <div class="row-between">
+          <h2 id="treeTitle" class="section-title">Merkle Tree 樹狀圖</h2>
+          {% if tree_data %}
           <div id="zoom-controls">
-            <button type="button" class="zoom-btn" onclick="changeZoom(-0.15)" title="縮小"><svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20 12H4"></path></svg></button>
+            <button type="button" class="btn btn-sm" onclick="changeZoom(-0.15)" aria-label="縮小">－</button>
             <span id="zoom-label">100%</span>
-            <button type="button" class="zoom-btn" onclick="changeZoom(+0.15)" title="放大"><svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"></path></svg></button>
-            <div class="h-3.5 border-l border-gray-300 dark:border-gray-700 mx-1"></div>
-            <button type="button" class="zoom-btn px-2 w-auto text-[11px]" onclick="resetZoom()" title="重置">1:1</button>
-            <button type="button" class="zoom-btn px-2 w-auto text-[11px]" onclick="fitTree()" title="自動縮放">最適</button>
-            <button type="button" class="zoom-btn px-2 w-auto text-[11px]" onclick="focusTarget()" title="對焦到目標節點" style="color:#f59e0b;border-color:#f59e0b;">⊙ 對焦</button>
+            <button type="button" class="btn btn-sm" onclick="changeZoom(+0.15)" aria-label="放大">＋</button>
+            <button type="button" class="btn btn-sm" onclick="resetZoom()">1:1</button>
+            <button type="button" class="btn btn-sm" onclick="fitTree()">最適</button>
+            <button type="button" class="btn btn-sm" onclick="focusTarget()">對焦我的票</button>
           </div>
+          {% endif %}
         </div>
-
         {% if tree_data %}
-        <div id="tree-scroll-wrap" class="border border-gray-200 dark:border-gray-800/80">
+        <div class="legend" aria-hidden="true">
+          <span><i style="background:#fbf1dc;border-color:#875800"></i>您的選票</span>
+          <span><i style="background:#e7f2ea;border-color:#1d6b3a"></i>兄弟節點</span>
+          <span><i style="background:#e8eef5;border-color:#1f4e79"></i>驗證路徑</span>
+          <span><i style="background:#1f4e79;border-color:#1f4e79"></i>樹根</span>
+          <span><i style="background:transparent;border-style:dashed;border-color:#b5afa2"></i>補位節點</span>
+        </div>
+        <div id="tree-scroll-wrap">
           <canvas id="tree-canvas"></canvas>
         </div>
+        <p class="small muted">點擊節點看完整雜湊・拖曳移動・滾輪上下捲動・按住 Shift 滾輪左右捲動・手機可用兩指縮放</p>
         {% else %}
-        <p class="text-xs text-gray-500 dark:text-gray-400 text-center py-6">本次公告共有 {{ result.leaf_count }} 張選票，超過 {{ viz_max_leaves }} 張時不繪製完整樹狀圖（瀏覽器負擔太大）；上方的驗證路徑與本機驗證不受影響。</p>
+        <p class="small muted">本次公告共有 {{ result.leaf_count }} 張選票，超過 {{ viz_max_leaves }} 張時不繪製完整樹狀圖（瀏覽器負擔太大）。上方的驗證路徑與本機驗證不受影響。</p>
         {% endif %}
-
-        <p class="text-[11px] text-gray-500 dark:text-gray-600 mt-3 text-center flex items-center justify-center gap-1">
-          <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
-          點擊節點查看完整雜湊 · 滑鼠拖曳滑動 · 滾輪垂直滑動 · 按住 Shift 滾輪水平滑動
-        </p>
-      </div>
+      </section>
       {% endif %}
     </div>
     {% endif %}
 
-    <div class="bg-white/70 dark:bg-cardblack/80 backdrop-blur-lg rounded-xl border border-gray-200 dark:border-gray-800 shadow-md p-6">
-      <h2 class="font-medium text-gray-800 dark:text-gray-200 mb-4 text-[13px] uppercase tracking-wider">輸入 m_hex 進行另一次驗證</h2>
-      <form method="GET" action="/verify" class="flex flex-col sm:flex-row gap-3">
-        <input type="text" name="m_hex" value="{{ m_hex or '' }}" placeholder="輸入您的 m_hex 值..."
-          class="flex-1 bg-gray-50 dark:bg-[#0a0a0a] border border-gray-300 dark:border-gray-700 rounded-lg px-4 py-2.5 text-sm text-gray-800 dark:text-gray-200 placeholder-gray-400 dark:placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-msblue/50 focus:border-msblue transition-all shadow-inner">
-        <button type="submit"
-          class="px-6 py-2.5 bg-msblue hover:bg-msblueHover text-white rounded-lg text-sm font-medium shadow-sm transition-colors flex items-center justify-center gap-2 whitespace-nowrap">
-          重新驗證
-        </button>
+    <section class="card stack-sm" aria-labelledby="againTitle">
+      <h2 id="againTitle" class="section-title">{% if result %}驗證另一張選票{% else %}輸入選票識別碼{% endif %}</h2>
+      <form method="GET" action="/verify" class="row" style="align-items:stretch">
+        <label class="sr-only" for="mhexAgain">選票識別碼（m_hex）</label>
+        <input id="mhexAgain" class="input mono" style="flex:1 1 260px; width:auto" type="text" name="m_hex" value="{{ m_hex or '' }}"
+               placeholder="貼上 64 位的 m_hex" autocomplete="off" autocapitalize="off" spellcheck="false" required>
+        <button type="submit" class="btn btn-primary" style="flex:0 0 auto">驗證</button>
       </form>
-    </div>
+    </section>
   </div>
+</main>
 
   <div id="node-panel">
     <div class="panel-title" id="panel-title"></div>
@@ -794,19 +565,19 @@ _VERIFY_HTML = """<!DOCTYPE html>
   function getThemeColors() {
     const isDark = document.documentElement.classList.contains('dark');
     return {
-      normal:  isDark ? { bg: '#1a1a1a', border: '#333333', text: '#9ca3af', glow: null } 
-                      : { bg: '#ffffff', border: '#d1d5db', text: '#6b7280', glow: null },
-      target:  isDark ? { bg: '#92400e', border: '#fcd34d', text: '#fff', glow: 'rgba(251,191,36,0.8)' }
-                      : { bg: '#fef3c7', border: '#f59e0b', text: '#92400e', glow: 'rgba(245,158,11,0.6)' },
-      sibling: isDark ? { bg: '#065f46', border: '#6ee7b7', text: '#fff', glow: 'rgba(52,211,153,0.8)' }
-                      : { bg: '#ecfdf5', border: '#10b981', text: '#065f46', glow: 'rgba(16,185,129,0.6)' },
-      path:    isDark ? { bg: '#3730a3', border: '#a5b4fc', text: '#fff', glow: 'rgba(129,140,248,0.8)' }
-                      : { bg: '#eef2ff', border: '#6366f1', text: '#3730a3', glow: 'rgba(99,102,241,0.6)' },
-      root:    isDark ? { bg: '#075985', border: '#7dd3fc', text: '#fff', glow: 'rgba(56,189,248,0.8)' }
-                      : { bg: '#f0f9ff', border: '#0ea5e9', text: '#075985', glow: 'rgba(14,165,233,0.6)' },
-      edgeNormal: isDark ? '#333333' : '#d1d5db',
-      edgePath:   isDark ? '#818cf8' : '#6366f1',
-      layerText:  isDark ? '#6b7280' : '#9ca3af'
+      normal:  isDark ? { bg: '#1e1d1b', border: '#4d4a43', text: '#a6a299', glow: null }
+                      : { bg: '#ffffff', border: '#b5afa2', text: '#5d5a53', glow: null },
+      target:  isDark ? { bg: '#2f2615', border: '#e4b558', text: '#ecebe7', glow: null }
+                      : { bg: '#fbf1dc', border: '#875800', text: '#1c1b19', glow: null },
+      sibling: isDark ? { bg: '#18291e', border: '#72cf91', text: '#ecebe7', glow: null }
+                      : { bg: '#e7f2ea', border: '#1d6b3a', text: '#1c1b19', glow: null },
+      path:    isDark ? { bg: '#1f2a36', border: '#8db5df', text: '#ecebe7', glow: null }
+                      : { bg: '#e8eef5', border: '#1f4e79', text: '#1c1b19', glow: null },
+      root:    isDark ? { bg: '#8db5df', border: '#8db5df', text: '#0f2236', glow: null }
+                      : { bg: '#1f4e79', border: '#1f4e79', text: '#ffffff', glow: null },
+      edgeNormal: isDark ? '#36342f' : '#d9d5cc',
+      edgePath:   isDark ? '#8db5df' : '#1f4e79',
+      layerText:  isDark ? '#a6a299' : '#5d5a53'
     };
   }
 
@@ -1325,8 +1096,15 @@ _VERIFY_HTML = """<!DOCTYPE html>
     init();
   }
   
-  // 視窗變形時，自動重新計算最適比例
-  window.addEventListener('resize', () => { fitTree(); });
+  // 視窗寬度改變（旋轉手機、調整視窗）時重新對焦目標節點，維持目前縮放。
+  // 只看寬度：手機捲動時網址列收合會觸發「只有高度改變」的 resize，
+  // 以前每次都 fitTree()，使用者一捲動畫面就被縮到 15%、看不清楚。
+  let _lastWrapW = wrap.clientWidth;
+  window.addEventListener('resize', () => {
+    if (wrap.clientWidth === _lastWrapW) return;
+    _lastWrapW = wrap.clientWidth;
+    focusTarget();
+  });
 
   window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', e => {
     if (!localStorage.getItem('theme')) {
@@ -1360,8 +1138,9 @@ def dashboard():
         tally = json.loads(tally_row['value']) if tally_row else {}
         # v2.0 修正：不再選取 vote 欄位，公告板 dashboard 不應逐票展示投票
         # 內容與 m_hex 的對應（規格書 §19.5）。 <3
-        votes = db.fetchall("SELECT id, m_hex, leaf_hash FROM published_votes ORDER BY id")
-        valid_count = len(votes)
+        # 首頁只列前 50 筆（票數上萬時整頁會非常大）；完整清單見 /api/results
+        votes = db.fetchall("SELECT id, m_hex FROM published_votes ORDER BY id LIMIT 50")
+        valid_count = db.count("published_votes")
         tallied_at_row = db.fetchone("SELECT value FROM bb_state WHERE key = 'tallied_at'")
         tallied_at = int(tallied_at_row['value']) if tallied_at_row else None
 

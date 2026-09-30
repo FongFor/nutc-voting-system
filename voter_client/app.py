@@ -45,6 +45,7 @@ from shared.db_utils import Database
 from shared.config_loader import get_candidates as cfg_get_candidates, make_reload_endpoint, get_service_registration_token
 from shared.key_manager import load_or_fetch_ca_cert, verify_cert_chain_and_cn, get_public_key_from_cert  # <3 v4.0
 from shared.crypto_utils import verify_signature
+from shared.ui_style import UI_HEAD, THEME_TOGGLE
 from shared.tls_utils import load_or_request_tls_certificate, build_mtls_server_context, mtls_client_kwargs  # <3 v4.0：mTLS
 from shared.admin_auth import check_admin_token, admin_auth_error  # <3 v4.0：保護 /api/admin/reset
 
@@ -900,16 +901,7 @@ def serve_crypto_js():
 
 # ── HTML 模板 ──────────────────────────────────────────────────
 
-_BASE_STYLE = """
-<script src="https://cdn.tailwindcss.com"></script>
-<script>
-  tailwind.config = { darkMode: 'class', theme: { extend: { colors: { msblue:'#0078D4', msblueHover:'#0060A8', deepblack:'#050505', cardblack:'#111111' } } } };
-  if (localStorage.getItem('theme')==='dark'||(!('theme' in localStorage)&&window.matchMedia('(prefers-color-scheme: dark)').matches)) document.documentElement.classList.add('dark');
-  function toggleTheme() { document.documentElement.classList.toggle('dark'); localStorage.setItem('theme', document.documentElement.classList.contains('dark')?'dark':'light'); }
-</script>
-<link href="https://fonts.googleapis.com/css2?family=Noto+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
-<style>body{font-family:'Noto Sans',sans-serif;}</style>
-<script src="/voter-crypto.js"></script>
+_BASE_STYLE = UI_HEAD + """<script src="/voter-crypto.js"></script>
 """
 
 # ─────────────────────────────────────────
@@ -918,56 +910,59 @@ _BASE_STYLE = """
 _REGISTER_HTML = """<!DOCTYPE html>
 <html lang="zh-TW">
 <head>
-  <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>選民身分綁定</title>""" + _BASE_STYLE + """
+  <meta charset="UTF-8">
+  <title>身分綁定｜NUTC 線上投票</title>""" + _BASE_STYLE + """
 </head>
-<body class="bg-gray-50 dark:bg-deepblack text-gray-800 dark:text-gray-100 min-h-screen flex items-center justify-center p-4">
-<div class="w-full max-w-md">
-
-  <div class="flex items-center gap-3 mb-8">
-    <div class="w-10 h-10 rounded-xl bg-white/70 dark:bg-cardblack border border-gray-200 dark:border-gray-800 flex items-center justify-center shadow-sm">
-      <svg class="w-5 h-5 text-msblue" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"/></svg>
+<body>
+<header class="topbar">
+  <div class="container topbar-inner">
+    <a class="brand" href="/">
+      <span class="brand-name">NUTC 線上投票</span>
+      <span class="brand-sub">選民身分綁定</span>
+    </a>
+    <div class="topbar-actions">
+      """ + THEME_TOGGLE + """
     </div>
-    <div>
-      <h1 class="text-xl font-semibold text-gray-900 dark:text-white">身分綁定 — Phase 0</h1>
-      <p class="text-xs text-gray-500">金鑰在您的瀏覽器本地生成，私鑰永不上傳</p>
-    </div>
-    <button onclick="toggleTheme()" class="ml-auto p-2 rounded-lg bg-white/70 dark:bg-cardblack border border-gray-200 dark:border-gray-800 text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-900">
-      <svg class="w-4 h-4 hidden dark:block" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z"/></svg>
-      <svg class="w-4 h-4 block dark:hidden" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z"/></svg>
-    </button>
   </div>
+</header>
 
-  <div class="bg-white/70 dark:bg-cardblack/80 backdrop-blur-lg rounded-2xl border border-gray-200 dark:border-gray-800 shadow-md p-7">
-    <div class="space-y-5">
-      <div>
-        <label class="block text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider mb-2">學號 / Voter ID</label>
-        <input id="voterId" type="text" value="{{ default_voter_id }}" placeholder="請輸入您的學號"
-          class="w-full px-4 py-3 rounded-xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-[#1a1a1a] text-sm font-mono text-gray-800 dark:text-gray-200 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-msblue/50 focus:border-msblue transition" spellcheck="false">
+<main>
+  <div class="container stack-lg">
+    <div class="stack-sm">
+      <p class="eyebrow">步驟 1／2</p>
+      <h1>身分綁定</h1>
+      <p class="lead">請輸入學號與教務處寄給您的一次性密碼（OTP）。投票用的金鑰會在這台裝置上產生，私鑰不會離開您的瀏覽器。</p>
+    </div>
+
+    <div class="card stack">
+      <div class="field">
+        <label for="voterId">學號</label>
+        <input id="voterId" class="input mono" type="text" value="{{ default_voter_id }}" placeholder="例如 S11200001"
+               autocomplete="username" autocapitalize="characters" spellcheck="false">
       </div>
-      <div>
-        <label class="block text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider mb-2">一次性密碼 (OTP)</label>
-        <input id="otp" type="text" placeholder="請輸入教務處信件中的 OTP"
-          class="w-full px-4 py-3 rounded-xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-[#1a1a1a] text-sm font-mono text-gray-800 dark:text-gray-200 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-msblue/50 focus:border-msblue transition" spellcheck="false" autocomplete="off">
+      <div class="field">
+        <label for="otp">一次性密碼（OTP）</label>
+        <input id="otp" class="input mono" type="text" placeholder="請輸入信件中的 OTP"
+               autocomplete="one-time-code" spellcheck="false">
+        <span class="hint">OTP 只能使用一次，完成綁定後即失效。</span>
       </div>
-      <button id="regBtn" onclick="doRegister()"
-        class="w-full py-3.5 bg-msblue hover:bg-msblueHover rounded-xl text-white font-medium text-sm transition shadow-md flex justify-center items-center gap-2">
-        <svg id="regIcon" class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"/></svg>
-        <span id="regText">生成金鑰 · 建立 PoP · 申請憑證</span>
+      <button id="regBtn" class="btn btn-primary btn-block" type="button" onclick="doRegister()">
+        <span id="regIcon" aria-hidden="true"></span><span id="regText">完成身分綁定</span>
       </button>
+      <div id="regStatus" class="alert hidden" role="status" aria-live="polite"></div>
     </div>
-    <div id="regStatus" class="mt-4 text-sm hidden p-3 rounded-lg"></div>
-  </div>
 
-  <!-- 步驟說明 -->
-  <div class="mt-5 bg-white/50 dark:bg-cardblack/50 rounded-xl border border-gray-200 dark:border-gray-800 p-4 text-xs text-gray-500 dark:text-gray-400 space-y-1.5">
-    <p class="font-semibold text-gray-700 dark:text-gray-300 mb-2">瀏覽器本地執行步驟：</p>
-    <p>① 在您的瀏覽器生成 RSA-2048 金鑰對（私鑰永不離開此裝置）</p>
-    <p>② 用私鑰對 <code class="font-mono bg-gray-100 dark:bg-gray-800 px-1 rounded">REGISTER|學號|時間戳</code> 簽章（PoP 持有權證明）</p>
-    <p>③ 將公鑰 + OTP + PoP 送至 CA，驗證通過後取得憑證</p>
-    <p>④ 憑證與金鑰對儲存於 IndexedDB（僅此瀏覽器可存取）</p>
+    <details class="card">
+      <summary>這個步驟在您的裝置上做了什麼？</summary>
+      <ol class="numbered small muted" style="margin-top:12px">
+        <li>在瀏覽器產生 RSA-2048 金鑰對，私鑰只存在這台裝置。</li>
+        <li>用私鑰簽署 <code>REGISTER|學號|時間</code>，證明您持有這把金鑰（PoP）。</li>
+        <li>把公鑰、OTP 與簽章送到憑證中心（CA），驗證通過後取得您的選民憑證。</li>
+        <li>憑證與金鑰存放在本機 IndexedDB，只有這個瀏覽器讀得到。</li>
+      </ol>
+    </details>
   </div>
-</div>
+</main>
 
 <script>
 // 若為新一輪自動導向，顯示提示
@@ -975,9 +970,8 @@ _REGISTER_HTML = """<!DOCTYPE html>
   const reason = new URLSearchParams(location.search).get('reason');
   if (reason === 'new_round') {
     const el = document.getElementById('regStatus');
-    el.classList.remove('hidden');
-    el.className = 'mt-4 text-sm p-3 rounded-lg text-blue-700 dark:text-blue-400 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800/50';
-    el.textContent = 'ℹ 系統已進入新一輪投票，請重新輸入學號與新的 OTP 完成身分綁定。';
+    el.className = 'alert alert-info';
+    el.textContent = '系統已進入新一輪投票，請重新輸入學號與新的 OTP 完成身分綁定。';
   }
 })();
 
@@ -999,9 +993,8 @@ _REGISTER_HTML = """<!DOCTYPE html>
   history.replaceState(null, '', location.pathname + location.search);
 
   const el = document.getElementById('regStatus');
-  el.classList.remove('hidden');
-  el.className = 'mt-4 text-sm p-3 rounded-lg text-green-700 dark:text-green-400 bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800/50';
-  el.textContent = `✓ 已透過 QR code 自動帶入學號與 OTP，請確認學號無誤後按下方按鈕完成註冊。`;
+  el.className = 'alert alert-ok';
+  el.textContent = '已透過 QR code 帶入學號與 OTP，請確認學號無誤後按「完成身分綁定」。';
 })();
 
 async function doRegister() {
@@ -1016,7 +1009,7 @@ async function doRegister() {
   if (!otp)     { showStatus(status, '請輸入 OTP', 'error'); return; }
 
   btn.disabled = true;
-  icon.outerHTML = '<svg id="regIcon" class="w-4 h-4 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>';
+  icon.className = 'spin';
 
   try {
     showStatus(status, '① 生成 RSA-2048 金鑰對...', 'info');
@@ -1057,22 +1050,19 @@ async function doRegister() {
     await idbSave({ privJwk, pubPEM, certPem: data.certificate, voterId, voteReceipt: null });
 
     showStatus(status, `✓ 身分綁定成功！憑證已安全儲存於本裝置。`, 'success');
-    document.getElementById('regText').textContent = '✓ 完成，跳轉至投票頁...';
+    document.getElementById('regText').textContent = '完成，正在前往投票頁…';
     setTimeout(() => location.href = '/', 1500);
 
   } catch (e) {
-    showStatus(status, `✗ ${e.message}`, 'error');
+    showStatus(status, e.message, 'error');
     document.getElementById('regBtn').disabled = false;
-    document.getElementById('regText').textContent = '生成金鑰 · 建立 PoP · 申請憑證';
+    document.getElementById('regIcon').className = '';
+    document.getElementById('regText').textContent = '完成身分綁定';
   }
 }
 
 function showStatus(el, msg, type) {
-  el.classList.remove('hidden');
-  const cls = { success:'text-green-700 dark:text-green-400 bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800/50',
-                error:  'text-red-700 dark:text-red-400 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800/50',
-                info:   'text-blue-700 dark:text-blue-400 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800/50' };
-  el.className = `mt-4 text-sm p-3 rounded-lg ${cls[type]}`;
+  el.className = 'alert ' + ({ success: 'alert-ok', error: 'alert-err', info: 'alert-info' }[type] || 'alert-info');
   el.textContent = msg;
 }
 </script>
@@ -1085,72 +1075,64 @@ function showStatus(el, msg, type) {
 _VOTE_HTML = """<!DOCTYPE html>
 <html lang="zh-TW">
 <head>
-  <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>電子投票系統</title>""" + _BASE_STYLE + """
+  <meta charset="UTF-8">
+  <title>投票｜NUTC 線上投票</title>""" + _BASE_STYLE + """
 </head>
-<body class="bg-gray-50 dark:bg-deepblack text-gray-800 dark:text-gray-100 min-h-screen transition-colors duration-300">
-<div class="max-w-2xl mx-auto px-4 py-10">
+<body>
+<header class="topbar">
+  <div class="container topbar-inner">
+    <a class="brand" href="/">
+      <span class="brand-name">NUTC 線上投票</span>
+      <span class="brand-sub">選民 <span id="voterIdDisplay" class="mono">載入中…</span></span>
+    </a>
+    <div class="topbar-actions">
+      <a class="btn btn-sm" href="/status">我的回執</a>
+      <button type="button" class="btn btn-sm" onclick="doLogout()">重新綁定</button>
+      """ + THEME_TOGGLE + """
+    </div>
+  </div>
+</header>
 
-  <!-- 頁首 -->
-  <div class="flex items-center gap-3 mb-8">
-    <div class="w-10 h-10 rounded-xl bg-white/70 dark:bg-cardblack border border-gray-200 dark:border-gray-800 flex items-center justify-center shadow-sm">
-      <svg class="w-5 h-5 text-msblue" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+<main>
+  <div class="container stack-lg">
+    <div class="stack-sm">
+      <p class="eyebrow">步驟 2／2</p>
+      <h1>投下您的一票</h1>
+      <p class="lead">選擇一位候選人後按「確認投票」。選票會在您的裝置上加密，送出後無法更改。</p>
     </div>
-    <div>
-      <h1 class="text-xl font-semibold text-gray-900 dark:text-white">電子投票系統</h1>
-      <p class="text-xs text-gray-500 dark:text-gray-400">選民：<span id="voterIdDisplay" class="font-mono">載入中...</span></p>
+
+    <div id="deadlineCard" class="alert alert-info hidden">
+      <span class="strong">投票截止：</span><span id="deadlineStr" class="mono"></span>
     </div>
-    <div class="ml-auto flex gap-2">
-      <a href="/status" class="text-xs px-3 py-1.5 rounded-lg bg-white/70 dark:bg-cardblack border border-gray-200 dark:border-gray-800 text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-900 transition">投票記錄</a>
-      <button onclick="doLogout()" class="text-xs px-3 py-1.5 rounded-lg bg-white/70 dark:bg-cardblack border border-gray-200 dark:border-gray-800 text-gray-500 hover:bg-red-50 dark:hover:bg-red-900/20 hover:text-red-600 dark:hover:text-red-400 transition">重新身分綁定</button>
-      <button onclick="toggleTheme()" class="p-2 rounded-lg bg-white/70 dark:bg-cardblack border border-gray-200 dark:border-gray-800 text-gray-500">
-        <svg class="w-4 h-4 hidden dark:block" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z"/></svg>
-        <svg class="w-4 h-4 block dark:hidden" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z"/></svg>
+
+    <div id="votedBanner" class="alert alert-ok hidden stack-sm">
+      <p class="alert-title">您已完成投票</p>
+      <p class="small">您的選票識別碼（m_hex）：</p>
+      <code id="votedMhex" class="hash"></code>
+      <p class="small"><a href="/status">查看完整回執</a></p>
+    </div>
+
+    <section id="voteForm" class="card stack" aria-labelledby="candTitle">
+      <h2 id="candTitle" class="section-title">候選人</h2>
+      <div id="candidateList" class="choice-list" role="radiogroup" aria-labelledby="candTitle">
+        <p class="muted">載入候選人中…</p>
+      </div>
+      <button id="voteBtn" class="btn btn-primary btn-block" type="button" onclick="doVote()" disabled>
+        <span id="voteIcon" aria-hidden="true"></span><span id="voteText">確認投票</span>
       </button>
-    </div>
-  </div>
+      <ol id="voteProgress" class="steps hidden" aria-live="polite"></ol>
+    </section>
 
-  <!-- 截止時間 -->
-  <div id="deadlineCard" class="mb-6 hidden bg-white/70 dark:bg-cardblack/80 rounded-xl border border-gray-200 dark:border-gray-800 shadow-md p-4 text-sm text-center text-gray-600 dark:text-gray-400">
-    截止：<span id="deadlineStr" class="font-mono font-medium text-msblue"></span>
-  </div>
+    <section id="successCard" class="alert alert-ok hidden stack-sm" role="status">
+      <p class="alert-title">已收到您的選票</p>
+      <p class="small">為了保護匿名性，選票會和其他選民的票一起批次送出，所以不會立刻出現在計票中心，這是正常的。開票後，請到公告板輸入下面的識別碼（m_hex）確認您的票已被計入：</p>
+      <code id="successMhex" class="hash"></code>
+      <p class="small"><a href="/status">查看完整回執</a></p>
+    </section>
 
-  <!-- 已投票提示 -->
-  <div id="votedBanner" class="hidden mb-6 bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800/50 rounded-xl p-5 text-center">
-    <p class="text-green-700 dark:text-green-400 font-semibold mb-1">您已完成投票</p>
-    <p class="text-xs text-gray-500 dark:text-gray-400">m_hex：<span id="votedMhex" class="font-mono break-all"></span></p>
-    <a href="/status" class="mt-3 inline-block text-xs text-msblue hover:underline">查看完整回執 →</a>
+    <div id="errorCard" class="alert alert-err hidden" role="alert"></div>
   </div>
-
-  <!-- 投票表單 -->
-  <div id="voteForm" class="bg-white/70 dark:bg-cardblack/80 backdrop-blur-lg rounded-2xl border border-gray-200 dark:border-gray-800 shadow-md p-7">
-    <h2 class="font-semibold text-gray-800 dark:text-gray-200 mb-5 text-sm uppercase tracking-wider">請選擇候選人</h2>
-    <div id="candidateList" class="space-y-3 mb-6">
-      <p class="text-gray-400 text-sm">載入候選人中...</p>
-    </div>
-    <button id="voteBtn" onclick="doVote()" disabled
-      class="w-full py-3.5 bg-msblue hover:bg-msblueHover disabled:opacity-50 disabled:cursor-not-allowed rounded-xl text-white font-medium text-sm transition shadow-md flex justify-center items-center gap-2">
-      <svg id="voteIcon" class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"/></svg>
-      <span id="voteText">確認投票</span>
-    </button>
-    <!-- 進度步驟 -->
-    <div id="voteProgress" class="mt-4 space-y-1.5 hidden text-xs font-mono text-gray-500 dark:text-gray-400"></div>
-  </div>
-
-  <!-- 成功提示 -->
-  <div id="successCard" class="hidden mt-6 bg-green-50 dark:bg-green-900/10 border border-green-200 dark:border-green-800/50 rounded-xl p-6">
-    <p class="text-green-700 dark:text-green-400 font-semibold text-base mb-3">已收到您的選票</p>
-    <p class="text-xs text-gray-500 mb-1">
-      為保護匿名性，選票會與其他選民一起批次送出，不會立即出現在計票中心，
-      請放心，這是正常流程。開票後可用 m_hex 到公告板（BB）驗證是否已計入：
-    </p>
-    <code id="successMhex" class="block bg-gray-100 dark:bg-gray-800/60 rounded-lg p-3 text-xs font-mono break-all text-gray-700 dark:text-gray-300 mt-2"></code>
-    <a href="/status" class="mt-4 inline-block text-xs text-msblue hover:underline">查看完整回執 →</a>
-  </div>
-
-  <!-- 錯誤提示 -->
-  <div id="errorCard" class="hidden mt-4 bg-red-50 dark:bg-red-900/10 border border-red-200 dark:border-red-800/50 rounded-xl p-4 text-sm text-red-700 dark:text-red-400"></div>
-</div>
+</main>
 
 <script>
 let _selectedCandidate = null;
@@ -1208,7 +1190,7 @@ async function init() {
     const list = document.getElementById('candidateList');
     list.innerHTML = '';
     if (!candData.candidates || candData.candidates.length === 0) {
-      list.innerHTML = '<p class="text-amber-500 text-sm">⚠ 目前無候選人，請聯繫管理員確認 config.json。</p>';
+      list.innerHTML = '<p class="text-warn">目前沒有候選人，請聯繫選務人員。</p>';
       return;
     }
     candData.candidates.forEach(c => {
@@ -1216,35 +1198,45 @@ async function init() {
       btn.type = 'button';
       btn.setAttribute('data-candidate', c);
       btn.onclick = () => selectCandidate(c);
-      btn.className = 'w-full text-left px-5 py-3.5 rounded-xl border-2 border-gray-200 dark:border-gray-700 hover:border-msblue hover:bg-blue-50/50 dark:hover:bg-blue-900/10 transition font-medium text-gray-800 dark:text-gray-200 text-sm';
+      btn.className = 'choice';
+      btn.setAttribute('role', 'radio');
+      btn.setAttribute('aria-checked', 'false');
       btn.id = `cand-${c}`;
       btn.textContent = c;
       list.appendChild(btn);
     });
   } catch(e) {
-    document.getElementById('candidateList').innerHTML =
-      `<p class="text-red-500 text-sm">✗ 候選人載入失敗：${e.message}<br>請確認選民端服務是否正常運作。</p>`;
+    const p = document.createElement('p');
+    p.className = 'text-err';
+    p.textContent = '候選人載入失敗：' + e.message + '。請稍後重新整理，或聯繫選務人員。';
+    const list = document.getElementById('candidateList');
+    list.innerHTML = '';
+    list.appendChild(p);
   }
 }
 
 function selectCandidate(c) {
   _selectedCandidate = c;
   document.querySelectorAll('[data-candidate]').forEach(el => {
-    el.classList.toggle('border-msblue', el.getAttribute('data-candidate') === c);
-    el.classList.toggle('bg-blue-50/50', el.getAttribute('data-candidate') === c);
-    el.classList.toggle('dark:bg-blue-900/10', el.getAttribute('data-candidate') === c);
+    const on = el.getAttribute('data-candidate') === c;
+    el.classList.toggle('is-selected', on);
+    el.setAttribute('aria-checked', on ? 'true' : 'false');
   });
   document.getElementById('voteBtn').disabled = false;
 }
 
 function addStep(msg, ok) {
-  const div = document.getElementById('voteProgress');
-  div.classList.remove('hidden');
-  const p = document.createElement('p');
-  p.textContent = (ok === true ? '✓ ' : ok === false ? '✗ ' : '⋯ ') + msg;
-  p.className = ok === true ? 'text-green-600 dark:text-green-400' : ok === false ? 'text-red-500' : 'text-blue-500';
-  div.appendChild(p);
-  div.scrollTop = div.scrollHeight;
+  const list = document.getElementById('voteProgress');
+  list.classList.remove('hidden');
+  const li = document.createElement('li');
+  li.className = ok === true ? 'step-ok' : ok === false ? 'step-err' : 'step-run';
+  const mark = document.createElement('span');
+  mark.className = 'mark';
+  mark.textContent = ok === true ? '✓' : ok === false ? '✗' : '…';
+  const text = document.createElement('span');
+  text.textContent = msg;
+  li.append(mark, text);
+  list.appendChild(li);
 }
 
 async function doVote() {
@@ -1396,7 +1388,8 @@ async function doVote() {
 
     document.getElementById('successCard').classList.remove('hidden');
     document.getElementById('successMhex').textContent = m_hex;
-    document.getElementById('voteForm').classList.add('opacity-50', 'pointer-events-none');
+    document.getElementById('voteForm').classList.add('is-disabled');
+    document.getElementById('voteText').textContent = '已完成投票';
 
   } catch(e) {
     addStep(e.message, false);
@@ -1419,7 +1412,12 @@ async function doLogout() {
 }
 
 init().catch(e => {
-  document.body.innerHTML = `<div class="p-8 text-red-600">初始化錯誤：${e.message}</div>`;
+  const main = document.querySelector('main .container') || document.body;
+  const box = document.createElement('div');
+  box.className = 'alert alert-err';
+  box.textContent = '頁面初始化失敗：' + e.message + '。請重新整理，或聯繫選務人員。';
+  main.innerHTML = '';
+  main.appendChild(box);
 });
 </script>
 </body>
@@ -1431,47 +1429,51 @@ init().catch(e => {
 _STATUS_HTML = """<!DOCTYPE html>
 <html lang="zh-TW">
 <head>
-  <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>投票回執</title>""" + _BASE_STYLE + """
+  <meta charset="UTF-8">
+  <title>投票回執｜NUTC 線上投票</title>""" + _BASE_STYLE + """
 </head>
-<body class="bg-gray-50 dark:bg-deepblack text-gray-800 dark:text-gray-100 min-h-screen p-6">
-<div class="max-w-xl mx-auto">
-  <div class="flex items-center gap-3 mb-8">
-    <a href="/" class="text-xs text-msblue hover:underline">← 返回</a>
-    <h1 class="text-xl font-semibold text-gray-900 dark:text-white">投票回執</h1>
-    <button onclick="toggleTheme()" class="ml-auto p-2 rounded-lg bg-white/70 dark:bg-cardblack border border-gray-200 dark:border-gray-800 text-gray-500">
-      <svg class="w-4 h-4 hidden dark:block" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z"/></svg>
-      <svg class="w-4 h-4 block dark:hidden" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z"/></svg>
-    </button>
+<body>
+<header class="topbar">
+  <div class="container topbar-inner">
+    <a class="brand" href="/">
+      <span class="brand-name">NUTC 線上投票</span>
+      <span class="brand-sub">投票回執</span>
+    </a>
+    <div class="topbar-actions">
+      <a class="btn btn-sm" href="/">返回投票頁</a>
+      """ + THEME_TOGGLE + """
+    </div>
   </div>
+</header>
 
-  <div id="recordCard" class="hidden bg-white/70 dark:bg-cardblack/80 rounded-xl border border-gray-200 dark:border-gray-800 shadow-md p-6 space-y-4">
-    <div class="flex items-center gap-2 mb-2">
-      <span class="px-2.5 py-1 rounded-full text-xs font-medium bg-green-50 dark:bg-green-900/20 text-green-700 dark:text-green-400 border border-green-200 dark:border-green-800/50">已投票</span>
-      <span id="recVotedAt" class="text-xs text-gray-400"></span>
+<main>
+  <div class="container stack-lg">
+    <div class="stack-sm">
+      <h1>投票回執</h1>
+      <p class="lead">這份回執只存在這台裝置上，伺服器沒有保存「誰投給誰」的紀錄。</p>
     </div>
-    <div>
-      <p class="text-xs text-gray-400 uppercase tracking-wider mb-1">選民 ID</p>
-      <p id="recVoterId" class="font-mono text-sm text-gray-800 dark:text-gray-200"></p>
-    </div>
-    <div>
-      <p class="text-xs text-gray-400 uppercase tracking-wider mb-1">SN</p>
-      <p id="recSn" class="font-mono text-sm text-gray-800 dark:text-gray-200"></p>
-    </div>
-    <div>
-      <p class="text-xs text-gray-400 uppercase tracking-wider mb-1">投票對象</p>
-      <p id="recVote" class="font-mono text-sm text-gray-800 dark:text-gray-200"></p>
-    </div>
-    <div>
-      <p class="text-xs text-gray-400 uppercase tracking-wider mb-1">m_hex（可至 BB 驗證）</p>
-      <code id="recMhex" class="block bg-gray-50 dark:bg-[#050505] rounded-lg p-3 text-xs font-mono break-all text-gray-700 dark:text-gray-300 border border-gray-100 dark:border-gray-800/80"></code>
-    </div>
+
+    <section id="recordCard" class="card stack hidden">
+      <div class="row-between">
+        <span class="badge badge-ok">已投票</span>
+        <span id="recVotedAt" class="small muted"></span>
+      </div>
+      <dl class="dl">
+        <div><dt>學號</dt><dd id="recVoterId" class="mono"></dd></div>
+        <div><dt>選票序號（SN）</dt><dd id="recSn" class="mono"></dd></div>
+        <div><dt>投票對象</dt><dd id="recVote"></dd></div>
+        <div><dt>選票識別碼（m_hex）</dt><dd><code id="recMhex" class="hash"></code></dd></div>
+      </dl>
+      <div class="alert alert-info small">開票後，到公告板的「驗證選票」輸入上面的 m_hex，就能確認您的票有被計入，而且不必透露您投給誰。</div>
+    </section>
+
+    <section id="emptyCard" class="card text-center stack hidden">
+      <p class="muted">這台裝置上沒有投票紀錄。</p>
+      <p><a class="btn btn-primary" href="/">前往投票</a></p>
+    </section>
   </div>
-  <div id="emptyCard" class="hidden text-center py-16 text-gray-400">
-    <p>尚未找到投票記錄。</p>
-    <a href="/" class="mt-3 inline-block text-sm text-msblue hover:underline">前往投票</a>
-  </div>
-</div>
+</main>
+
 <script>
 // v3.0 修正：回執只存在本機 IndexedDB，這裡直接讀本機資料渲染，
 // 伺服器端完全不參與、也看不到任何一筆「身分 ↔ 投票內容」的對應。 <3
