@@ -232,6 +232,11 @@ services:
     command: python voter_client/app.py
     environment:
       <<: [*common-env, *service-urls]
+      # 限流設定（見 voter_client/app.py）。以前沒有轉送進容器，在 .env
+      # 設定也不會生效。.env 未設定時沿用程式內的預設值。
+      RATE_LIMIT_PER_VOTER: ${RATE_LIMIT_PER_VOTER:-5 per minute}
+      RATE_LIMIT_PER_IP:    ${RATE_LIMIT_PER_IP:-300 per minute}
+      RATE_LIMIT_DEFAULT:   ${RATE_LIMIT_DEFAULT:-600 per minute}
     volumes:
       - ./config.json:/app/config.json:ro
       - voter_keys:/app/voter_client/keys  # <3 v4.0：同上，TLS 金鑰對需要持久化

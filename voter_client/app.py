@@ -317,18 +317,48 @@ app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)  # <3
 
 # v3.0 新增：投票截止前的流量管制。防的不是精密攻擊，是最單純的「灌爆
 # 流量讓還沒投票的真選民卡住投不進去」——選舉截止時間是硬性的，投票期
-# 間被灌爆而延誤，沒有辦法事後補救。單一選民一次完整投票流程（認證、
-# 取簽章、提交信封）加起來也就個位數次請求，這裡的門檻對正常使用完全
-# 不構成阻礙。 <3
+# 間被灌爆而延誤，沒有辦法事後補救。
+#
+# 原本四支關鍵端點全部「依來源 IP」限制每分鐘 10 次。但校園 Wi-Fi 與手機
+# 電信網路都是大量使用者共用少數對外 IP（NAT），等於整個校園加起來每分鐘
+# 只能投大約 10 票。現在改成兩層：
+#   1. 依選民／憑證限制（很緊）：每位選民、每張 Voting Token 每分鐘 N 次，
+#      正常使用碰不到，但擋得住同一身分反覆嘗試。
+#        issue_cert       → entity_id（學號；註冊本來就是實名）
+#        tpa/auth         → auth_packet.payload.sender_id（認證本來就是實名）
+#        tpa/blind_sign   → voting_token.payload.token_id
+#        submit_envelope  → token_hash
+#      後兩支屬於匿名階段，刻意不用學號，只用該步驟本來就會出示的 token。
+#      限流計數只保存雜湊值，記憶體裡不留明文學號或 token。
+#   2. 依來源 IP 的寬鬆總量上限：擋單一來源灌流量，數值要大到一整間教室
+#      共用同一個 IP 也不會互相卡住。
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
+
+RATE_LIMIT_PER_VOTER = os.environ.get("RATE_LIMIT_PER_VOTER", "5 per minute")
+RATE_LIMIT_PER_IP    = os.environ.get("RATE_LIMIT_PER_IP", "300 per minute")
 
 limiter = Limiter(
     get_remote_address,
     app=app,
-    default_limits=[os.environ.get("RATE_LIMIT_DEFAULT", "30 per minute")],
+    default_limits=[os.environ.get("RATE_LIMIT_DEFAULT", "600 per minute")],
     storage_uri="memory://",
 )  # <3
+
+
+def _identity_key(scope: str, *path: str):
+    """回傳 flask-limiter 的 key_func：從 JSON body 取出 path 指到的欄位，
+    以雜湊後的值作為限流鍵。欄位缺漏時退回來源 IP（這種請求後端本來
+    就會拒絕，只是不讓它繞過限流）。"""
+    def key_func():
+        value = request.get_json(silent=True)
+        for field in path:
+            value = value.get(field) if isinstance(value, dict) else None
+        if not isinstance(value, str) or not value:
+            return f"{scope}:ip:{get_remote_address()}"
+        digest = hashlib.sha256(value.encode("utf-8")).hexdigest()[:32]
+        return f"{scope}:{digest}"
+    return key_func
 
 
 @app.errorhandler(429)
@@ -354,7 +384,8 @@ def _proxy(method, url, data=None, params=None):
 # ── API 代理路由 ────────────────────────────────────────────
 
 @app.route('/api/proxy/ca/issue_cert', methods=['POST'])
-@limiter.limit(os.environ.get("RATE_LIMIT_ISSUE_CERT", "10 per minute"))  # <3
+@limiter.limit(RATE_LIMIT_PER_VOTER, key_func=_identity_key("issue_cert", "entity_id"))
+@limiter.limit(RATE_LIMIT_PER_IP)
 def proxy_ca_issue_cert():
     return _proxy("POST", f"{CA_URL}/api/issue_cert", request.get_json())
 
@@ -374,12 +405,14 @@ def proxy_tpa_pk():
     return _proxy("GET", f"{TPA_URL}/api/public_key")
 
 @app.route('/api/proxy/tpa/auth', methods=['POST'])
-@limiter.limit(os.environ.get("RATE_LIMIT_AUTH", "10 per minute"))  # <3
+@limiter.limit(RATE_LIMIT_PER_VOTER, key_func=_identity_key("tpa_auth", "auth_packet", "payload", "sender_id"))
+@limiter.limit(RATE_LIMIT_PER_IP)
 def proxy_tpa_auth():
     return _proxy("POST", f"{TPA_URL}/api/auth", request.get_json())
 
 @app.route('/api/proxy/tpa/blind_sign', methods=['POST'])
-@limiter.limit(os.environ.get("RATE_LIMIT_AUTH", "10 per minute"))  # <3
+@limiter.limit(RATE_LIMIT_PER_VOTER, key_func=_identity_key("blind_sign", "voting_token", "payload", "token_id"))
+@limiter.limit(RATE_LIMIT_PER_IP)
 def proxy_tpa_blind_sign():
     return _proxy("POST", f"{TPA_URL}/api/blind_sign", request.get_json())
 
@@ -434,7 +467,8 @@ def api_admin_reset():
 
 
 @app.route('/api/submit_envelope', methods=['POST'])
-@limiter.limit(os.environ.get("RATE_LIMIT_AUTH", "10 per minute"))  # <3
+@limiter.limit(RATE_LIMIT_PER_VOTER, key_func=_identity_key("submit_envelope", "token_hash"))
+@limiter.limit(RATE_LIMIT_PER_IP)
 def submit_envelope():
     """
     [POST] 選民提交數位信封（v3.0 改為批次混合，不再即時轉送給 CC）。
