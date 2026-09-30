@@ -2,3 +2,18 @@
 __pycache__/
 *.pyc
 *.db
+
+# 金鑰與執行期資料（各服務啟動時自動產生，絕不可 commit）
+**/keys/
+*.pem
+*.key
+
+# 日誌與模擬輸出（可能含選民學號、m_hex 等測試資料）
+*.log
+*.jsonl
+
+# Word 開檔時的暫存鎖定檔（內含編輯者名稱）
+~$*
+
+# 個人的 Claude Code 設定
+.claude/settings.local.json
