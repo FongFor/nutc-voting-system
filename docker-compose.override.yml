@@ -12,23 +12,35 @@
 # 這樣就只有 Caddy 對外開 80/443，CA/TPA/TA/CC/Admin 完全連不到。
 # ============================================================
 
+# 本機開發沒有 .env 時，允許退回 config.json 裡的公開預設 token（見
+# shared/config_loader.py 的 _get_secret）。正式部署只用 docker-compose.yml，
+# 不會帶到這個設定，忘了設 .env 時所有 Admin 驗證會直接拒絕。
+x-dev-env: &dev-env
+  ALLOW_INSECURE_DEFAULT_TOKENS: "1"
+
 services:
   ca:
+    environment: *dev-env
     ports:
       - "5001:5001"
   tpa:
+    environment: *dev-env
     ports:
       - "5000:5000"
   ta:
+    environment: *dev-env
     ports:
       - "5002:5002"
   cc:
+    environment: *dev-env
     ports:
       - "5003:5003"
   bb:
+    environment: *dev-env
     ports:
       - "5004:5004"
   voter:
+    environment: *dev-env
     ports:
       - "5005:5005"
   # admin：不在這裡重複宣告 port——docker-compose.yml 本身已經幫 admin
@@ -36,3 +48,5 @@ services:
   # 測試從同一台機器連 https://localhost:5010 一樣連得到，不需要在這裡
   # 再疊加一次 0.0.0.0 綁定；疊加會讓 compose 把兩筆 ports 設定合併成
   # 清單而非取代，導致同一個容器 port 同時嘗試綁定兩次而啟動失敗。 <3
+  admin:
+    environment: *dev-env

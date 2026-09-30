@@ -80,6 +80,7 @@ class _HotReloadConfig:
         self._raw: dict = {}
         self._cfg: _Config = None
         self._mtime: float = 0.0
+        self._warned_missing_secrets: set = set()  # 每個缺漏的密鑰只警告一次
         self._load()
 
     def _load(self):
@@ -152,17 +153,33 @@ class _HotReloadConfig:
 
     def get_admin_api_token(self) -> str:
         """取得 Admin API Bearer Token，優先讀取環境變數 ADMIN_API_TOKEN。"""
-        env_val = os.environ.get("ADMIN_API_TOKEN")
-        if env_val:
-            return env_val
-        return str(self.raw.get("security", {}).get("admin_api_token", ""))
+        return self._get_secret("ADMIN_API_TOKEN", "admin_api_token")
 
     def get_service_registration_token(self) -> str:
         """取得服務憑證一次性註冊權杖，優先讀取環境變數 SERVICE_REGISTRATION_TOKEN。"""
-        env_val = os.environ.get("SERVICE_REGISTRATION_TOKEN")
+        return self._get_secret("SERVICE_REGISTRATION_TOKEN", "service_registration_token")
+
+    def _get_secret(self, env_name: str, config_key: str) -> str:
+        """讀取密鑰：環境變數優先；config.json 的預設值只在明確允許時才使用。
+
+        config.json 放在公開的 git repo 裡，裡面的預設 token 任何人都看得到。
+        以前環境變數沒設時會默默退回這組預設值——正式環境只要忘了設 .env，
+        等於用一組公開的密碼保護 Admin 端點（包括 BB 對外公開的重置端點）。
+        現在只有設定 ALLOW_INSECURE_DEFAULT_TOKENS=1（僅本機開發用，見
+        docker-compose.override.yml）才會退回預設值；否則回傳空字串，所有
+        驗證端（check_admin_token、CA 的 registration_token 檢查）遇到空的
+        預期值都會直接拒絕（fail-secure）。
+        """
+        env_val = os.environ.get(env_name)
         if env_val:
             return env_val
-        return str(self.raw.get("security", {}).get("service_registration_token", ""))
+        if os.environ.get("ALLOW_INSECURE_DEFAULT_TOKENS") == "1":
+            return str(self.raw.get("security", {}).get(config_key, ""))
+        if env_name not in self._warned_missing_secrets:
+            self._warned_missing_secrets.add(env_name)
+            print(f"[Config] 警告：未設定環境變數 {env_name}，相關驗證將一律拒絕"
+                  f"（不使用 config.json 的公開預設值；本機開發可設 ALLOW_INSECURE_DEFAULT_TOKENS=1）")
+        return ""
 
     def svc_url(self, service: str) -> str:
         """
