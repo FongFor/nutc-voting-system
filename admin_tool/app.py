@@ -244,8 +244,18 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
     <section class="card card-flush" aria-labelledby="rosterTitle">
       <div class="card-head">
         <h2 id="rosterTitle" class="section-title">選民名冊</h2>
-        <span class="small muted">OTP 預設遮蔽，滑鼠移上或點一下即可顯示</span>
+        <form method="GET" action="/" class="row" role="search" style="flex: 1 1 280px; justify-content: flex-end">
+          <label class="sr-only" for="rosterQ">查詢學號</label>
+          <input id="rosterQ" class="input mono" style="flex: 1 1 100px; min-width: 0; width: auto; min-height: 40px; padding-top: 6px; padding-bottom: 6px"
+                 type="search" name="q" value="{{ q }}" placeholder="查詢學號（可輸入部分）" autocomplete="off" spellcheck="false">
+          <button type="submit" class="btn btn-sm btn-primary">查詢</button>
+          {% if q %}<a class="btn btn-sm" href="/">清除</a>{% endif %}
+        </form>
       </div>
+      <p class="small muted" style="padding: 10px 20px; border-bottom: 1px solid var(--border)">
+        {% if q %}「{{ q }}」符合 {{ match_count }} 筆{% if match_count > voters|length %}，顯示前 {{ voters|length }} 筆，請輸入更完整的學號{% endif %}
+        {% else %}共 {{ stats.total }} 筆{% if stats.total > voters|length %}，顯示最新 {{ voters|length }} 筆，其他學號請用上方查詢{% endif %}{% endif %}・OTP 預設遮蔽，滑鼠移上或點一下即可顯示
+      </p>
       {% if voters %}
       <div class="table-wrap">
         <table class="table table-stack">
@@ -277,7 +287,7 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
         </table>
       </div>
       {% else %}
-      <div class="card-body muted text-center">尚未新增任何選民，請使用上方表單新增。</div>
+      <div class="card-body muted text-center">{% if q %}查無符合「{{ q }}」的學號。{% else %}尚未新增任何選民，請使用上方表單新增。{% endif %}</div>
       {% endif %}
     </section>
   </div>
@@ -565,6 +575,9 @@ _PRINT_HTML = """<!DOCTYPE html>
 
 # ── 路由 ──────────────────────────────────────────────────────
 
+ROSTER_PAGE_LIMIT = 100  # 首頁名冊一次最多列幾筆
+
+
 @app.route('/')
 def dashboard():
     # 從 CA 同步選民認證狀態（把 CA 端已完成的 registered 狀態寫回本地）
@@ -591,16 +604,35 @@ def dashboard():
         pass
 
     # QR 不在這裡產生，改由 /qr/<voter_id> 在點開時才產生（見 openQrModal）
-    voters = db.fetchall(
-        "SELECT id, voter_id, otp, otp_hash, ca_status, created_at, distributed FROM voter_roster ORDER BY id DESC"
-    )
+    # 名冊不再整份載入（2500 人約 4MB）：沒有查詢時只列最新 ROSTER_PAGE_LIMIT 筆，
+    # 有查詢時以學號部分比對（SQLite 的 LIKE 對英文字母不分大小寫）。
+    q = request.args.get('q', '').strip()
+    columns = "id, voter_id, otp, otp_hash, ca_status, created_at, distributed"
+    match_count = None
+    if q:
+        like = '%' + q.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_') + '%'
+        voters = db.fetchall(
+            f"SELECT {columns} FROM voter_roster WHERE voter_id LIKE ? ESCAPE '\\' ORDER BY voter_id LIMIT ?",
+            (like, ROSTER_PAGE_LIMIT),
+        )
+        match_count = db.fetchone(
+            "SELECT COUNT(*) AS n FROM voter_roster WHERE voter_id LIKE ? ESCAPE '\\'", (like,)
+        )['n']
+    else:
+        voters = db.fetchall(f"SELECT {columns} FROM voter_roster ORDER BY id DESC LIMIT ?", (ROSTER_PAGE_LIMIT,))
     for v in voters:
         v['created_at_str'] = _ts_fmt(v['created_at'])
 
-    total      = len(voters)
-    pending    = sum(1 for v in voters if v['ca_status'] == 'pending')
-    registered = sum(1 for v in voters if v['ca_status'] == 'registered')
-    distributed = sum(1 for v in voters if v['distributed'])
+    # 統計數字以 SQL 計算整份名冊，不受上面只列部分名單影響
+    counts = db.fetchone(
+        "SELECT COUNT(*) AS total, "
+        "SUM(ca_status = 'pending') AS pending, SUM(ca_status = 'registered') AS registered, "
+        "SUM(distributed != 0) AS distributed FROM voter_roster"
+    )
+    total       = counts['total'] or 0
+    pending     = counts['pending'] or 0
+    registered  = counts['registered'] or 0
+    distributed = counts['distributed'] or 0
 
     # 查詢選舉狀態（供 UI 顯示）
     election_state = 'standby'
@@ -620,6 +652,8 @@ def dashboard():
         stats=dict(total=total, pending=pending, registered=registered, distributed=distributed),
         election_state=election_state,
         election_deadline_str=election_deadline_str,
+        q=q,
+        match_count=match_count,
     )
 
 
