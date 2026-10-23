@@ -29,8 +29,9 @@ const CONFIG = {
   // 選民實際會連的公開投票網址（Caddy 反向代理後面那個網域）
   VOTER_URL: 'https://nutc-vote.accesscam.org',
 
-  // Admin 後台網址——用 Tailscale 就填 https://<tailscale-ip>:5011，
-  // 用 SSH tunnel 就填 https://localhost:5010（tunnel 要保持連著）
+  // Admin 後台網址——用 Tailscale 就填 https://<伺服器的 tailscale-ip>:5011
+  // （執行這支腳本的電腦要登入同一個 Tailscale 帳號）；
+  // 用 SSH tunnel 就填 https://localhost:5010（tunnel 要連到新主機並保持連著）
   ADMIN_URL: 'https://localhost:5010',
 
   // Admin 用的是自簽憑證（不是 Let's Encrypt），Node 預設會拒絕，
@@ -65,8 +66,10 @@ const CONFIG = {
   // 不設上限時，尖峰時段加上重試會讓上千個請求同時打進伺服器（上一輪 2500
   // 人模擬就是這樣把伺服器拖垮的）。所有選民都從同一個 IP 發出，會共用
   // voter_client 的每 IP 總量上限（預設每支關鍵端點每分鐘 300 次，約每分鐘
-  // 300 人）；新主機（A1）可視壓測結果調高，舊的 E2.1.Micro 建議 2～3。
-  MAX_CONCURRENT_VOTERS: 5,
+  // 300 人）。新主機（A1，1 OCPU／6 GB）先用 10：每位選民一次流程約數秒，
+  // 10 人並行約每分鐘可完成 100～200 人，足以消化開頭／結尾的尖峰；
+  // 觀察伺服器負載後再調整。舊的 E2.1.Micro 建議 2～3。
+  MAX_CONCURRENT_VOTERS: 10,
 
   // 「開頭尖峰、中間平緩、結尾又衝一波」的分佈參數：
   //   pStart / pEnd：落在開頭／結尾尖峰的人數比例，剩下 1-pStart-pEnd 落在中間平緩段
@@ -78,7 +81,8 @@ const CONFIG = {
   BATCH_ADD_CHUNK_SIZE: 50,
   BATCH_ADD_DELAY_MS: 800,
 
-  LOG_FILE: './simulate_voters_log.jsonl',
+  // 每次執行寫到自己的日誌檔（檔名含啟動時間），不會跟前幾輪的結果混在一起
+  LOG_FILE: `./simulate_voters_log_${new Date().toISOString().slice(0, 16).replace(/[-:T]/g, '')}.jsonl`,
 };
 
 // ============================================================
@@ -280,7 +284,8 @@ async function castVote(ctx, voterId, privateKey, certPem, candidate) {
   const votingToken = authData.voting_token;
   if (!votingToken) throw new Error('TPA 未核發 Voting Token');
 
-  const sn = 'SN' + Date.now() + (voterId.slice(-3) || '000');
+  // 與 voter_client 相同：SN 用 128-bit 亂數，避免公開的 m 被窮舉反推
+  const sn = 'SN' + vcrypto.bytesToHex(crypto.getRandomValues(new Uint8Array(16)));
   const innerHash = await vcrypto.sha256Hex(voterId + '|' + sn + '|' + candidate);
   const outerHash = await vcrypto.sha256Hex(innerHash + '|' + candidate);
   const m_hex = outerHash;

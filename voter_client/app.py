@@ -1307,7 +1307,9 @@ async function doVote() {
 
     // Step 3: 計算選票雜湊 m（FDH 預處理）
     addStep('計算選票雜湊值...');
-    const sn         = 'SN' + Date.now() + (_voterId.slice(-3) || '000');
+    // SN 必須是高熵亂數：公告板公開的 m 由學號、SN、候選人雜湊而成，
+    // 若 SN 可猜（例如時間戳），任何人都能窮舉反推出誰投給誰。
+    const sn         = 'SN' + bytesToHex(crypto.getRandomValues(new Uint8Array(16)));
     const innerHash  = await sha256Hex(_voterId + '|' + sn + '|' + candidate);
     const outerHash  = await sha256Hex(innerHash + '|' + candidate);
     const m_hex      = outerHash;                   // 64-char hex，不含 0x
