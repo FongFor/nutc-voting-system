@@ -18,6 +18,7 @@ v2.0 規範 §9.6, §3.4
 """
 
 import os
+import re
 import json
 import hashlib
 
@@ -151,19 +152,20 @@ def open_envelope_layer1(envelope: dict, cc_private_key) -> dict:
     }
 
 
-def open_envelope_layer2(pending: dict, ta_private_key, tpa_e: int, tpa_n: int) -> dict:
+def open_envelope_layer2(pending: dict, ta_private_key, tpa_e: int, tpa_n: int, election_round: int) -> dict:
     """
     Phase 5（CC 開票時）：用 k 解密 C_Data，再用 SK_TA 解開內層，驗證選票。
 
     v2.0 規範驗證流程：
       1. 用 k 和 AAD 解密 C_Data (AES-GCM)，驗證 Tag
       2. 用 SK_TA 解開內層 E_PK_TA(...)，取得 (hash_inner | vote_content)
-      3. 重新計算 m_check = H(hash_inner || "|" || vote_content)，與外層 m 比對
+      3. 重新計算 m_check = H(hash_inner || "|" || 輪次 || "|" || vote_content)，與外層 m 比對
+         （輪次 = 本輪 TA 截止時間，由 CC 自己提供；上一輪的選票在這裡就對不上）
       4. 驗證 TPA 盲簽章：(S')^e ≡ FDH(m) (mod n)  [v2.0 使用 FDH]
 
     v2.0 規範 §4.4
 
-    回傳：{"vote": str, "m_hex": str} 或拋出 Exception
+    回傳：{"vote": str, "m_hex": str}（m_hex 一律為 64 位小寫 hex）或拋出 Exception
     """
     from shared.blind_signature import verify_blind_signature
     from shared.format_utils import hex_to_int
@@ -190,7 +192,15 @@ def open_envelope_layer2(pending: dict, ta_private_key, tpa_e: int, tpa_n: int) 
         raise ValueError("AES 明文格式錯誤")
     inner_enc_b64 = parts[0]
     s_prime_hex   = parts[1]
-    m_hex         = parts[2]
+
+    # m 一律正規化成 64 位小寫 hex（不含 0x）再往下用。比對 m 與 FDH 都不分
+    # 大小寫，若保留原字串，同一張合法選票改大小寫或加 0x 就成了「不同的
+    # m_hex」，繞過 valid_votes.m_hex 的 UNIQUE 去重而被重複計票。
+    m_raw  = parts[2]
+    m_body = m_raw[2:] if m_raw[:2] in ("0x", "0X") else m_raw
+    if not re.fullmatch(r"[0-9a-fA-F]{64}", m_body):
+        raise ValueError("m 格式錯誤（必須是 64 位 hex）")
+    m_hex = m_body.lower()
 
     # 步驟 2：用 SK_TA 解開內層 E_PK_TA(hash_inner | vote_content)
     inner_enc = b64_to_bytes(inner_enc_b64)
@@ -208,26 +218,19 @@ def open_envelope_layer2(pending: dict, ta_private_key, tpa_e: int, tpa_n: int) 
     hash_inner_from_env = inner_parts[0]
     vote_content        = inner_parts[1]
 
-    # 步驟 3：重新計算 m_check = H(hash_inner || "|" || vote_content)
-    m_check_hex = sha256_hex(f"{hash_inner_from_env}|{vote_content}".encode('utf-8'))
-    m_check_int = int(m_check_hex, 16)
-    m_int       = hex_to_int(m_hex)
-
-    if m_check_int != m_int:
-        raise ValueError("雜湊比對失敗（m 不一致）")
+    # 步驟 3：重新計算 m_check = H(hash_inner || "|" || 輪次 || "|" || vote_content)
+    m_check_hex = sha256_hex(f"{hash_inner_from_env}|{election_round}|{vote_content}".encode('utf-8'))
+    if m_check_hex != m_hex:
+        raise ValueError("雜湊比對失敗（m 不一致，或不是本輪的選票）")
 
     # 步驟 4：驗證 TPA 盲簽章 (v2.0 使用 FDH)
     # verify_blind_signature 現在接受 bytes 並內部計算 FDH
     # m_hex 可能含 "0x" 前綴（int_to_hex 的設計），bytes.fromhex 不接受 0x 前綴
     s_prime_int = hex_to_int(s_prime_hex)
-    m_hex_clean = m_hex[2:] if m_hex.startswith(("0x", "0X")) else m_hex
-    m_bytes = bytes.fromhex(m_hex_clean)
-    if not verify_blind_signature(s_prime_int, tpa_e, tpa_n, m_bytes):
+    if not verify_blind_signature(s_prime_int, tpa_e, tpa_n, bytes.fromhex(m_hex)):
         raise ValueError("盲簽章驗證失敗（FDH 驗證不通過）")
 
-    # 統一去除 0x 前綴，與 Merkle Proof 查詢格式一致
-    m_hex_out = m_hex[2:] if m_hex.startswith(("0x", "0X")) else m_hex
-    return {"vote": vote_content, "m_hex": m_hex_out}
+    return {"vote": vote_content, "m_hex": m_hex}
 
 
 def sign_data(data: bytes, private_key) -> bytes:

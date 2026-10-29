@@ -43,7 +43,19 @@
 }
 
 {$BB_ADDRESS:bb.localhost} {
-	log
+	# 公告板的存取紀錄做遮罩：不留 Referer（是否從投票網站點過來）、不留查詢
+	# 字串（舊網址 /verify?m_hex= 會帶選票識別碼）、IP 只留前段。正常驗票在
+	# 瀏覽器本機完成、不會送出 m_hex，這裡是避免意外請求被長期保存的第二層。
+	# 注意：遮罩只影響寫進紀錄的內容，Caddy 處理請求當下仍看得到原始資訊。
+	log {
+		format filter {
+			wrap json
+			request>headers>Referer delete
+			request>uri regexp ^([^?]*)\?.*$ ${1}
+			request>remote_ip ip_mask 16 32
+			request>client_ip ip_mask 16 32
+		}
+	}
 	reverse_proxy https://bb:5004 {
 		transport http {
 			tls_trusted_ca_certs /certs/ca_root_cert.pem

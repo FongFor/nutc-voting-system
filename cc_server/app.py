@@ -93,6 +93,23 @@ def _get_deadline() -> int:
         print(f"[CC] 無法從 TA 取得截止時間（{e}），截止時間強制執行暫停。")
     return 0
 
+
+def _fetch_election_round() -> int:
+    """直接向 TA 查本輪截止時間（不用快取），作為開票驗證選票 m 與公告的輪次。
+
+    選民產生 m 時會把這個值算進去（見 voter_client 的 m 計算），CC 驗票必須
+    用同一個值；_get_deadline() 的快取可能停在上一輪，這裡不能沿用。
+    取不到時回傳 0，由呼叫端拒絕開票。
+    """
+    try:
+        resp = http_requests.get(f"{TA_URL}/api/deadline", timeout=5, **_CC_MTLS)
+        data = resp.json()
+        if data.get("status") == "success":
+            return int(data.get("deadline") or 0)
+    except Exception as e:
+        print(f"[CC] 無法從 TA 取得本輪截止時間（{e}）")
+    return 0
+
 # ============================================================
 # 資料庫初始化
 # ============================================================
@@ -884,6 +901,12 @@ def _do_tally() -> dict:
         return {"status": "error", "code": "TA_KEY_MISMATCH",
                 "message": "TA 釋放的私鑰與其認證公鑰不匹配，拒絕使用（可能遭偽冒攻擊）"}  # <3
 
+    # 選票的 m 綁定本輪輪次（TA 截止時間），驗票與公告都用這同一個值。
+    election_round = _fetch_election_round()
+    if election_round <= 0:
+        return {"status": "error", "code": "ROUND_UNAVAILABLE",
+                "message": "無法向 TA 取得本輪截止時間，暫停開票（避免用錯輪次判定選票）"}
+
     # 步驟 4：解密驗證所有暫存信封
     # 走到這裡代表本輪還沒開票完成（done != '1'，且已取得開票鎖）。valid_votes
     # 若有資料，一定是上次開票中途失敗留下的：全部清掉、信封退回 pending
@@ -914,7 +937,7 @@ def _do_tally() -> dict:
             'k':      env['k'],
         }
         try:
-            outcomes.append((env['id'], open_envelope_layer2(pending, ta_private_key, tpa_e, tpa_n), None))
+            outcomes.append((env['id'], open_envelope_layer2(pending, ta_private_key, tpa_e, tpa_n, election_round), None))
         except Exception as exc:
             outcomes.append((env['id'], None, str(exc)))
         if i % 100 == 0 or i == total:
@@ -1025,7 +1048,7 @@ def _do_tally() -> dict:
             "tally":             tally,
             "valid_m_hex_list":  m_hex_list,   # <3 只給 m_hex，不含 vote
             "merkle_leaf_count": len(m_hex_list),  # <3
-            "deadline":          _get_deadline(),  # <3
+            "deadline":          election_round,  # 與驗票所用的輪次相同；選民回執的 round 對照這個值
             "cc_id":             CC_ID,  # <3
             "tallied_at":        now,
         }

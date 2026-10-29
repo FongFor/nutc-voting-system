@@ -4,15 +4,18 @@ bb_server/app.py  —  公告板 (BB)
 公開展示計票結果的地方。CC 開票完成後會把結果推送過來，
 包含 Merkle Root、各候選人得票數、以及所有合法選票的清單。
 
-選民可以輸入自己的 m_hex 來驗證選票，頁面會顯示互動式的
-Merkle Tree 圖，清楚標示從葉節點到根的驗證路徑。
+選民在 /receipt 匯入回執檔或輸入 m_hex 驗證選票：瀏覽器下載整份 CC 簽章
+結果包，在本機驗章、比對清單、重建 Merkle Tree 並畫出驗證路徑。正常驗票
+流程不會把選票識別碼送給伺服器——伺服器只要收到過 m_hex，存取紀錄就能把
+「某個 IP 查了哪張票」串起來。
 
 端點：
   GET  /                          公告板首頁（計票結果）
-  GET  /verify                    Merkle Proof 視覺化驗證頁
+  GET  /receipt                   驗證選票（本機驗證，不送出 m_hex）
+  GET  /verify                    已停用，導向 /receipt（舊連結相容）
   POST /api/publish               接收 CC 推送的計票結果
   GET  /api/results               查詢計票結果與 Merkle Root
-  GET  /api/merkle_proof/<m_hex>  取得指定選票的 Merkle Proof
+  GET  /api/signed_bundle         CC 簽章的結果包原文（本機驗證用）
   GET  /api/config                查看目前設定
   POST /api/config/reload         重新載入 config.json
 """
@@ -21,16 +24,16 @@ import os
 import sys
 import json
 import time
+import re
+import logging
 import datetime
-import threading
 
 # 確保 shared/ 可被 import
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from flask import Flask, request, jsonify, render_template_string
+from flask import Flask, request, jsonify, render_template_string, redirect
 import requests as http_requests
 
-from shared.merkle_tree import MerkleTree, h_leaf
 from shared.format_utils import sha256_hex, ts_to_human, b64_to_bytes
 from shared.db_utils import Database
 from shared.config_loader import make_reload_endpoint, get_service_registration_token  # <3 v4.0
@@ -114,6 +117,27 @@ except Exception as ex:
 app = Flask(__name__)
 
 
+@app.after_request
+def _no_referrer(resp):
+    resp.headers.setdefault("Referrer-Policy", "no-referrer")
+    return resp
+
+
+class _StripQueryString(logging.Filter):
+    """Werkzeug 的存取紀錄會印出完整網址；拿掉查詢字串，避免有人用舊網址
+    （例如 /verify?m_hex=…）查票時，把 m_hex 和時間留在容器日誌裡。"""
+    _QUERY = re.compile(r'\?[^\s"]*')
+
+    def filter(self, record):
+        msg = record.getMessage()
+        if '?' in msg:
+            record.msg, record.args = self._QUERY.sub('', msg), ()
+        return True
+
+
+logging.getLogger('werkzeug').addFilter(_StripQueryString())
+
+
 # ── Jinja2 自訂過濾器：Unix timestamp → 人類可讀 ──────────────
 @app.template_filter('ts_to_str')
 def ts_to_str(ts):
@@ -124,7 +148,7 @@ def ts_to_str(ts):
         return str(ts)
 
 
-# ── 瀏覽器本機驗證共用 JS（/verify 與 /receipt 共用）────────────
+# ── 瀏覽器本機驗證 JS（/receipt 使用）────────────────────────
 # 本頁是 BB 自己提供的，BB 送來的任何資料（root、proof、結果包）都不能
 # 直接相信：root 必須來自「CC 簽過章、且 CC 憑證由 CA 簽發」的結果包，
 # CA 根憑證則向投票網站（不是 BB）索取。
@@ -275,9 +299,10 @@ _LOCAL_VERIFY_JS = """          async function sha256Hex(bytes) {
 """
 
 
-# ── Merkle Tree 樹狀圖（/verify 與 /receipt 共用）──────────────
+# ── Merkle Tree 樹狀圖（/receipt 使用）──────────────────────
 # 使用前必須先在頁面上放好 #tree-scroll-wrap、#tree-canvas、#zoom-label、
-# #node-panel，並宣告全域變數 treeData（格式同 _build_tree_data()），
+# #node-panel，並宣告全域變數 treeData（{layers, target_index, proof_path, virtual_nodes}，
+# 見 /receipt 的 treeDataFromLayers()），
 # 然後呼叫 initTree()。
 _TREE_VIZ_HEAD = """  <style>
     /* 樹狀圖畫布：固定高度的拖曳容器，由 JS 控制畫布位置與縮放 */
@@ -919,14 +944,8 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
 
       <section class="card stack" aria-labelledby="verifyTitle">
         <h2 id="verifyTitle" class="section-title">驗證您的選票</h2>
-        <p class="small muted">輸入投票回執上的選票識別碼（m_hex），確認您的票已被計入。驗證過程不會透露您投給誰。</p>
-        <form method="GET" action="/verify" class="stack-sm">
-          <label class="sr-only" for="mhexInput">選票識別碼（m_hex）</label>
-          <input id="mhexInput" class="input mono" type="text" name="m_hex" placeholder="貼上 64 位的 m_hex"
-                 autocomplete="off" autocapitalize="off" spellcheck="false" required>
-          <button type="submit" class="btn btn-primary btn-block">驗證</button>
-        </form>
-        <a class="btn btn-block" href="/receipt">匯入回執驗票</a>
+        <p class="small muted">匯入投票後下載的回執檔，或輸入選票識別碼（m_hex），確認您的票已被計入。驗證在您的裝置上完成，不會把識別碼送給公告板，也不會透露您投給誰。</p>
+        <a class="btn btn-primary btn-block" href="/receipt">驗證選票</a>
       </section>
     </div>
 
@@ -947,13 +966,12 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
       {% if votes %}
       <div class="table-wrap">
         <table class="table">
-          <thead><tr><th class="num">#</th><th>選票識別碼（m_hex）</th><th><span class="sr-only">操作</span></th></tr></thead>
+          <thead><tr><th class="num">#</th><th>選票識別碼（m_hex）</th></tr></thead>
           <tbody>
             {% for v in votes %}
             <tr>
               <td class="num muted">{{ loop.index }}</td>
               <td><span class="hash-inline">{{ v.m_hex }}</span></td>
-              <td class="nowrap"><a href="/verify?m_hex={{ v.m_hex }}">驗證</a></td>
             </tr>
             {% endfor %}
           </tbody>
@@ -968,7 +986,7 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
       <h1>等待開票</h1>
       <p class="lead">投票截止並完成開票後，計票中心（CC）會在這裡公告結果。</p>
       <p class="small muted">此頁每 20 秒自動重新整理。</p>
-      <p><a class="btn" href="/receipt">匯入回執驗票</a></p>
+      <p><a class="btn" href="/receipt">驗證選票</a></p>
     </section>
   {% endif %}
   </div>
@@ -980,16 +998,18 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
 </html>"""
 
 
-_VERIFY_HTML = """<!DOCTYPE html>
+# ── HTML 模板：驗證選票 ──────────────────────────────────────
+# 回執檔在瀏覽器內讀取、手動輸入的 m_hex 也只在瀏覽器裡用；向 BB 只索取
+# 整份 CC 簽章結果包，BB 因此不知道這次查的是哪一張票。
+_RECEIPT_HTML = """<!DOCTYPE html>
 <html lang="zh-TW">
 <head>
   <meta charset="UTF-8">
-  <title>驗證選票｜NUTC 線上投票</title>""" + UI_HEAD + """
-""" + _TREE_VIZ_HEAD + """
+  <title>驗證選票｜NUTC 線上投票</title>""" + UI_HEAD + _TREE_VIZ_HEAD + """
 </head>
 <body>
 <header class="topbar">
-  <div class="container-wide topbar-inner">
+  <div class="container topbar-inner">
     <a class="brand" href="/">
       <span class="brand-name">NUTC 線上投票</span>
       <span class="brand-sub">驗證選票</span>
@@ -1002,204 +1022,28 @@ _VERIFY_HTML = """<!DOCTYPE html>
 </header>
 
 <main>
-  <div class="container-wide stack-lg">
-    <div class="stack-sm">
-      <h1>驗證選票</h1>
-      <p class="lead">確認您的選票已包含在計票結果中，而且不必透露您投給誰。</p>
-    </div>
-
-    {% if result %}
-    <div class="stack">
-      {% if result.valid %}
-      <div class="alert alert-ok">
-        <p class="alert-title">公告板回報：找到您的選票</p>
-        <p class="small">這是公告板伺服器的判斷。下方會在您的瀏覽器裡獨立再驗證一次，不依賴公告板。</p>
-      </div>
-      {% else %}
-      <div class="alert alert-err" role="alert">
-        <p class="alert-title">驗證失敗</p>
-        <p class="small">{{ result.message }}</p>
-      </div>
-      {% endif %}
-
-      {% if result.valid %}
-      <!-- 瀏覽器本機獨立驗證：向投票網站取得 CA 根憑證、驗證 CC 簽章，再用簽過章的
-           Merkle Root 重算驗證路徑，不依賴也不信任公告板伺服器的判斷。 -->
-      <section id="localVerifyBanner" class="alert stack-sm" aria-live="polite">
-        <p class="row"><span id="localVerifyIcon" class="spin" aria-hidden="true"></span><span id="localVerifyTitle" class="alert-title">正在您的瀏覽器中獨立驗證…</span></p>
-        <p class="small muted">先向投票網站（不是公告板）取得 CA 根憑證，確認開票結果包確實由 CA 認證的計票中心簽章，再用結果包裡的 Merkle Root 重新計算您的驗證路徑。公告板若竄改結果或謊報，這裡會顯示不符。</p>
-        <ul id="localVerifySteps" class="steps"></ul>
-      </section>
-      <script>
-        (function () {
-""" + _LOCAL_VERIFY_JS + """
-          (async function () {
-            const mHex        = {{ result.m_hex | tojson }};
-            const proof       = {{ result.proof | tojson }};
-            const caCertUrl   = {{ ca_cert_url | tojson }};
-            const icon  = document.getElementById('localVerifyIcon');
-            const title = document.getElementById('localVerifyTitle');
-            const banner = document.getElementById('localVerifyBanner');
-            const steps = document.getElementById('localVerifySteps');
-            function step(text) {
-              const li = document.createElement('li');
-              li.className = 'step-ok';
-              const mark = document.createElement('span');
-              mark.className = 'mark';
-              mark.textContent = '✓';
-              const t = document.createElement('span');
-              t.textContent = text;
-              li.append(mark, t);
-              steps.appendChild(li);
-            }
-            try {
-              // 1–2. CA 根憑證（向投票網站索取）→ CC 憑證鏈 → 結果包簽章
-              const sb = await fetch('/api/signed_bundle', { cache: 'no-store' }).then(r => r.json());
-              if (sb.status !== 'success') throw new Error(sb.message || '公告板沒有提供 CC 簽章的結果包');
-              const bundle = await verifySignedBundle(sb, caCertUrl, step);
-
-              // 3. 只使用簽過章的 root
-              const rootOfficial = bundle.root_official;
-              const ok = await verifyProofLocally(mHex, proof, rootOfficial);
-              if (ok) step('您的選票驗證路徑可算出 CC 簽章的 Merkle Root');
-              icon.className = 'hidden';
-              if (ok) {
-                banner.className = 'alert alert-ok stack-sm';
-                title.textContent = '瀏覽器本機獨立驗證：通過（未使用公告板的判斷結果）';
-              } else {
-                banner.className = 'alert alert-err stack-sm';
-                title.textContent = '瀏覽器本機獨立驗證：與公告結果不符。請勿相信上方的「找到您的選票」，並立即通報選務人員。';
-              }
-            } catch (e) {
-              icon.className = 'hidden';
-              banner.className = 'alert alert-err stack-sm';
-              title.textContent = '本機獨立驗證失敗：' + e.message;
-            }
-          })();
-        })();
-      </script>
-
-      <details class="card">
-        <summary>詳細雜湊資訊</summary>
-        <dl class="dl" style="margin-top:16px">
-          <div><dt>m_hex（您的選票識別碼）</dt><dd><code class="hash">{{ result.m_hex }}</code></dd></div>
-          <div><dt>葉節點 H_leaf(m) = H(0x00 ‖ m_hex)</dt><dd><code class="hash">{{ result.leaf_hash }}</code></dd></div>
-          <div>
-            <dt>驗證路徑（由葉到根，共 {{ result.proof | length }} 步）</dt>
-            <dd>
-              {% for step in result.proof %}
-              <div class="proof-step">
-                <span class="small muted nowrap">步驟 {{ loop.index }}</span>
-                <span class="badge {% if step.position == 'right' %}badge-info{% else %}badge-warn{% endif %}">{{ '右' if step.position == 'right' else '左' }}</span>
-                <span class="hash-inline small">{{ step.sibling }}</span>
-              </div>
-              {% endfor %}
-            </dd>
-          </div>
-          <div><dt>官方 Merkle Root（由計票中心公告）</dt><dd><code class="hash">{{ result.root }}</code></dd></div>
-        </dl>
-      </details>
-
-      <section class="card stack" aria-labelledby="treeTitle">
-        <div class="row-between">
-          <h2 id="treeTitle" class="section-title">Merkle Tree 樹狀圖</h2>
-          {% if tree_data %}
-          <div id="zoom-controls">
-            <button type="button" class="btn btn-sm" onclick="changeZoom(-0.15)" aria-label="縮小">－</button>
-            <span id="zoom-label">100%</span>
-            <button type="button" class="btn btn-sm" onclick="changeZoom(+0.15)" aria-label="放大">＋</button>
-            <button type="button" class="btn btn-sm" onclick="resetZoom()">1:1</button>
-            <button type="button" class="btn btn-sm" onclick="fitTree()">最適</button>
-            <button type="button" class="btn btn-sm" onclick="focusTarget()">對焦我的票</button>
-          </div>
-          {% endif %}
-        </div>
-        {% if tree_data %}
-        <div class="legend" aria-hidden="true">
-          <span><i style="background:#fbf1dc;border-color:#875800"></i>您的選票</span>
-          <span><i style="background:#e7f2ea;border-color:#1d6b3a"></i>兄弟節點</span>
-          <span><i style="background:#e8eef5;border-color:#1f4e79"></i>驗證路徑</span>
-          <span><i style="background:#1f4e79;border-color:#1f4e79"></i>樹根</span>
-          <span><i style="background:transparent;border-style:dashed;border-color:#b5afa2"></i>補位節點</span>
-        </div>
-        <div id="tree-scroll-wrap">
-          <canvas id="tree-canvas"></canvas>
-        </div>
-        <p class="small muted">點擊節點看完整雜湊・拖曳移動・滾輪上下捲動・按住 Shift 滾輪左右捲動・手機可用兩指縮放</p>
-        {% else %}
-        <p class="small muted">本次公告共有 {{ result.leaf_count }} 張選票，超過 {{ viz_max_leaves }} 張時不繪製完整樹狀圖（瀏覽器負擔太大）。上方的驗證路徑與本機驗證不受影響。</p>
-        {% endif %}
-      </section>
-      {% endif %}
-    </div>
-    {% endif %}
-
-    <section class="card stack-sm" aria-labelledby="againTitle">
-      <h2 id="againTitle" class="section-title">{% if result %}驗證另一張選票{% else %}輸入選票識別碼{% endif %}</h2>
-      <form method="GET" action="/verify" class="row" style="align-items:stretch">
-        <label class="sr-only" for="mhexAgain">選票識別碼（m_hex）</label>
-        <input id="mhexAgain" class="input mono" style="flex:1 1 260px; width:auto" type="text" name="m_hex" value="{{ m_hex or '' }}"
-               placeholder="貼上 64 位的 m_hex" autocomplete="off" autocapitalize="off" spellcheck="false" required>
-        <button type="submit" class="btn btn-primary" style="flex:0 0 auto">驗證</button>
-      </form>
-    </section>
-  </div>
-</main>
-
-  <div id="node-panel">
-    <div class="panel-title" id="panel-title"></div>
-    <div class="panel-hash" id="panel-hash"></div>
-    <div class="panel-meta" id="panel-meta"></div>
-  </div>
-
-  {% if result and result.valid and tree_data %}
-  <script>
-  const treeData = {{ tree_data | tojson }};
-""" + _TREE_VIZ_JS + """
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', initTree);
-  } else {
-    initTree();
-  }
-  </script>
-  {% endif %}
-</body>
-</html>"""
-
-# ── HTML 模板：匯入回執驗票 ────────────────────────────────────
-# 回執檔在瀏覽器內讀取，不上傳；向 BB 只索取整份 CC 簽章結果包，BB 因此
-# 不知道這次查的是哪一張票（/verify?m_hex= 會把 m_hex 留在伺服器紀錄）。
-_RECEIPT_HTML = """<!DOCTYPE html>
-<html lang="zh-TW">
-<head>
-  <meta charset="UTF-8">
-  <title>匯入回執驗票｜NUTC 線上投票</title>""" + UI_HEAD + _TREE_VIZ_HEAD + """
-</head>
-<body>
-<header class="topbar">
-  <div class="container topbar-inner">
-    <a class="brand" href="/">
-      <span class="brand-name">NUTC 線上投票</span>
-      <span class="brand-sub">匯入回執驗票</span>
-    </a>
-    <div class="topbar-actions">
-      <a class="btn btn-sm" href="/">回公告板</a>
-      """ + THEME_TOGGLE + """
-    </div>
-  </div>
-</header>
-
-<main>
   <div class="container stack-lg">
     <div class="stack-sm">
-      <h1>匯入回執驗票</h1>
-      <p class="lead">選擇投票後下載的驗票回執檔（.json），在您的手機上確認選票已納入公告。</p>
+      <h1>驗證選票</h1>
+      <p class="lead">匯入投票後下載的驗票回執檔，或輸入選票識別碼，在您的裝置上確認選票已納入公告。</p>
     </div>
 
     <section class="card stack">
+      <h2 class="section-title">匯入回執檔（建議）</h2>
       <label class="btn btn-primary btn-block" for="receiptFile">選擇回執檔</label>
       <input id="receiptFile" class="sr-only" type="file" accept=".json,.txt,application/json">
       <p class="small muted">檔案只在這台裝置上讀取，不會上傳。公告板只會被要求提供整份開票結果，無從得知您查的是哪一張票。</p>
+    </section>
+
+    <section id="manual" class="card stack-sm">
+      <h2 class="section-title">或輸入選票識別碼</h2>
+      <div class="row" style="align-items:stretch">
+        <label class="sr-only" for="mhexInput">選票識別碼（m_hex）</label>
+        <input id="mhexInput" class="input mono" style="flex:1 1 260px; width:auto" type="text"
+               placeholder="貼上 64 位的 m_hex" autocomplete="off" autocapitalize="off" spellcheck="false">
+        <button id="mhexBtn" type="button" class="btn btn-primary" style="flex:0 0 auto">驗證</button>
+      </div>
+      <p class="small muted">同樣只在這台裝置上比對，不會送出識別碼。手動輸入沒有輪次資訊，請確認結果中顯示的選舉截止時間是您投票的那一場。</p>
     </section>
 
     <section id="resultBanner" class="alert stack-sm hidden" aria-live="polite">
@@ -1306,7 +1150,7 @@ function showMerkleTree(data) {
   }
   function fmtTime(ts) { return new Date(ts * 1000).toLocaleString(); }
 
-  // 比照 _build_tree_data()：標出目標、兄弟、路徑、樹根，奇數層補一個虛擬佔位。
+  // 比照 shared/merkle_tree.py get_proof() 的走訪：標出目標、兄弟、路徑、樹根，奇數層補一個虛擬佔位。
   function treeDataFromLayers(layers, index) {
     const proofPath = [{ layer: 0, index, role: 'target' }];
     let cur = index;
@@ -1381,13 +1225,23 @@ function showMerkleTree(data) {
     return r;
   }
 
-  async function verifyReceipt(file) {
+  async function verifyFile(file) {
     if (file.size > MAX_RECEIPT_BYTES) throw new Outcome('fail', '檔案太大，這不是驗票回執檔。');
     const receipt = parseReceipt(await file.text());
     step('回執格式與版本正確');
+    return verifyReceipt(receipt, false);
+  }
 
+  function verifyTyped(text) {
+    const body = text.trim().replace(/^0x/i, '');
+    if (!/^[0-9a-fA-F]{64}$/.test(body)) throw new Outcome('fail', '選票識別碼必須是 64 位的十六進位字串。');
+    step('選票識別碼格式正確');
+    return verifyReceipt({ m_hex: body.toLowerCase(), round: null }, true);
+  }
+
+  async function verifyReceipt(receipt, typed) {
     const resp = await fetch('/api/signed_bundle', { cache: 'no-store' });
-    if (resp.status === 404) throw new Outcome('pending', '開票結果還沒公告。投票截止並完成開票後再匯入一次。');
+    if (resp.status === 404) throw new Outcome('pending', '開票結果還沒公告。投票截止並完成開票後再驗證一次。');
     const sb = await resp.json();
     if (sb.status !== 'success') throw new Outcome('fail', sb.message || '公告板沒有提供 CC 簽章的結果包');
     const bundle = await verifySignedBundle(sb, caCertUrl, step);
@@ -1396,11 +1250,17 @@ function showMerkleTree(data) {
       throw new Outcome('round',
         `這份回執屬於截止時間 ${fmtTime(receipt.round)} 的選舉，目前公告的是截止時間 ${fmtTime(bundle.deadline)} 的選舉。`);
     }
-    step(receipt.round ? '回執輪次與公告一致' : '舊版回執沒有輪次資訊，略過輪次檢查');
+    step(receipt.round ? '回執輪次與公告一致'
+      : typed ? `手動輸入沒有輪次資訊；本次公告的選舉截止時間：${fmtTime(bundle.deadline)}`
+      : '舊版回執沒有輪次資訊，略過輪次檢查');
 
     const list = bundle.valid_m_hex_list || [];
     const index = list.indexOf(receipt.m_hex);
-    if (index < 0) throw new Outcome('fail', '公告的合法選票清單中找不到這張票。請保留回執檔並通報選務人員。');
+    if (index < 0) {
+      throw new Outcome('fail', typed
+        ? `本次公告（截止時間 ${fmtTime(bundle.deadline)}）的合法選票清單中找不到這個識別碼。請確認沒有貼錯；若確定無誤，請通報選務人員。`
+        : '公告的合法選票清單中找不到這張票。請保留回執檔並通報選務人員。');
+    }
     step(`在 ${list.length} 張合法選票中找到您的票`);
 
     const layers = await buildLayersLocal(list);
@@ -1417,10 +1277,7 @@ function showMerkleTree(data) {
     return `您的票已包含在 CC 簽章公告的 ${list.length} 張合法選票中。整個驗證在這台裝置上完成，沒有採用公告板伺服器的判斷。`;
   }
 
-  $('receiptFile').addEventListener('change', async e => {
-    const file = e.target.files[0];
-    e.target.value = '';
-    if (!file) return;
+  async function run(task) {
     $('resultSteps').textContent = '';
     $('resultInfo').classList.add('hidden');
     $('treeSection').classList.add('hidden');
@@ -1429,10 +1286,20 @@ function showMerkleTree(data) {
     $('resultTitle').textContent = '驗證中…';
     $('resultDetail').textContent = '';
     try {
-      finish('ok', await verifyReceipt(file));
+      finish('ok', await task());
     } catch (err) {
       finish(err instanceof Outcome ? err.kind : 'fail', err.message);
     }
+  }
+
+  $('receiptFile').addEventListener('change', e => {
+    const file = e.target.files[0];
+    e.target.value = '';
+    if (file) run(() => verifyFile(file));
+  });
+  $('mhexBtn').addEventListener('click', () => run(() => verifyTyped($('mhexInput').value)));
+  $('mhexInput').addEventListener('keydown', e => {
+    if (e.key === 'Enter') run(() => verifyTyped($('mhexInput').value));
   });
 })();
 </script>
@@ -1479,32 +1346,13 @@ def dashboard():
 
 @app.route('/verify', methods=['GET'])
 def verify_page():
-    """
-    選票驗證頁面（含視覺化 Merkle Tree）。
-    回傳：驗證結果 + 完整 tree_data（供 JS 渲染互動式 Merkle Tree）。
-    """
-    m_hex = request.args.get('m_hex', '').strip()
-    result = None
-    tree_data = None
-
-    if m_hex:
-        result = _verify_m_hex(m_hex)
-        if result.get('valid'):
-            tree_data = _build_tree_data(m_hex)
-
-    return render_template_string(
-        _VERIFY_HTML,
-        m_hex=m_hex,
-        result=result,
-        tree_data=tree_data,
-        ca_cert_url=CA_CERT_URL_FOR_BROWSER,
-        viz_max_leaves=VIZ_MAX_LEAVES,
-    )
+    """已停用的伺服器端查票頁：一律導向 /receipt，不讀取、不回顯查詢參數。"""
+    return redirect('/receipt', code=302)
 
 
 @app.route('/receipt', methods=['GET'])
 def receipt_page():
-    """匯入回執驗票頁：回執檔只在瀏覽器讀取，驗證全程在本機完成。"""
+    """驗證選票頁：回執檔或手動輸入的 m_hex 只在瀏覽器裡使用，驗證全程在本機完成。"""
     return render_template_string(_RECEIPT_HTML, ca_cert_url=CA_CERT_URL_FOR_BROWSER, viz_max_leaves=VIZ_MAX_LEAVES)
 
 
@@ -1530,7 +1378,6 @@ def api_admin_reset():
     vote_count = db.count("published_votes")
     db.execute("DELETE FROM published_votes")
     db.execute("DELETE FROM bb_state")
-    _invalidate_tree_cache()
 
     print(f"[BB] 公告板狀態已重置（清除 {vote_count} 筆已公告選票）。")
     return jsonify({"status": "success", "deleted_votes": vote_count}), 200
@@ -1684,7 +1531,6 @@ def api_publish():
     # cc_signature 等於沒人驗得了。瀏覽器直接對這串原文驗章，也不用擔心
     # JS 與 Python 的 JSON 序列化細節（中文、欄位排序）不一致。
     db.execute("INSERT OR REPLACE INTO bb_state (key, value) VALUES ('signed_bundle', ?)", (bundle_json,))
-    _invalidate_tree_cache()
 
     # 日誌使用人類可讀格式
     print(f"[BB] ✅ 結果已驗證並公告（Unix ts：{tallied_at}  →  {ts_to_human(tallied_at)}）")
@@ -1751,27 +1597,6 @@ def api_signed_bundle():
     }), 200
 
 
-@app.route('/api/merkle_proof/<path:m_hex>', methods=['GET'])
-def api_merkle_proof(m_hex: str):
-    """
-    [GET] 提供指定 m_hex 的 Merkle Proof。
-    規範：驗證起點為 H(m)，不使用選票明文。
-    """
-    result = _verify_m_hex(m_hex)
-    if result['valid']:
-        return jsonify({
-            "status":        "success",
-            "m_hex":         m_hex,
-            "leaf_hash":     result['leaf_hash'],
-            "merkle_proof":  result['proof'],
-            "root_official": result['root'],
-            # 零信任加密資料
-            "sibling_array": [step['sibling'] for step in result['proof']],
-        }), 200
-    else:
-        return jsonify({"status": "error", "message": result['message']}), 404
-
-
 # ── Config Hot-Reload 端點 ────────────────────────────────────
 make_reload_endpoint(app)
 
@@ -1780,168 +1605,8 @@ make_reload_endpoint(app)
 # 內部函式
 # ============================================================
 
-# ── Merkle Tree 快取 ─────────────────────────────────────────
-# 以前每次驗證都從資料庫讀出全部 m_hex、重建整棵樹，再用 list.index() 逐一
-# 找位置；公告後大家同時來驗證時，每個請求都要重做一次。公告內容在下次
-# 公告或重置前不會變，改成第一次查詢時建好樹與「m_hex → 位置」對照表，
-# 以官方 root 當快取鍵，之後直接查表。只有重建出的 root 等於官方 root 時
-# 才會放進快取。
+# 超過這個張數時 /receipt 不畫完整樹狀圖（手機畫不動），只列驗證路徑。
 VIZ_MAX_LEAVES = 256
-_tree_cache = {"root": None, "tree": None, "index_of": None}
-_tree_cache_lock = threading.Lock()
-
-
-def _invalidate_tree_cache():
-    with _tree_cache_lock:
-        _tree_cache.update(root=None, tree=None, index_of=None)
-
-
-def _get_tree(official_root: str):
-    """回傳 (MerkleTree, {m_hex: index})；資料重建出的 root 與官方 root 不符時回傳 (None, {})。"""
-    with _tree_cache_lock:
-        if _tree_cache["root"] == official_root and _tree_cache["tree"] is not None:
-            return _tree_cache["tree"], _tree_cache["index_of"]
-        votes = db.fetchall("SELECT m_hex FROM published_votes ORDER BY id")
-        m_hex_list = [v['m_hex'] for v in votes]
-        tree = MerkleTree(m_hex_list)
-        if tree.get_root() != official_root:
-            return None, {}
-        index_of = {m: i for i, m in enumerate(m_hex_list)}
-        _tree_cache.update(root=official_root, tree=tree, index_of=index_of)
-        return tree, index_of
-
-
-def _verify_m_hex(m_hex: str) -> dict:
-    """驗證 m_hex 是否在 Merkle Tree 中，回傳驗證結果 dict"""
-    published_row = db.fetchone("SELECT value FROM bb_state WHERE key = 'published'")
-    if not published_row or published_row['value'] != '1':
-        return {"valid": False, "message": "結果尚未公告"}
-
-    # v4.0 修正：原本這裡完全沒有讀取 CC 當初簽章公告、寫進 bb_state 的
-    # 官方 root，而是每次都從目前的 published_votes 現場重建一棵樹、拿
-    # 「剛算出來的 root」去驗證 proof——proof 跟 root 出自同一份即時資料，
-    # 邏輯上必然自洽，等於這個檢查對「published_votes 事後被竄改」完全
-    # 無感（現場重算的 root 會跟著竄改後的資料一起變，永遠驗證得過）。
-    # 前端 /verify 頁面「不信任伺服器」的獨立驗證，用的也是這裡回傳的
-    # root，同樣會被連帶騙過。修法：一定要跟 bb_state 裡儲存的官方 root
-    # 比對，不符就直接判定資料完整性異常，不能只驗證「proof 對不對得上
-    # 現場重算的 root」。 <3
-    root_row = db.fetchone("SELECT value FROM bb_state WHERE key = 'merkle_root'")
-    official_root = root_row['value'] if root_row else None
-    if not official_root:
-        return {"valid": False, "message": "找不到官方公告的 Merkle Root"}
-
-    tree, index_of = _get_tree(official_root)
-    if tree is None:  # <3 現有選票資料重建出的 root 與官方 root 不符
-        return {
-            "valid": False,
-            "message": "資料完整性異常：現有選票資料與官方公告之 Merkle Root 不符，公告板資料可能遭竄改",
-        }
-
-    index = index_of.get(m_hex)
-    if index is None:
-        return {"valid": False, "message": "找不到此 m_hex，可能選票無效或尚未計入"}
-    proof = tree.get_proof(index)
-
-    # 驗證 Merkle Proof（用官方 root，不是現場重算出來的 root）
-    is_valid = MerkleTree.verify_proof(m_hex, proof, official_root)  # <3
-
-    if is_valid:
-        return {
-            "valid":     True,
-            "m_hex":     m_hex,
-            "leaf_hash": h_leaf(m_hex),
-            "proof":     proof,
-            "root":      official_root,  # <3
-            "index":     index,
-            "leaf_count": len(index_of),
-        }
-    else:
-        return {"valid": False, "message": "Merkle Proof 驗證失敗"}
-
-
-def _build_tree_data(m_hex: str) -> dict:
-    """
-    建構供前端 JS 渲染的 Merkle Tree 資料結構。
-    包含：
-      - layers: 每層節點雜湊列表（從葉到根）
-      - target_index: 目標葉節點索引
-      - proof_path: 每個節點的角色（target/sibling/path/normal）
-      - root: Root_official
-    """
-    root_row = db.fetchone("SELECT value FROM bb_state WHERE key = 'merkle_root'")
-    tree, index_of = _get_tree(root_row['value']) if root_row else (None, {})
-    # 樹狀圖會把整棵樹的每個節點都送到瀏覽器繪製，票數多時頁面過大、瀏覽器
-    # 畫不動，只在票數不多時提供。
-    if tree is None or m_hex not in index_of or len(index_of) > VIZ_MAX_LEAVES:
-        return None
-
-    index = index_of[m_hex]
-    proof = tree.get_proof(index)
-    root  = tree.get_root()
-
-    # 建構 proof_path：標記每層每個節點的角色
-    #
-    # v3.0 修正：原本用 `enumerate(proof)` 假設 proof 陣列第 i 筆就是第 i
-    # 層——但 MerkleTree.get_proof() 遇到奇數層、目標節點沒有兄弟被直接
-    # 上提時，那一層完全不會產生 proof 項目（見 shared/merkle_tree.py
-    # get_proof()），使 proof 陣列長度可能小於實際走過的層數。任何一次
-    # 上提發生後，後面所有 proof 項目對應到的真實層數都會被少算一層，
-    # 導致視覺化樹狀圖標錯顏色（雖然不影響 MerkleTree.verify_proof 本身
-    # 的密碼學正確性，但畫面上高亮的節點是錯的）。
-    # 改成完全比照 get_proof() 內部走訪邏輯，自己重新逐層判斷「這一層
-    # 目標節點有沒有兄弟」，只有真的有兄弟時才消耗 proof 陣列裡的下一筆、
-    # 才畫 sibling；上提的那一層不畫 sibling，但 path 節點仍正確標在
-    # 它實際落腳的那一層。 <3
-    proof_path = []
-    current_index = index
-
-    # 葉節點層（layer 0）：目標節點
-    proof_path.append({"layer": 0, "index": current_index, "role": "target"})
-
-    proof_i = 0  # <3 指向 proof 陣列的游標，只有真的有兄弟節點時才前進
-    for layer_idx, layer in enumerate(tree.tree[:-1]):  # <3 比照 get_proof()，排除 root 層
-        has_sibling = (
-            (current_index % 2 == 0 and current_index + 1 < len(layer)) or
-            (current_index % 2 == 1)
-        )  # <3
-        if has_sibling:
-            step = proof[proof_i]
-            proof_i += 1  # <3
-            sibling_index = current_index + 1 if step['position'] == 'right' else current_index - 1
-            proof_path.append({"layer": layer_idx, "index": sibling_index, "role": "sibling"})
-        # else：此節點在這一層被上提，沒有兄弟，不產生 sibling 標記 <3
-
-        # 下一層的路徑節點（不論是否上提，目標的軌跡都會出現在這裡）
-        next_index = current_index // 2
-        proof_path.append({"layer": layer_idx + 1, "index": next_index, "role": "path"})
-        current_index = next_index
-
-    # Root 節點（最後一層）
-    last_layer_idx = len(tree.tree) - 1
-    proof_path.append({"layer": last_layer_idx, "index": 0, "role": "root"})
-
-    # 建構 layers（每層節點的雜湊值，補齊奇數層）
-    # 同時記錄哪些節點是虛擬佔位（promote 後補齊的視覺用節點）
-    layers = []
-    virtual_nodes = []
-    for layer_idx, layer in enumerate(tree.tree):
-        # 若奇數個節點，補齊最後一個供視覺對稱用（虛擬佔位）
-        if len(layer) % 2 == 1 and len(layer) > 1:
-            layers.append(layer + [layer[-1]])
-            virtual_nodes.append({"layer": layer_idx, "index": len(layer)})
-        else:
-            layers.append(list(layer))
-
-    return {
-        "layers":        layers,
-        "target_index":  index,
-        "proof_path":    proof_path,
-        "root":          root,
-        "m_hex":         m_hex,
-        "leaf_hash":     h_leaf(m_hex),
-        "virtual_nodes": virtual_nodes,
-    }
 
 
 if __name__ == '__main__':

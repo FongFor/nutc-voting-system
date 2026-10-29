@@ -25,6 +25,7 @@ import time
 import secrets
 import base64
 import hashlib
+import sqlite3
 import datetime
 
 from cryptography import x509  # <3 新增：驗證 Voter 憑證的 CA 簽章鏈需要載入憑證物件
@@ -142,6 +143,13 @@ try:
     db.execute("ALTER TABLE issued_tokens ADD COLUMN used_at INTEGER")
 except Exception:
     pass  # 欄位已存在
+# 同一位選民最多只能有一張「已兌換」的票。核發與兌換的程式檢查之外，再由
+# 資料庫強制：併發請求就算都通過了程式檢查，第二筆 used=1 也寫不進去。
+try:
+    db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_issued_tokens_one_used "
+               "ON issued_tokens (voter_id) WHERE used = 1")
+except Exception as e:
+    print(f"[TPA] 警告：無法建立一人一票唯一索引（舊資料可能已有重複兌換）：{e}")
 
 # ============================================================
 # 金鑰初始化（啟動時執行）
@@ -569,12 +577,20 @@ def api_auth():
     # 的未使用票，再一次全部拿去換簽章，湊出多張合法選票——這正是移除
     # 「認證當下就鎖定」之後必須補上的防線，否則會重新開一個一人多票
     # 的漏洞。同一時間每位選民最多只能有一張尚未使用的有效票。 <3
-    db.execute("DELETE FROM issued_tokens WHERE voter_id = ? AND used = 0", (sender_id,))  # <3
-
-    db.execute(
-        "INSERT INTO issued_tokens (token_id, voter_id, issued_at, expires_at, used) VALUES (?, ?, ?, ?, 0)",
-        (token_id, sender_id, now, expires_at),
-    )
+    # 「確認未投過票 → 作廢舊票 → 核發新票」必須在同一個寫入交易裡完成：
+    # 分開執行時，同一選民的兩個併發認證會各自刪掉對方的票之前先插入，
+    # 留下兩張同時有效的未使用票。BEGIN IMMEDIATE 一開始就取得寫入鎖。
+    with db.transaction() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        if conn.execute("SELECT 1 FROM issued_tokens WHERE voter_id = ? AND used = 1", (sender_id,)).fetchone():
+            _log('rejected', f'重複投票：{sender_id} 已使用過 Voting Token')
+            return jsonify({"status": "error", "code": "ALREADY_VOTED",
+                            "message": f"{sender_id} 已投票，不可重複投票"}), 403
+        conn.execute("DELETE FROM issued_tokens WHERE voter_id = ? AND used = 0", (sender_id,))  # <3
+        conn.execute(
+            "INSERT INTO issued_tokens (token_id, voter_id, issued_at, expires_at, used) VALUES (?, ?, ?, ?, 0)",
+            (token_id, sender_id, now, expires_at),
+        )
     print(f"[TPA] 已簽發 Voting Token：{token_id[:16]}...（expires: {ts_to_human(expires_at)}）")
 
     return jsonify({
@@ -651,9 +667,17 @@ def api_blind_sign():
         return jsonify({"status": "error", "code": "TOKEN_NOT_FOUND",
                         "message": "Token 不存在（可能由非本 TPA 簽發）"}), 403
 
-    claimed = db.execute(
-        "UPDATE issued_tokens SET used = 1, used_at = ? WHERE token_id = ? AND used = 0", (now, token_id)
-    )  # <3 rowcount==0 代表已被搶先使用（即使剛剛的 SELECT 顯示未使用）；used_at 記錄真正消耗的時間點
+    # 同一位選民名下若已有任何一張票被兌換，這張也不能再兌換（防止併發核發
+    # 留下的第二張票被拿去換第二份簽章）；唯一索引 idx_issued_tokens_one_used
+    # 是最後一道防線，併發時由它擋下第二筆。
+    try:
+        claimed = db.execute(
+            "UPDATE issued_tokens SET used = 1, used_at = ? WHERE token_id = ? AND used = 0 "
+            "AND NOT EXISTS (SELECT 1 FROM issued_tokens t2 WHERE t2.voter_id = issued_tokens.voter_id AND t2.used = 1)",
+            (now, token_id),
+        )  # <3 rowcount==0 代表已被搶先使用（即使剛剛的 SELECT 顯示未使用）；used_at 記錄真正消耗的時間點
+    except sqlite3.IntegrityError:
+        claimed = 0
     if claimed == 0:
         return jsonify({"status": "error", "code": "TOKEN_ALREADY_USED",
                         "message": "Voting Token 已使用"}), 403  # <3

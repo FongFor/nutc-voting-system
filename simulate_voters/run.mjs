@@ -286,8 +286,11 @@ async function castVote(ctx, voterId, privateKey, certPem, candidate) {
 
   // 與 voter_client 相同：SN 用 128-bit 亂數，避免公開的 m 被窮舉反推
   const sn = 'SN' + vcrypto.bytesToHex(crypto.getRandomValues(new Uint8Array(16)));
+  // m 綁定本輪輪次（TA 截止時間），與 voter_client 相同公式
+  const dl = await fetchJsonWithRetry(ctx, '查詢本輪截止時間', '/api/proxy/ta/deadline');
+  if (!(dl.deadline > 0)) throw new Error('無法取得本輪截止時間');
   const innerHash = await vcrypto.sha256Hex(voterId + '|' + sn + '|' + candidate);
-  const outerHash = await vcrypto.sha256Hex(innerHash + '|' + candidate);
+  const outerHash = await vcrypto.sha256Hex(innerHash + '|' + dl.deadline + '|' + candidate);
   const m_hex = outerHash;
   const m_bytes = vcrypto.hexToBytes(m_hex);
 

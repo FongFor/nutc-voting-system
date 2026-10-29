@@ -120,10 +120,11 @@ bug（如憑證效期寫死 30 天）」之後的現況文件。
 | 端點 | 方法 | 認證 | 說明 |
 |---|---|---|---|
 | `/` | GET | 公開 | Dashboard（🔧 已移除逐票投票內容欄位） |
-| `/verify` | GET | 公開 | Merkle Proof 視覺化驗證頁 |
+| `/receipt` | GET | 公開 | 驗證選票：匯入回執或輸入 m_hex，瀏覽器本機驗證並畫出 Merkle Tree（不送出 m_hex） |
+| `/verify` | GET | 公開 | 已停用，導向 `/receipt` |
 | `/api/publish` | POST | 🔧 CC 簽章 + Cert_CC + Subject CN 核對 + 🆕 `BUNDLE_INCONSISTENT` 結構檢查 | CC 推送結果 |
 | `/api/results` | GET | 公開 | 🔧 只回傳 `valid_m_hex_list`；🆕 附上 `cc_cert_pem` |
-| `/api/merkle_proof/<m_hex>` | GET | 公開 | 依 m_hex 查詢 Proof |
+| `/api/signed_bundle` | GET | 公開 | CC 簽章的結果包原文（本機驗證用） |
 | `/api/config/reload` | POST | 內部 | 熱重載 |
 
 ---
@@ -170,7 +171,7 @@ bug（如憑證效期寫死 30 天）」之後的現況文件。
 
 | 功能 | 狀態 | 與研究計畫書比較 |
 |---|---|---|
-| 選票雜湊 `m = H(H(ID‖SN‖Vote)‖Vote)` | ✅ | ✅ 公式一致 |
+| 選票雜湊 `m = H(H(ID‖SN‖Vote)‖輪次‖Vote)`（輪次 = TA 截止時間） | ✅ | ✅ 公式一致 |
 | **FDH（Full-Domain Hash）擴展** `μ = FDH(m, bit_length(n))` 後才盲化 | ✅ | ⚠️ **矛盾**：計畫書直接對 `m` 盲化（`m' = m·rᵉ mod n`），這是 textbook RSA 盲簽章，存在存在性偽造攻擊；程式碼採用 FDH-Blind，是安全上必要的修正，不是可有可無的「額外功能」 |
 | 盲化、TPA 盲簽章、去盲化、自我驗證四步驟 | ✅ | ✅ 概念一致（多一道 FDH 擴展） |
 | `/api/blind_sign` **強制**要求 Voting Token 才簽章 | 🔧 | 📄 未提及 Token 機制，若照計畫書字面實作，認證與取簽完全脫鉤，等同「認證一次、無限取簽」 |
@@ -188,7 +189,7 @@ bug（如憑證效期寫死 30 天）」之後的現況文件。
 | `/api/release_key` 採規格書 §18.3.3 結構：頂層 `payload/signature/cert_pem`，`payload` 含 `requester_id/timestamp/nonce/purpose` | 🔧 | 📄 未提及請求方身分驗證機制，計畫書僅說「TA 釋出私密金鑰 SK_TA 給 CC」，未描述如何確認請求方真的是 CC |
 | 核對請求方**憑證 Subject CN** 是否為 `"CC"`（而非只信任自報欄位） | 🔧 | 📄 未提及 —— 這是防止「任何合法選民自稱 CC 騙取 `SK_TA`」的關鍵防線 |
 | `purpose` 欄位限定 `"tally"`，nonce 必要且防重放 | 🆕 | 📄 未提及 |
-| CC 解密驗證：`H(H(ID‖SN‖Vote)‖Vote)` 與 `m` 比對 | ✅ | ✅ 公式一致 |
+| CC 解密驗證：`H(H(ID‖SN‖Vote)‖輪次‖Vote)` 與正規化後的 `m` 比對 | ✅ | ✅ 公式一致 |
 
 ### Phase 5：計票與 Merkle Tree 建構
 

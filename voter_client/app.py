@@ -77,6 +77,8 @@ TPA_URL  = os.environ.get("TPA_URL", "https://localhost:5000")
 TA_URL   = os.environ.get("TA_URL",  "https://localhost:5002")
 CC_URL   = os.environ.get("CC_URL",  "https://localhost:5003")
 BB_URL   = os.environ.get("BB_URL",  "https://localhost:5004")
+# 公告板給瀏覽器用的公開網址（BB_URL 是容器間的內部位址，瀏覽器連不到）
+BB_PUBLIC_URL = os.environ.get("BB_PUBLIC_URL", "https://bb.localhost").rstrip("/")
 
 # v4.0 新增：先快取 CA 根憑證，才有材料可以驗證 CA 自己的 TLS 伺服器
 # 憑證，也才有東西可以驗證後續其他實體的憑證鏈——順序必須在申請 TLS
@@ -315,6 +317,14 @@ app.secret_key = os.environ.get("SECRET_KEY", os.urandom(32))
 # 的 reverse_proxy 預設就會加這個表頭），還原出真正的來源 IP。 <3
 from werkzeug.middleware.proxy_fix import ProxyFix
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)  # <3
+
+
+@app.after_request
+def _no_referrer(resp):
+    # 投票網站上的任何連結或資源請求都不帶 Referer，公告板等其他網站無從
+    # 得知訪客剛從投票網站過來（避免與投票時間點關聯）。
+    resp.headers.setdefault("Referrer-Policy", "no-referrer")
+    return resp
 
 # v3.0 新增：投票截止前的流量管制。防的不是精密攻擊，是最單純的「灌爆
 # 流量讓還沒投票的真選民卡住投不進去」——選舉截止時間是硬性的，投票期
@@ -1146,7 +1156,7 @@ _VOTE_HTML = """<!DOCTYPE html>
       <p class="alert-title">您已完成投票</p>
       <p class="small">您的選票識別碼（m_hex）：</p>
       <code id="votedMhex" class="hash"></code>
-      <p class="row"><button type="button" class="btn btn-sm btn-primary" onclick="downloadVoteReceipt()">下載驗票回執</button><a class="small" href="/status">查看完整回執</a></p>
+      <p class="row"><button type="button" class="btn btn-sm btn-primary" onclick="downloadVoteReceipt()">下載驗票回執</button><a class="btn btn-sm" href="{{ bb_receipt_url }}" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">開票後前往公告板驗票</a><a class="small" href="/status">查看完整回執</a></p>
     </div>
 
     <section id="voteForm" class="card stack" aria-labelledby="candTitle">
@@ -1164,7 +1174,7 @@ _VOTE_HTML = """<!DOCTYPE html>
       <p class="alert-title">已收到您的選票</p>
       <p><span class="badge badge-warn">已排隊，尚未確認計入</span></p>
       <p class="small">為了保護匿名性，選票會和其他選民的票一起批次送出，所以不會立刻出現在計票中心，這是正常的。請先下載驗票回執存到手機，開票後到公告板按「匯入回執驗票」選擇這個檔案，就能確認您的票已被計入。</p>
-      <p class="row"><button type="button" class="btn btn-sm btn-primary" onclick="downloadVoteReceipt()">下載驗票回執</button><a class="small" href="/status">查看完整回執</a></p>
+      <p class="row"><button type="button" class="btn btn-sm btn-primary" onclick="downloadVoteReceipt()">下載驗票回執</button><a class="btn btn-sm" href="{{ bb_receipt_url }}" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">開票後前往公告板驗票</a><a class="small" href="/status">查看完整回執</a></p>
       <p class="small muted">回執檔只有選票識別碼，不含學號和投票對象，存在手機裡也不會洩漏您投給誰。選票識別碼（m_hex）：</p>
       <code id="successMhex" class="hash"></code>
     </section>
@@ -1349,8 +1359,12 @@ async function doVote() {
     // SN 必須是高熵亂數：公告板公開的 m 由學號、SN、候選人雜湊而成，
     // 若 SN 可猜（例如時間戳），任何人都能窮舉反推出誰投給誰。
     const sn         = 'SN' + bytesToHex(crypto.getRandomValues(new Uint8Array(16)));
+    // m 綁定本輪輪次（TA 截止時間）：CC 開票時用本輪的值重算 m，上一輪的
+    // 選票（m 與盲簽章）拿到這一輪重送會對不上而被判無效。
+    const round      = await fetchElectionRound();
+    if (!round) throw new Error('無法取得本輪選舉資訊（截止時間），請重新整理後再試');
     const innerHash  = await sha256Hex(_voterId + '|' + sn + '|' + candidate);
-    const outerHash  = await sha256Hex(innerHash + '|' + candidate);
+    const outerHash  = await sha256Hex(innerHash + '|' + round + '|' + candidate);
     const m_hex      = outerHash;                   // 64-char hex，不含 0x
     const m_bytes    = hexToBytes(m_hex);            // 32 bytes
     addStep(`m = ${m_hex.slice(0,16)}...`, true);
@@ -1423,7 +1437,7 @@ async function doVote() {
     await idbSave({
       voteReceipt: {
         voter_id: _voterId, sn, vote: candidate, m_hex, s_prime_hex,
-        round: await fetchElectionRound(),
+        round,
         voted_at: Math.floor(Date.now() / 1000),
       },
     });
@@ -1507,6 +1521,7 @@ _STATUS_HTML = """<!DOCTYPE html>
         <div><dt>選票識別碼（m_hex）</dt><dd><code id="recMhex" class="hash"></code></dd></div>
       </dl>
       <p><button type="button" class="btn btn-primary btn-block" onclick="downloadVoteReceipt()">下載驗票回執</button></p>
+      <p><a class="btn btn-block" href="{{ bb_receipt_url }}" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">開票後前往公告板驗票</a></p>
       <div class="alert alert-info small">開票後，到公告板按「匯入回執驗票」選擇下載的檔案，或在「驗證選票」輸入上面的 m_hex，就能確認您的票有被計入，而且不必透露您投給誰。回執檔不含學號、SN 和投票對象。</div>
     </section>
 
@@ -1542,7 +1557,7 @@ _STATUS_HTML = """<!DOCTYPE html>
 
 @app.route('/')
 def index():
-    return render_template_string(_VOTE_HTML)
+    return render_template_string(_VOTE_HTML, bb_receipt_url=BB_PUBLIC_URL + "/receipt")
 
 @app.route('/register')
 def register_page():
@@ -1550,7 +1565,7 @@ def register_page():
 
 @app.route('/status')
 def status():
-    return render_template_string(_STATUS_HTML)
+    return render_template_string(_STATUS_HTML, bb_receipt_url=BB_PUBLIC_URL + "/receipt")
 
 make_reload_endpoint(app)
 

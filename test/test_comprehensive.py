@@ -118,6 +118,24 @@ def gen_rsa_keypair() -> Tuple[object, str, str, int, int]:
     return priv, priv_pem, pub_pem, nums.e, nums.n
 
 
+def current_round() -> int:
+    """本輪輪次 = TA 截止時間（選民產生 m 時算進去，CC 開票時用同一個值驗證）。"""
+    return int(requests.get(f"{TA_URL}/api/deadline", timeout=TIMEOUT).json()["deadline"])
+
+
+def new_sn() -> str:
+    """與 voter_client 相同：SN 用 128-bit 亂數。可猜的 SN（例如時間戳＋學號末碼）
+    會讓公告板公開的 m 被窮舉反推出誰投給誰。"""
+    return "SN" + secrets.token_hex(16)
+
+
+def compute_m(voter_id: str, sn: str, vote_content: str, election_round: int) -> Tuple[str, bytes]:
+    """回傳 (inner_hash, m_bytes)；m = H(H(voter_id|sn|vote) | 輪次 | vote)。"""
+    inner_hash = sha256_hex(f"{voter_id}|{sn}|{vote_content}".encode('utf-8'))
+    m_bytes = hashlib.sha256(f"{inner_hash}|{election_round}|{vote_content}".encode('utf-8')).digest()
+    return inner_hash, m_bytes
+
+
 def register_voter(voter_id: str) -> Tuple[object, str, str]:
     """
     完整 Phase 0 流程：向 CA 預先註冊並取得憑證。
@@ -208,11 +226,8 @@ def do_vote(voter_id: str, private_key, cert_pem: str,
         _info(f"[{voter_id}] 認證成功，Token={token_id[:16]}...", verbose)
 
         # ── Phase 3a：計算選票雜湊 + 盲化 ───────────────────
-        now = int(time.time())
-        sn  = f"SN{now}{voter_id[-3:]}"
-
-        inner_hash = sha256_hex(f"{voter_id}|{sn}|{vote_content}".encode('utf-8'))
-        m_bytes = hashlib.sha256(f"{inner_hash}|{vote_content}".encode('utf-8')).digest()
+        sn = new_sn()
+        _, m_bytes = compute_m(voter_id, sn, vote_content, current_round())
         m_hex   = m_bytes.hex()
 
         mu = fdh(m_bytes, tpa_n.bit_length())
@@ -337,22 +352,46 @@ def verify_vote_on_bb(m_hex: str, voter_id: str = "") -> bool:
         _fail(f"  {voter_id} m_hex 不在 valid_m_hex_list 中！")
         return False
 
-    # 6.3：查詢 Merkle Proof（BB /api/merkle_proof/<m_hex>）
-    r = requests.get(f"{BB_URL}/api/merkle_proof/{m_hex}", timeout=TIMEOUT)
-    if r.status_code != 200:
-        _fail(f"  {voter_id} Merkle Proof 查詢失敗（{r.status_code}）")
+    # 6.3：下載 CC 簽章的結果包，在本地驗章、重建 Merkle Tree 並產生驗證路徑。
+    # BB 已不提供個別選票查詢（/api/merkle_proof），伺服器不會收到 m_hex。
+    bundle = load_verified_bundle()
+    if bundle is None:
+        _fail(f"  {voter_id} CC 簽章結果包驗證失敗")
         return False
-    proof_data = r.json()
-    proof = proof_data.get('merkle_proof', [])
-    root_from_proof = proof_data.get('root_official', root_official)
+    signed_list = bundle.get('valid_m_hex_list', [])
+    if m_hex not in signed_list or bundle.get('root_official') != root_official:
+        _fail(f"  {voter_id} 簽章結果包與 /api/results 不一致")
+        return False
+    tree = MerkleTree(signed_list)
+    if tree.get_root() != root_official:
+        _fail(f"  {voter_id} 重建的 Merkle Root 與 CC 簽章的不符")
+        return False
 
-    # 6.4：本地端重建 Root
-    root_calc = MerkleTree.verify_proof(m_hex, proof, root_from_proof)
-    if not root_calc:
+    # 6.4：本地端驗證路徑
+    if not MerkleTree.verify_proof(m_hex, tree.get_proof(signed_list.index(m_hex)), root_official):
         _fail(f"  {voter_id} Merkle Proof 驗證失敗")
         return False
 
     return True
+
+
+def load_verified_bundle() -> Optional[dict]:
+    """取得 BB 的 CC 簽章結果包，驗證 CC 憑證由 CA 簽發、簽章有效，回傳結果包內容。"""
+    sb = requests.get(f"{BB_URL}/api/signed_bundle", timeout=TIMEOUT).json()
+    if sb.get('status') != 'success':
+        return None
+    ca_pem = requests.get(f"{CA_URL}/api/ca_cert", timeout=TIMEOUT).json()['ca_certificate']
+    ca_cert = x509.load_pem_x509_certificate(ca_pem.encode())
+    cc_cert = x509.load_pem_x509_certificate(sb['cc_cert_pem'].encode())
+    try:
+        ca_cert.public_key().verify(cc_cert.signature, cc_cert.tbs_certificate_bytes,
+                                    asym_padding.PKCS1v15(), cc_cert.signature_hash_algorithm)
+    except Exception:
+        return None
+    if not verify_signature(sb['signed_bundle'].encode('utf-8'), base64.b64decode(sb['signature']),
+                            cc_cert.public_key()):
+        return None
+    return json.loads(sb['signed_bundle'])
 
 
 # ════════════════════════════════════════════════════════════════
@@ -489,7 +528,8 @@ class VotingSystemTestSuite:
             return
 
         # 發送啟動指令
-        r = requests.post(f"{TA_URL}/api/start_election", json={}, timeout=TIMEOUT)
+        r = requests.post(f"{TA_URL}/api/start_election", json={},
+                          headers={"Authorization": f"Bearer {get_admin_api_token()}"}, timeout=TIMEOUT)
         data = r.json()
 
         if r.status_code == 409 and data.get('code') == 'ALREADY_STARTED':
@@ -743,6 +783,9 @@ class VotingSystemTestSuite:
         self._at06_replay_envelope(voter_creds)
         self._at07_aes_bitflip(voter_creds)
         self._at10_envelope_swap(voter_creds)
+        self._at11_mhex_variants_submit()
+        self._at12_wrong_round_submit()
+        self._at13_concurrent_token_race()
 
     def test_attacks(self, voter_creds: Dict[str, Tuple]):
         """截止後攻擊測試（AT-01/02/03/04/08/09）：不需要投票期間 auth"""
@@ -754,6 +797,9 @@ class VotingSystemTestSuite:
         self._at04_fake_publish()
         self._at08_merkle_collision()
         self._at09_future_timestamp(voter_creds)
+        self._at11_mhex_variants_check()
+        self._at12_wrong_round_check()
+        self._at14_bb_no_ballot_lookup()
 
     def _at01_unauth_cert(self):
         """AT-01：未授權 ID 申請憑證"""
@@ -944,9 +990,8 @@ class VotingSystemTestSuite:
             ta_pub_pem = requests.get(f"{TA_URL}/api/public_key", timeout=TIMEOUT).json()['public_key_pem']
 
             vote_content = get_candidates()[0]
-            sn = f"SN{int(time.time())}{voter_id[-3:]}"
-            inner_hash = sha256_hex(f"{voter_id}|{sn}|{vote_content}".encode())
-            m_bytes = hashlib.sha256(f"{inner_hash}|{vote_content}".encode()).digest()
+            sn = new_sn()
+            _, m_bytes = compute_m(voter_id, sn, vote_content, current_round())
             m_hex = m_bytes.hex()
 
             mu = fdh(m_bytes, tpa_n.bit_length())
@@ -1004,9 +1049,8 @@ class VotingSystemTestSuite:
             ta_pub_pem = requests.get(f"{TA_URL}/api/public_key", timeout=TIMEOUT).json()['public_key_pem']
 
             vote_content = get_candidates()[0]
-            sn = f"SN{int(time.time())}{voter_id[-3:]}"
-            inner_hash = sha256_hex(f"{voter_id}|{sn}|{vote_content}".encode())
-            m_bytes = hashlib.sha256(f"{inner_hash}|{vote_content}".encode()).digest()
+            sn = new_sn()
+            _, m_bytes = compute_m(voter_id, sn, vote_content, current_round())
             m_hex = m_bytes.hex()
             mu = fdh(m_bytes, tpa_n.bit_length())
             r_b = generate_blinding_factor(tpa_n)
@@ -1052,12 +1096,12 @@ class VotingSystemTestSuite:
             # v2.0 修正：BB /api/results 已改回傳 valid_m_hex_list（純 m_hex 清單） <3
             m_list = res.get('valid_m_hex_list', [])
 
-            # 嘗試對不存在的 m_hex 查詢 Merkle Proof（應返回 404）
+            # 不存在的 m_hex 不在 CC 簽章的清單中，本地無法為它產生驗證路徑
             fake_m = "ff" * 32
-            r = requests.get(f"{BB_URL}/api/merkle_proof/{fake_m}", timeout=TIMEOUT)
-            self._assert(r.status_code == 404,
-                         "AT-08 ✓ 不存在的 m_hex 查詢返回 404（防 Merkle 偽造）[I-1]",
-                         f"AT-08 ✗ 不存在的 m_hex 查詢未返回 404（{r.status_code}）")
+            bundle = load_verified_bundle() or {}
+            self._assert(fake_m not in bundle.get('valid_m_hex_list', [m_list]),
+                         "AT-08 ✓ 不存在的 m_hex 不在 CC 簽章清單中（防 Merkle 偽造）[I-1]",
+                         "AT-08 ✗ 不存在的 m_hex 出現在簽章清單中")
 
             # 驗證 domain separator：leaf hash 不可能等於 node hash（防 CVE-2012-2459）
             sample = m_list[0] if m_list else "a" * 64
@@ -1131,9 +1175,8 @@ class VotingSystemTestSuite:
             ta_pub_pem = requests.get(f"{TA_URL}/api/public_key", timeout=TIMEOUT).json()['public_key_pem']
 
             vote_a = get_candidates()[0]
-            sn_a = f"SN{int(time.time())}{voter_a[-3:]}"
-            inner_a = sha256_hex(f"{voter_a}|{sn_a}|{vote_a}".encode())
-            m_a = hashlib.sha256(f"{inner_a}|{vote_a}".encode()).digest()
+            sn_a = new_sn()
+            _, m_a = compute_m(voter_a, sn_a, vote_a, current_round())
             mu = fdh(m_a, tpa_n.bit_length())
             rb = generate_blinding_factor(tpa_n)
             mp = blind_message(mu, rb, tpa_e, tpa_n)
@@ -1327,6 +1370,168 @@ class VotingSystemTestSuite:
 
         self._print_summary()
         return self.failed == 0
+
+    # ────────────────────────────────────────────────────────────
+    # AT-11～AT-14：計票正確性與驗票隱私
+    # ────────────────────────────────────────────────────────────
+    def _cast_raw(self, prefix: str, election_round: int):
+        """註冊新選民、認證並取得盲簽章，回傳選票材料（不送出信封）。"""
+        voter_id = f"{prefix}_{secrets.token_hex(4).upper()}"
+        priv, _, cert_pem = register_voter(voter_id)
+        auth_packet = create_auth_packet(voter_id, "TPA", priv, cert_pem)
+        r = requests.post(f"{TPA_URL}/api/auth", json={
+            "auth_packet": auth_packet, "voter_cert_pem": cert_pem,
+        }, timeout=TIMEOUT)
+        if r.status_code != 200:
+            return None
+        token = r.json()['voting_token']
+        tpa = requests.get(f"{TPA_URL}/api/public_key", timeout=TIMEOUT).json()
+        tpa_e, tpa_n = hex_to_int(tpa['e']), hex_to_int(tpa['n'])
+        vote = get_candidates()[0]
+        sn = new_sn()
+        _, m_bytes = compute_m(voter_id, sn, vote, election_round)
+        rb = generate_blinding_factor(tpa_n)
+        mp = blind_message(fdh(m_bytes, tpa_n.bit_length()), rb, tpa_e, tpa_n)
+        sr = requests.post(f"{TPA_URL}/api/blind_sign", json={
+            "m_prime_hex": int_to_hex(mp), "voting_token": token,
+        }, timeout=TIMEOUT)
+        if sr.status_code != 200:
+            return None
+        s_prime_hex = int_to_hex(unblind_signature(hex_to_int(sr.json()['S_hex']), rb, tpa_n))
+        return {
+            "voter_id": voter_id, "sn": sn, "vote": vote, "m_hex": m_bytes.hex(),
+            "s_prime_hex": s_prime_hex, "token_id": token['payload']['token_id'],
+            "cc_pub": requests.get(f"{CC_URL}/api/public_key", timeout=TIMEOUT).json()['public_key_pem'],
+            "ta_pub": requests.get(f"{TA_URL}/api/public_key", timeout=TIMEOUT).json()['public_key_pem'],
+        }
+
+    def _submit(self, b: dict, m_hex: str, token_id: str) -> int:
+        env = encapsulate_vote(b["voter_id"], b["sn"], b["vote"], b["s_prime_hex"], m_hex,
+                               b["cc_pub"], b["ta_pub"], token_id=token_id)
+        return requests.post(f"{CC_URL}/api/receive_envelope", json=env, timeout=TIMEOUT).status_code
+
+    def _at11_mhex_variants_submit(self):
+        """AT-11（投票期間）：同一張合法選票改大小寫／加 0x、配上亂編的 token_hash 重送"""
+        try:
+            b = self._cast_raw("AT11", current_round())
+            if b is None:
+                self._skip("AT-11 取得選票失敗，跳過")
+                return
+            m = b["m_hex"]
+            codes = [self._submit(b, m, b["token_id"])]
+            for variant in (m.upper(), "0x" + m, "0X" + m.upper(), m[:32].upper() + m[32:]):
+                codes.append(self._submit(b, variant, secrets.token_hex(16)))
+            self._at11_m_hex = m
+            _info(f"AT-11 送出 {len(codes)} 封（HTTP {codes}）", self.verbose)
+        except Exception as ex:
+            _fail(f"AT-11 例外：{ex}")
+            self.failed += 1
+
+    def _at11_mhex_variants_check(self):
+        """AT-11（開票後）：變體不得被重複計票，公告清單只能有正規化的小寫 m_hex"""
+        m = getattr(self, "_at11_m_hex", None)
+        if m is None:
+            self._skip("AT-11 沒有送出選票，跳過檢查")
+            return
+        try:
+            lst = requests.get(f"{BB_URL}/api/results", timeout=TIMEOUT).json().get('valid_m_hex_list', [])
+            same = [x for x in lst if x.lower().removeprefix("0x") == m]
+            canonical = all(len(x) == 64 and x == x.lower() and all(c in "0123456789abcdef" for c in x) for x in lst)
+            self._assert(same == [m] and canonical,
+                         "AT-11 ✓ m_hex 大小寫／0x 變體未被重複計票，公告清單皆為正規化 m_hex [I-3]",
+                         f"AT-11 ✗ 同一張選票被計入 {len(same)} 次：{[x[:8] for x in same]}（清單正規化：{canonical}）")
+        except Exception as ex:
+            _fail(f"AT-11 例外：{ex}")
+            self.failed += 1
+
+    def _at12_wrong_round_submit(self):
+        """AT-12（投票期間）：用別的輪次算出的合法簽章選票（模擬上一輪的票拿來重送）"""
+        try:
+            b = self._cast_raw("AT12", current_round() - 86400)
+            if b is None:
+                self._skip("AT-12 取得選票失敗，跳過")
+                return
+            code = self._submit(b, b["m_hex"], b["token_id"])
+            self._at12_m_hex = b["m_hex"]
+            _info(f"AT-12 送出別輪選票（HTTP {code}）", self.verbose)
+        except Exception as ex:
+            _fail(f"AT-12 例外：{ex}")
+            self.failed += 1
+
+    def _at12_wrong_round_check(self):
+        """AT-12（開票後）：別輪的選票即使盲簽章有效，也不得被計入"""
+        m = getattr(self, "_at12_m_hex", None)
+        if m is None:
+            self._skip("AT-12 沒有送出選票，跳過檢查")
+            return
+        try:
+            lst = requests.get(f"{BB_URL}/api/results", timeout=TIMEOUT).json().get('valid_m_hex_list', [])
+            self._assert(m not in lst,
+                         "AT-12 ✓ 別輪的選票未被計入（m 綁定輪次）[I-3]",
+                         "AT-12 ✗ 別輪的選票被計入了")
+        except Exception as ex:
+            _fail(f"AT-12 例外：{ex}")
+            self.failed += 1
+
+    def _at13_concurrent_token_race(self):
+        """AT-13：同一選民同時送多個認證、再同時兌換每張票，最多只能拿到一份盲簽章"""
+        try:
+            voter_id = f"AT13_{secrets.token_hex(4).upper()}"
+            priv, _, cert_pem = register_voter(voter_id)
+
+            def auth(_):
+                pkt = create_auth_packet(voter_id, "TPA", priv, cert_pem)
+                return requests.post(f"{TPA_URL}/api/auth", json={
+                    "auth_packet": pkt, "voter_cert_pem": cert_pem}, timeout=TIMEOUT)
+
+            with ThreadPoolExecutor(max_workers=8) as ex:
+                tokens = [r.json()['voting_token'] for r in ex.map(auth, range(8)) if r.status_code == 200]
+            if not tokens:
+                self._skip("AT-13 認證全部失敗（可能已過截止時間），跳過")
+                return
+            tpa = requests.get(f"{TPA_URL}/api/public_key", timeout=TIMEOUT).json()
+            tpa_e, tpa_n = hex_to_int(tpa['e']), hex_to_int(tpa['n'])
+
+            def sign(token):
+                mp = blind_message(fdh(secrets.token_bytes(32), tpa_n.bit_length()),
+                                   generate_blinding_factor(tpa_n), tpa_e, tpa_n)
+                return requests.post(f"{TPA_URL}/api/blind_sign", json={
+                    "m_prime_hex": int_to_hex(mp), "voting_token": token}, timeout=TIMEOUT).status_code
+
+            with ThreadPoolExecutor(max_workers=8) as ex:
+                signed = sum(code == 200 for code in ex.map(sign, tokens))
+            self._assert(signed <= 1,
+                         f"AT-13 ✓ 併發 {len(tokens)} 個認證後只兌換到 {signed} 份盲簽章 [V-2]",
+                         f"AT-13 ✗ 同一選民拿到 {signed} 份盲簽章")
+        except Exception as ex:
+            _fail(f"AT-13 例外：{ex}")
+            self.failed += 1
+
+    def _at14_bb_no_ballot_lookup(self):
+        """AT-14：公告板不再接收個別選票識別碼；回應不帶 Referer"""
+        try:
+            m = next(iter(self.vote_records.values()), "ab" * 32)
+            r = requests.get(f"{BB_URL}/verify", params={"m_hex": m}, allow_redirects=False, timeout=TIMEOUT)
+            self._assert(r.status_code == 302 and r.headers.get("Location", "").endswith("/receipt"),
+                         "AT-14 ✓ 舊的 /verify?m_hex= 導向 /receipt，不處理查詢參數 [P-2]",
+                         f"AT-14 ✗ /verify 仍處理查詢（{r.status_code} {r.headers.get('Location')}）")
+            r = requests.get(f"{BB_URL}/api/merkle_proof/{m}", timeout=TIMEOUT)
+            self._assert(r.status_code == 404,
+                         "AT-14 ✓ 個別選票查詢 API /api/merkle_proof 已移除 [P-2]",
+                         f"AT-14 ✗ /api/merkle_proof 仍可使用（{r.status_code}）")
+            home = requests.get(f"{BB_URL}/", timeout=TIMEOUT)
+            receipt = requests.get(f"{BB_URL}/receipt", timeout=TIMEOUT)
+            leaks = [u for u, page in (("/", home.text), ("/receipt", receipt.text))
+                     if "/verify?m_hex" in page or 'name="m_hex"' in page or "/api/merkle_proof" in page]
+            self._assert(not leaks,
+                         "AT-14 ✓ 公告板頁面沒有會送出 m_hex 的表單或連結 [P-2]",
+                         f"AT-14 ✗ 頁面仍會送出 m_hex：{leaks}")
+            self._assert(home.headers.get("Referrer-Policy") == "no-referrer",
+                         "AT-14 ✓ 公告板回應帶 Referrer-Policy: no-referrer",
+                         f"AT-14 ✗ 公告板 Referrer-Policy = {home.headers.get('Referrer-Policy')}")
+        except Exception as ex:
+            _fail(f"AT-14 例外：{ex}")
+            self.failed += 1
 
     def _print_summary(self):
         total = self.passed + self.failed + self.skipped

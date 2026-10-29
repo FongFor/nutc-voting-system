@@ -28,7 +28,7 @@ flowchart TD
         C2 --> C3{"TPA 檢查<br/>nonce 未重放？<br/>尚未消耗過 Voting Token？<br/>憑證合法？"}
         C3 -->|拒絕| C4["NONCE_REPLAY／ALREADY_VOTED／<br/>CERT_INVALID 等"]
         C3 -->|通過| C5[核發 Voting Token]
-        C5 --> C6["本地計算 m = H(H(voter_id｜sn｜candidate)｜candidate)"]
+        C5 --> C6["本地計算 m = H(H(voter_id｜sn｜candidate)｜輪次｜candidate)<br/>（輪次 = 本輪 TA 截止時間）"]
         C6 --> C7["FDH 擴展 + RSA 盲化 → m'"]
         C7 --> C8["向 TPA 請求盲簽章（附 Voting Token）"]
         C8 --> C9{"Token 是否 used = 0？"}
@@ -64,7 +64,7 @@ flowchart TD
         F1["BB 驗證 CC 簽章＋憑證鏈＋<br/>票數/長度一致性"] --> F2{驗證通過？}
         F2 -->|否| F3[拒絕公告]
         F2 -->|是| F4["公告 Tally + 選票雜湊清單 + Merkle Root"]
-        F4 --> F5["任何人皆可用 m_hex 到 /verify 查詢<br/>是否已計入（無需登入、無需證明身分）"]
+        F4 --> F5["選民在 /receipt 匯入回執或輸入 m_hex<br/>瀏覽器下載簽章結果包、本機驗證是否已計入<br/>（不把 m_hex 送給伺服器）"]
     end
 
     subgraph P6["階段 6：新一輪重置（Admin /api/new_round）"]

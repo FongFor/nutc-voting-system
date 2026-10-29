@@ -239,6 +239,8 @@ services:
       RATE_LIMIT_PER_VOTER: ${RATE_LIMIT_PER_VOTER:-5 per minute}
       RATE_LIMIT_PER_IP:    ${RATE_LIMIT_PER_IP:-300 per minute}
       RATE_LIMIT_DEFAULT:   ${RATE_LIMIT_DEFAULT:-600 per minute}
+      # 投票完成頁「前往公告板驗票」按鈕用的公開網址（與 Caddy 的 BB_ADDRESS 相同）
+      BB_PUBLIC_URL: https://${BB_ADDRESS:-bb.localhost}
     volumes:
       - ./config.json:/app/config.json:ro
       - voter_keys:/app/voter_client/keys  # <3 v4.0：同上，TLS 金鑰對需要持久化
