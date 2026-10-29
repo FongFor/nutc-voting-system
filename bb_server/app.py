@@ -124,190 +124,11 @@ def ts_to_str(ts):
         return str(ts)
 
 
-# ── HTML 模板：主公告板 ────────────────────────────────────────
-_DASHBOARD_HTML = """<!DOCTYPE html>
-<html lang="zh-TW">
-<head>
-  <meta charset="UTF-8">
-  <title>開票公告｜NUTC 線上投票</title>""" + UI_HEAD + """
-  {% if not published %}<meta http-equiv="refresh" content="20">{% endif %}
-</head>
-<body>
-<header class="topbar">
-  <div class="container-wide topbar-inner">
-    <a class="brand" href="/">
-      <span class="brand-name">NUTC 線上投票</span>
-      <span class="brand-sub">開票公告板</span>
-    </a>
-    <div class="topbar-actions">
-      {% if published %}<span class="badge badge-ok">已公告</span>{% else %}<span class="badge badge-warn">等待開票</span>{% endif %}
-      """ + THEME_TOGGLE + """
-    </div>
-  </div>
-</header>
-
-<main>
-  <div class="container-wide stack-lg">
-  {% if published %}
-    <div class="stack-sm">
-      <h1>開票結果</h1>
-      <p class="lead">合法選票 {{ valid_count }} 張{% if tallied_at %}・公告時間 {{ tallied_at | ts_to_str }}{% endif %}</p>
-    </div>
-
-    <div class="grid grid-main-side">
-      <section class="card stack" aria-labelledby="tallyTitle">
-        <h2 id="tallyTitle" class="section-title">各候選人得票</h2>
-        {% for candidate, count in tally | dictsort(by='value', reverse=true) %}
-        {% set pct = (count / valid_count * 100) if valid_count > 0 else 0 %}
-        <div class="stack-sm">
-          <div class="row-between">
-            <span class="strong">{{ candidate }}</span>
-            <span><span class="strong">{{ count }}</span> 票 <span class="muted small">{{ "%.1f"|format(pct) }}%</span></span>
-          </div>
-          <div class="bar" role="img" aria-label="{{ candidate }} 得票率 {{ '%.1f'|format(pct) }}%"><span style="width: {{ pct }}%"></span></div>
-        </div>
-        {% endfor %}
-        <div class="row-between" style="border-top:1px solid var(--border); padding-top:14px">
-          <span class="muted">合法選票合計</span><span class="strong">{{ valid_count }} 票</span>
-        </div>
-      </section>
-
-      <section class="card stack" aria-labelledby="verifyTitle">
-        <h2 id="verifyTitle" class="section-title">驗證您的選票</h2>
-        <p class="small muted">輸入投票回執上的選票識別碼（m_hex），確認您的票已被計入。驗證過程不會透露您投給誰。</p>
-        <form method="GET" action="/verify" class="stack-sm">
-          <label class="sr-only" for="mhexInput">選票識別碼（m_hex）</label>
-          <input id="mhexInput" class="input mono" type="text" name="m_hex" placeholder="貼上 64 位的 m_hex"
-                 autocomplete="off" autocapitalize="off" spellcheck="false" required>
-          <button type="submit" class="btn btn-primary btn-block">驗證</button>
-        </form>
-      </section>
-    </div>
-
-    <section class="card stack-sm" aria-labelledby="rootTitle">
-      <div class="row-between">
-        <h2 id="rootTitle" class="section-title">官方 Merkle Root</h2>
-        <a class="small" href="/api/signed_bundle">下載 CC 簽章的結果包</a>
-      </div>
-      <code class="hash">{{ merkle_root }}</code>
-      <p class="small muted">由計票中心（CC）簽章公告。每一張選票的驗證路徑，都必須能算出這個值。</p>
-    </section>
-
-    <section class="card card-flush" aria-labelledby="listTitle">
-      <div class="card-head">
-        <h2 id="listTitle" class="section-title">合法選票清單</h2>
-        <span class="small muted">共 {{ valid_count }} 張{% if valid_count > votes|length %}，顯示前 {{ votes|length }} 張{% endif %}・<a href="/api/results">下載完整清單（JSON）</a></span>
-      </div>
-      {% if votes %}
-      <div class="table-wrap">
-        <table class="table">
-          <thead><tr><th class="num">#</th><th>選票識別碼（m_hex）</th><th><span class="sr-only">操作</span></th></tr></thead>
-          <tbody>
-            {% for v in votes %}
-            <tr>
-              <td class="num muted">{{ loop.index }}</td>
-              <td><span class="hash-inline">{{ v.m_hex }}</span></td>
-              <td class="nowrap"><a href="/verify?m_hex={{ v.m_hex }}">驗證</a></td>
-            </tr>
-            {% endfor %}
-          </tbody>
-        </table>
-      </div>
-      {% else %}
-      <div class="card-body muted">沒有合法選票。</div>
-      {% endif %}
-    </section>
-  {% else %}
-    <section class="card text-center stack" style="padding:56px 24px">
-      <h1>等待開票</h1>
-      <p class="lead">投票截止並完成開票後，計票中心（CC）會在這裡公告結果。</p>
-      <p class="small muted">此頁每 20 秒自動重新整理。</p>
-    </section>
-  {% endif %}
-  </div>
-</main>
-<footer class="footer">
-  <div class="container-wide">公告內容由計票中心簽章；任何人都可以下載結果包與完整選票清單，自行重算 Merkle Root 驗證。</div>
-</footer>
-</body>
-</html>"""
-
-
-_VERIFY_HTML = """<!DOCTYPE html>
-<html lang="zh-TW">
-<head>
-  <meta charset="UTF-8">
-  <title>驗證選票｜NUTC 線上投票</title>""" + UI_HEAD + """
-  <style>
-    /* 樹狀圖畫布：固定高度的拖曳容器，由 JS 控制畫布位置與縮放 */
-    #tree-scroll-wrap { position: relative; width: 100%; height: 60vh; min-height: 360px; overflow: hidden;
-      background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius); cursor: grab; touch-action: none; }
-    #tree-scroll-wrap:active { cursor: grabbing; }
-    #tree-canvas { display: block; position: absolute; top: 0; left: 0; max-width: none; }
-    #node-panel { display: none; position: fixed; z-index: 200; max-width: min(420px, calc(100vw - 24px)); pointer-events: none;
-      background: var(--surface); border: 1px solid var(--border-strong); border-radius: var(--radius); padding: 12px 14px; }
-    #node-panel .panel-title { font-weight: 700; font-size: 0.85rem; margin-bottom: 4px; }
-    #node-panel .panel-hash { font-family: var(--mono); font-size: 0.8rem; color: var(--accent); word-break: break-all; }
-    #node-panel .panel-meta { color: var(--muted); font-size: 0.8rem; margin-top: 4px; }
-    #zoom-controls { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
-    #zoom-label { min-width: 48px; text-align: center; font-size: 0.85rem; color: var(--muted); font-variant-numeric: tabular-nums; }
-    .legend { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 0.85rem; color: var(--muted); }
-    .legend span { display: inline-flex; align-items: center; gap: 6px; }
-    .legend i { width: 12px; height: 12px; border-radius: 3px; border: 2px solid; display: inline-block; }
-    .proof-step { display: grid; grid-template-columns: auto auto minmax(0, 1fr); gap: 4px 10px; align-items: baseline; padding: 8px 0; border-bottom: 1px solid var(--border); }
-    .proof-step:last-child { border-bottom: 0; }
-  </style>
-  <script>
-    // 切換深色模式後重畫樹狀圖（畫布顏色由 JS 決定）
-    (function () { var t = window.toggleTheme; window.toggleTheme = function () { t(); if (typeof draw === 'function') draw(); }; })();
-  </script>
-</head>
-<body>
-<header class="topbar">
-  <div class="container-wide topbar-inner">
-    <a class="brand" href="/">
-      <span class="brand-name">NUTC 線上投票</span>
-      <span class="brand-sub">驗證選票</span>
-    </a>
-    <div class="topbar-actions">
-      <a class="btn btn-sm" href="/">回公告板</a>
-      """ + THEME_TOGGLE + """
-    </div>
-  </div>
-</header>
-
-<main>
-  <div class="container-wide stack-lg">
-    <div class="stack-sm">
-      <h1>驗證選票</h1>
-      <p class="lead">確認您的選票已包含在計票結果中，而且不必透露您投給誰。</p>
-    </div>
-
-    {% if result %}
-    <div class="stack">
-      {% if result.valid %}
-      <div class="alert alert-ok">
-        <p class="alert-title">公告板回報：找到您的選票</p>
-        <p class="small">這是公告板伺服器的判斷。下方會在您的瀏覽器裡獨立再驗證一次，不依賴公告板。</p>
-      </div>
-      {% else %}
-      <div class="alert alert-err" role="alert">
-        <p class="alert-title">驗證失敗</p>
-        <p class="small">{{ result.message }}</p>
-      </div>
-      {% endif %}
-
-      {% if result.valid %}
-      <!-- 瀏覽器本機獨立驗證：向投票網站取得 CA 根憑證、驗證 CC 簽章，再用簽過章的
-           Merkle Root 重算驗證路徑，不依賴也不信任公告板伺服器的判斷。 -->
-      <section id="localVerifyBanner" class="alert stack-sm" aria-live="polite">
-        <p class="row"><span id="localVerifyIcon" class="spin" aria-hidden="true"></span><span id="localVerifyTitle" class="alert-title">正在您的瀏覽器中獨立驗證…</span></p>
-        <p class="small muted">先向投票網站（不是公告板）取得 CA 根憑證，確認開票結果包確實由 CA 認證的計票中心簽章，再用結果包裡的 Merkle Root 重新計算您的驗證路徑。公告板若竄改結果或謊報，這裡會顯示不符。</p>
-        <ul id="localVerifySteps" class="steps"></ul>
-      </section>
-      <script>
-        (function () {
-          async function sha256Hex(bytes) {
+# ── 瀏覽器本機驗證共用 JS（/verify 與 /receipt 共用）────────────
+# 本頁是 BB 自己提供的，BB 送來的任何資料（root、proof、結果包）都不能
+# 直接相信：root 必須來自「CC 簽過章、且 CC 憑證由 CA 簽發」的結果包，
+# CA 根憑證則向投票網站（不是 BB）索取。
+_LOCAL_VERIFY_JS = """          async function sha256Hex(bytes) {
             const digest = await crypto.subtle.digest('SHA-256', bytes);
             return Array.from(new Uint8Array(digest)).map(b => b.toString(16).padStart(2, '0')).join('');
           }
@@ -411,6 +232,235 @@ _VERIFY_HTML = """<!DOCTYPE html>
             return Math.ceil((modulusBits - 1) / 8) - 32 - 2;
           }
 
+          // CA 根憑證向投票網站索取（不向 BB），驗 CC 憑證鏈與結果包簽章，
+          // 通過才回傳結果包內容；任何一步不符都丟出例外。
+          async function verifySignedBundle(sb, caCertUrl, onStep) {
+            const caResp = await fetch(caCertUrl, { cache: 'no-store' }).then(r => r.json());
+            if (caResp.status !== 'success' || !caResp.ca_certificate) throw new Error('無法從投票網站取得 CA 根憑證');
+            const caKey = await crypto.subtle.importKey('spki', parseCertificate(caResp.ca_certificate).spkiBytes,
+              { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' }, false, ['verify']);
+            onStep('已從投票網站取得 CA 根憑證');
+            const ccSpki = await verifyCertChain(sb.cc_cert_pem, 'CC', caKey);
+            onStep('CC 憑證由 CA 簽發');
+            const ccKey = await crypto.subtle.importKey('spki', ccSpki, { name: 'RSA-PSS', hash: 'SHA-256' }, false, ['verify']);
+            const sigOk = await crypto.subtle.verify({ name: 'RSA-PSS', saltLength: pssMaxSaltLength(ccSpki) },
+              ccKey, b64decode(sb.signature), new TextEncoder().encode(sb.signed_bundle));
+            if (!sigOk) throw new Error('結果包的 CC 簽章無效，公告內容可能遭竄改');
+            onStep('開票結果包的 CC 簽章有效');
+            return JSON.parse(sb.signed_bundle);
+          }
+
+          // 比照 shared/merkle_tree.py 的 _build_tree / get_proof：奇數節點上提、不複製。
+          async function buildLayersLocal(mHexList) {
+            const layers = [await Promise.all(mHexList.map(hLeafLocal))];
+            while (layers[layers.length - 1].length > 1) {
+              const cur = layers[layers.length - 1];
+              const pairs = [];
+              for (let i = 0; i + 1 < cur.length; i += 2) pairs.push(hNodeLocal(cur[i], cur[i + 1]));
+              const next = await Promise.all(pairs);
+              if (cur.length % 2) next.push(cur[cur.length - 1]);
+              layers.push(next);
+            }
+            return layers;
+          }
+          function proofFromLayers(layers, index) {
+            const proof = [];
+            for (const layer of layers.slice(0, -1)) {
+              if (index % 2 === 1) proof.push({ sibling: layer[index - 1], position: 'left' });
+              else if (index + 1 < layer.length) proof.push({ sibling: layer[index + 1], position: 'right' });
+              index = Math.floor(index / 2);
+            }
+            return proof;
+          }
+"""
+
+
+# ── HTML 模板：主公告板 ────────────────────────────────────────
+_DASHBOARD_HTML = """<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8">
+  <title>開票公告｜NUTC 線上投票</title>""" + UI_HEAD + """
+  {% if not published %}<meta http-equiv="refresh" content="20">{% endif %}
+</head>
+<body>
+<header class="topbar">
+  <div class="container-wide topbar-inner">
+    <a class="brand" href="/">
+      <span class="brand-name">NUTC 線上投票</span>
+      <span class="brand-sub">開票公告板</span>
+    </a>
+    <div class="topbar-actions">
+      {% if published %}<span class="badge badge-ok">已公告</span>{% else %}<span class="badge badge-warn">等待開票</span>{% endif %}
+      """ + THEME_TOGGLE + """
+    </div>
+  </div>
+</header>
+
+<main>
+  <div class="container-wide stack-lg">
+  {% if published %}
+    <div class="stack-sm">
+      <h1>開票結果</h1>
+      <p class="lead">合法選票 {{ valid_count }} 張{% if tallied_at %}・公告時間 {{ tallied_at | ts_to_str }}{% endif %}</p>
+    </div>
+
+    <div class="grid grid-main-side">
+      <section class="card stack" aria-labelledby="tallyTitle">
+        <h2 id="tallyTitle" class="section-title">各候選人得票</h2>
+        {% for candidate, count in tally | dictsort(by='value', reverse=true) %}
+        {% set pct = (count / valid_count * 100) if valid_count > 0 else 0 %}
+        <div class="stack-sm">
+          <div class="row-between">
+            <span class="strong">{{ candidate }}</span>
+            <span><span class="strong">{{ count }}</span> 票 <span class="muted small">{{ "%.1f"|format(pct) }}%</span></span>
+          </div>
+          <div class="bar" role="img" aria-label="{{ candidate }} 得票率 {{ '%.1f'|format(pct) }}%"><span style="width: {{ pct }}%"></span></div>
+        </div>
+        {% endfor %}
+        <div class="row-between" style="border-top:1px solid var(--border); padding-top:14px">
+          <span class="muted">合法選票合計</span><span class="strong">{{ valid_count }} 票</span>
+        </div>
+      </section>
+
+      <section class="card stack" aria-labelledby="verifyTitle">
+        <h2 id="verifyTitle" class="section-title">驗證您的選票</h2>
+        <p class="small muted">輸入投票回執上的選票識別碼（m_hex），確認您的票已被計入。驗證過程不會透露您投給誰。</p>
+        <form method="GET" action="/verify" class="stack-sm">
+          <label class="sr-only" for="mhexInput">選票識別碼（m_hex）</label>
+          <input id="mhexInput" class="input mono" type="text" name="m_hex" placeholder="貼上 64 位的 m_hex"
+                 autocomplete="off" autocapitalize="off" spellcheck="false" required>
+          <button type="submit" class="btn btn-primary btn-block">驗證</button>
+        </form>
+        <a class="btn btn-block" href="/receipt">匯入回執驗票</a>
+      </section>
+    </div>
+
+    <section class="card stack-sm" aria-labelledby="rootTitle">
+      <div class="row-between">
+        <h2 id="rootTitle" class="section-title">官方 Merkle Root</h2>
+        <a class="small" href="/api/signed_bundle">下載 CC 簽章的結果包</a>
+      </div>
+      <code class="hash">{{ merkle_root }}</code>
+      <p class="small muted">由計票中心（CC）簽章公告。每一張選票的驗證路徑，都必須能算出這個值。</p>
+    </section>
+
+    <section class="card card-flush" aria-labelledby="listTitle">
+      <div class="card-head">
+        <h2 id="listTitle" class="section-title">合法選票清單</h2>
+        <span class="small muted">共 {{ valid_count }} 張{% if valid_count > votes|length %}，顯示前 {{ votes|length }} 張{% endif %}・<a href="/api/results">下載完整清單（JSON）</a></span>
+      </div>
+      {% if votes %}
+      <div class="table-wrap">
+        <table class="table">
+          <thead><tr><th class="num">#</th><th>選票識別碼（m_hex）</th><th><span class="sr-only">操作</span></th></tr></thead>
+          <tbody>
+            {% for v in votes %}
+            <tr>
+              <td class="num muted">{{ loop.index }}</td>
+              <td><span class="hash-inline">{{ v.m_hex }}</span></td>
+              <td class="nowrap"><a href="/verify?m_hex={{ v.m_hex }}">驗證</a></td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% else %}
+      <div class="card-body muted">沒有合法選票。</div>
+      {% endif %}
+    </section>
+  {% else %}
+    <section class="card text-center stack" style="padding:56px 24px">
+      <h1>等待開票</h1>
+      <p class="lead">投票截止並完成開票後，計票中心（CC）會在這裡公告結果。</p>
+      <p class="small muted">此頁每 20 秒自動重新整理。</p>
+      <p><a class="btn" href="/receipt">匯入回執驗票</a></p>
+    </section>
+  {% endif %}
+  </div>
+</main>
+<footer class="footer">
+  <div class="container-wide">公告內容由計票中心簽章；任何人都可以下載結果包與完整選票清單，自行重算 Merkle Root 驗證。</div>
+</footer>
+</body>
+</html>"""
+
+
+_VERIFY_HTML = """<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8">
+  <title>驗證選票｜NUTC 線上投票</title>""" + UI_HEAD + """
+  <style>
+    /* 樹狀圖畫布：固定高度的拖曳容器，由 JS 控制畫布位置與縮放 */
+    #tree-scroll-wrap { position: relative; width: 100%; height: 60vh; min-height: 360px; overflow: hidden;
+      background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius); cursor: grab; touch-action: none; }
+    #tree-scroll-wrap:active { cursor: grabbing; }
+    #tree-canvas { display: block; position: absolute; top: 0; left: 0; max-width: none; }
+    #node-panel { display: none; position: fixed; z-index: 200; max-width: min(420px, calc(100vw - 24px)); pointer-events: none;
+      background: var(--surface); border: 1px solid var(--border-strong); border-radius: var(--radius); padding: 12px 14px; }
+    #node-panel .panel-title { font-weight: 700; font-size: 0.85rem; margin-bottom: 4px; }
+    #node-panel .panel-hash { font-family: var(--mono); font-size: 0.8rem; color: var(--accent); word-break: break-all; }
+    #node-panel .panel-meta { color: var(--muted); font-size: 0.8rem; margin-top: 4px; }
+    #zoom-controls { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+    #zoom-label { min-width: 48px; text-align: center; font-size: 0.85rem; color: var(--muted); font-variant-numeric: tabular-nums; }
+    .legend { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 0.85rem; color: var(--muted); }
+    .legend span { display: inline-flex; align-items: center; gap: 6px; }
+    .legend i { width: 12px; height: 12px; border-radius: 3px; border: 2px solid; display: inline-block; }
+    .proof-step { display: grid; grid-template-columns: auto auto minmax(0, 1fr); gap: 4px 10px; align-items: baseline; padding: 8px 0; border-bottom: 1px solid var(--border); }
+    .proof-step:last-child { border-bottom: 0; }
+  </style>
+  <script>
+    // 切換深色模式後重畫樹狀圖（畫布顏色由 JS 決定）
+    (function () { var t = window.toggleTheme; window.toggleTheme = function () { t(); if (typeof draw === 'function') draw(); }; })();
+  </script>
+</head>
+<body>
+<header class="topbar">
+  <div class="container-wide topbar-inner">
+    <a class="brand" href="/">
+      <span class="brand-name">NUTC 線上投票</span>
+      <span class="brand-sub">驗證選票</span>
+    </a>
+    <div class="topbar-actions">
+      <a class="btn btn-sm" href="/">回公告板</a>
+      """ + THEME_TOGGLE + """
+    </div>
+  </div>
+</header>
+
+<main>
+  <div class="container-wide stack-lg">
+    <div class="stack-sm">
+      <h1>驗證選票</h1>
+      <p class="lead">確認您的選票已包含在計票結果中，而且不必透露您投給誰。</p>
+    </div>
+
+    {% if result %}
+    <div class="stack">
+      {% if result.valid %}
+      <div class="alert alert-ok">
+        <p class="alert-title">公告板回報：找到您的選票</p>
+        <p class="small">這是公告板伺服器的判斷。下方會在您的瀏覽器裡獨立再驗證一次，不依賴公告板。</p>
+      </div>
+      {% else %}
+      <div class="alert alert-err" role="alert">
+        <p class="alert-title">驗證失敗</p>
+        <p class="small">{{ result.message }}</p>
+      </div>
+      {% endif %}
+
+      {% if result.valid %}
+      <!-- 瀏覽器本機獨立驗證：向投票網站取得 CA 根憑證、驗證 CC 簽章，再用簽過章的
+           Merkle Root 重算驗證路徑，不依賴也不信任公告板伺服器的判斷。 -->
+      <section id="localVerifyBanner" class="alert stack-sm" aria-live="polite">
+        <p class="row"><span id="localVerifyIcon" class="spin" aria-hidden="true"></span><span id="localVerifyTitle" class="alert-title">正在您的瀏覽器中獨立驗證…</span></p>
+        <p class="small muted">先向投票網站（不是公告板）取得 CA 根憑證，確認開票結果包確實由 CA 認證的計票中心簽章，再用結果包裡的 Merkle Root 重新計算您的驗證路徑。公告板若竄改結果或謊報，這裡會顯示不符。</p>
+        <ul id="localVerifySteps" class="steps"></ul>
+      </section>
+      <script>
+        (function () {
+""" + _LOCAL_VERIFY_JS + """
           (async function () {
             const mHex        = {{ result.m_hex | tojson }};
             const proof       = {{ result.proof | tojson }};
@@ -431,26 +481,13 @@ _VERIFY_HTML = """<!DOCTYPE html>
               steps.appendChild(li);
             }
             try {
-              // 1. CA 根憑證：向投票網站索取，不向 BB 索取
-              const caResp = await fetch(caCertUrl, { cache: 'no-store' }).then(r => r.json());
-              if (caResp.status !== 'success' || !caResp.ca_certificate) throw new Error('無法從投票網站取得 CA 根憑證');
-              const caKey = await crypto.subtle.importKey('spki', parseCertificate(caResp.ca_certificate).spkiBytes,
-                { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' }, false, ['verify']);
-              step('已從投票網站取得 CA 根憑證');
-
-              // 2. CC 憑證鏈 + 結果包簽章
+              // 1–2. CA 根憑證（向投票網站索取）→ CC 憑證鏈 → 結果包簽章
               const sb = await fetch('/api/signed_bundle', { cache: 'no-store' }).then(r => r.json());
               if (sb.status !== 'success') throw new Error(sb.message || '公告板沒有提供 CC 簽章的結果包');
-              const ccSpki = await verifyCertChain(sb.cc_cert_pem, 'CC', caKey);
-              step('CC 憑證由 CA 簽發');
-              const ccKey = await crypto.subtle.importKey('spki', ccSpki, { name: 'RSA-PSS', hash: 'SHA-256' }, false, ['verify']);
-              const sigOk = await crypto.subtle.verify({ name: 'RSA-PSS', saltLength: pssMaxSaltLength(ccSpki) },
-                ccKey, b64decode(sb.signature), new TextEncoder().encode(sb.signed_bundle));
-              if (!sigOk) throw new Error('結果包的 CC 簽章無效，公告內容可能遭竄改');
-              step('開票結果包的 CC 簽章有效');
+              const bundle = await verifySignedBundle(sb, caCertUrl, step);
 
               // 3. 只使用簽過章的 root
-              const rootOfficial = JSON.parse(sb.signed_bundle).root_official;
+              const rootOfficial = bundle.root_official;
               const ok = await verifyProofLocally(mHex, proof, rootOfficial);
               if (ok) step('您的選票驗證路徑可算出 CC 簽章的 Merkle Root');
               icon.className = 'hidden';
@@ -1118,6 +1155,172 @@ _VERIFY_HTML = """<!DOCTYPE html>
 </body>
 </html>"""
 
+# ── HTML 模板：匯入回執驗票 ────────────────────────────────────
+# 回執檔在瀏覽器內讀取，不上傳；向 BB 只索取整份 CC 簽章結果包，BB 因此
+# 不知道這次查的是哪一張票（/verify?m_hex= 會把 m_hex 留在伺服器紀錄）。
+_RECEIPT_HTML = """<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8">
+  <title>匯入回執驗票｜NUTC 線上投票</title>""" + UI_HEAD + """
+</head>
+<body>
+<header class="topbar">
+  <div class="container topbar-inner">
+    <a class="brand" href="/">
+      <span class="brand-name">NUTC 線上投票</span>
+      <span class="brand-sub">匯入回執驗票</span>
+    </a>
+    <div class="topbar-actions">
+      <a class="btn btn-sm" href="/">回公告板</a>
+      """ + THEME_TOGGLE + """
+    </div>
+  </div>
+</header>
+
+<main>
+  <div class="container stack-lg">
+    <div class="stack-sm">
+      <h1>匯入回執驗票</h1>
+      <p class="lead">選擇投票後下載的驗票回執檔（.json），在您的手機上確認選票已納入公告。</p>
+    </div>
+
+    <section class="card stack">
+      <label class="btn btn-primary btn-block" for="receiptFile">選擇回執檔</label>
+      <input id="receiptFile" class="sr-only" type="file" accept=".json,.txt,application/json">
+      <p class="small muted">檔案只在這台裝置上讀取，不會上傳。公告板只會被要求提供整份開票結果，無從得知您查的是哪一張票。</p>
+    </section>
+
+    <section id="resultBanner" class="alert stack-sm hidden" aria-live="polite">
+      <p class="row"><span id="resultIcon" class="spin" aria-hidden="true"></span><span id="resultTitle" class="alert-title">驗證中…</span></p>
+      <p id="resultDetail" class="small"></p>
+      <ul id="resultSteps" class="steps"></ul>
+    </section>
+
+    <details id="resultInfo" class="card hidden">
+      <summary>詳細雜湊資訊</summary>
+      <dl class="dl" style="margin-top:16px">
+        <div><dt>m_hex（選票識別碼）</dt><dd><code id="infoMhex" class="hash"></code></dd></div>
+        <div><dt>驗證路徑</dt><dd id="infoProof"></dd></div>
+        <div><dt>官方 Merkle Root（CC 簽章）</dt><dd><code id="infoRoot" class="hash"></code></dd></div>
+      </dl>
+      <p class="small"><a id="infoTreeLink" href="/verify">在公告板查看 Merkle 樹狀圖</a><span class="muted">（會把識別碼送給公告板伺服器）</span></p>
+    </details>
+  </div>
+</main>
+
+<script>
+(function () {
+""" + _LOCAL_VERIFY_JS + """
+  const caCertUrl = {{ ca_cert_url | tojson }};
+  const RECEIPT_TYPE = 'nutc-vote-receipt';
+  const RECEIPT_VERSION = 1;
+  const MAX_RECEIPT_BYTES = 4096;
+  const $ = id => document.getElementById(id);
+
+  // 四種結果：已納入公告／尚未公告／輪次不同／驗證失敗
+  const OUTCOMES = {
+    ok:        ['alert-ok',   '已納入公告'],
+    pending:   ['alert-info', '尚未公告'],
+    round:     ['alert-warn', '輪次不同'],
+    fail:      ['alert-err',  '驗證失敗'],
+  };
+  class Outcome extends Error {
+    constructor(kind, detail) { super(detail); this.kind = kind; }
+  }
+
+  function step(text) {
+    const li = document.createElement('li');
+    li.className = 'step-ok';
+    const mark = document.createElement('span');
+    mark.className = 'mark';
+    mark.textContent = '✓';
+    const t = document.createElement('span');
+    t.textContent = text;
+    li.append(mark, t);
+    $('resultSteps').appendChild(li);
+  }
+  function finish(kind, detail) {
+    const [cls, title] = OUTCOMES[kind];
+    $('resultIcon').className = 'hidden';
+    $('resultBanner').className = 'alert stack-sm ' + cls;
+    $('resultTitle').textContent = title;
+    $('resultDetail').textContent = detail;
+  }
+  function fmtTime(ts) { return new Date(ts * 1000).toLocaleString(); }
+
+  function parseReceipt(text) {
+    let r;
+    try { r = JSON.parse(text); } catch (_) { throw new Outcome('fail', '這不是驗票回執檔（無法解析 JSON）。'); }
+    if (!r || r.type !== RECEIPT_TYPE) throw new Outcome('fail', '這不是驗票回執檔（type 不符）。');
+    if (r.v !== RECEIPT_VERSION) throw new Outcome('fail', `不支援的回執版本 v${r.v}，請重新整理公告板後再試。`);
+    if (typeof r.m_hex !== 'string' || !/^[0-9a-f]{64}$/.test(r.m_hex)) throw new Outcome('fail', '回執檔的選票識別碼格式錯誤。');
+    if (r.round !== null && !(Number.isInteger(r.round) && r.round > 0)) throw new Outcome('fail', '回執檔的輪次欄位格式錯誤。');
+    return r;
+  }
+
+  async function verifyReceipt(file) {
+    if (file.size > MAX_RECEIPT_BYTES) throw new Outcome('fail', '檔案太大，這不是驗票回執檔。');
+    const receipt = parseReceipt(await file.text());
+    step('回執格式與版本正確');
+
+    const resp = await fetch('/api/signed_bundle', { cache: 'no-store' });
+    if (resp.status === 404) throw new Outcome('pending', '開票結果還沒公告。投票截止並完成開票後再匯入一次。');
+    const sb = await resp.json();
+    if (sb.status !== 'success') throw new Outcome('fail', sb.message || '公告板沒有提供 CC 簽章的結果包');
+    const bundle = await verifySignedBundle(sb, caCertUrl, step);
+
+    if (receipt.round && bundle.deadline && receipt.round !== bundle.deadline) {
+      throw new Outcome('round',
+        `這份回執屬於截止時間 ${fmtTime(receipt.round)} 的選舉，目前公告的是截止時間 ${fmtTime(bundle.deadline)} 的選舉。`);
+    }
+    step(receipt.round ? '回執輪次與公告一致' : '舊版回執沒有輪次資訊，略過輪次檢查');
+
+    const list = bundle.valid_m_hex_list || [];
+    const index = list.indexOf(receipt.m_hex);
+    if (index < 0) throw new Outcome('fail', '公告的合法選票清單中找不到這張票。請保留回執檔並通報選務人員。');
+    step(`在 ${list.length} 張合法選票中找到您的票`);
+
+    const layers = await buildLayersLocal(list);
+    if (layers[layers.length - 1][0] !== bundle.root_official) {
+      throw new Outcome('fail', '公告清單重算出的 Merkle Root 與 CC 簽章的不符，公告資料可能有誤。請通報選務人員。');
+    }
+    const proof = proofFromLayers(layers, index);
+    if (!(await verifyProofLocally(receipt.m_hex, proof, bundle.root_official))) {
+      throw new Outcome('fail', '驗證路徑算不出 CC 簽章的 Merkle Root。請通報選務人員。');
+    }
+    step(`驗證路徑（${proof.length} 步）可算出 CC 簽章的 Merkle Root`);
+
+    $('infoMhex').textContent = receipt.m_hex;
+    $('infoProof').textContent = `共 ${proof.length} 步，由葉節點到樹根`;
+    $('infoRoot').textContent = bundle.root_official;
+    $('infoTreeLink').href = '/verify?m_hex=' + receipt.m_hex;
+    $('resultInfo').classList.remove('hidden');
+    return `您的票已包含在 CC 簽章公告的 ${list.length} 張合法選票中。整個驗證在這台裝置上完成，沒有採用公告板伺服器的判斷。`;
+  }
+
+  $('receiptFile').addEventListener('change', async e => {
+    const file = e.target.files[0];
+    e.target.value = '';
+    if (!file) return;
+    $('resultSteps').textContent = '';
+    $('resultInfo').classList.add('hidden');
+    $('resultIcon').className = 'spin';
+    $('resultBanner').className = 'alert stack-sm';
+    $('resultTitle').textContent = '驗證中…';
+    $('resultDetail').textContent = '';
+    try {
+      finish('ok', await verifyReceipt(file));
+    } catch (err) {
+      finish(err instanceof Outcome ? err.kind : 'fail', err.message);
+    }
+  });
+})();
+</script>
+</body>
+</html>"""
+
+
 # ── 路由 ──────────────────────────────────────────────────
 
 @app.route('/')
@@ -1178,6 +1381,12 @@ def verify_page():
         ca_cert_url=CA_CERT_URL_FOR_BROWSER,
         viz_max_leaves=VIZ_MAX_LEAVES,
     )
+
+
+@app.route('/receipt', methods=['GET'])
+def receipt_page():
+    """匯入回執驗票頁：回執檔只在瀏覽器讀取，驗證全程在本機完成。"""
+    return render_template_string(_RECEIPT_HTML, ca_cert_url=CA_CERT_URL_FOR_BROWSER)
 
 
 @app.route('/api/admin/reset', methods=['POST'])

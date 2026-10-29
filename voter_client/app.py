@@ -584,6 +584,43 @@ async function idbHasCert() {
   return !!(await idbLoad('certPem'));
 }
 
+/* ---------- 驗票回執檔（公告板「匯入回執驗票」讀取） ----------
+   只匯出 m_hex、s_prime_hex 與輪次（TA 截止時間）。學號、SN、投票對象
+   刻意不放：三者湊齊就能重算 m 再對照公告板，回執檔就成了可以轉交給
+   別人的「我投給誰」證明（買票、脅迫投票）。s_prime_hex 是 TPA 對 m 的
+   盲簽章，不含投票內容，申訴「票不見了」時可證明這張票確實取得過簽章。 */
+async function fetchElectionRound() {
+  try {
+    const d = await fetch('/api/proxy/ta/deadline').then(r => r.json());
+    return d.status === 'success' && d.deadline > 0 ? d.deadline : null;
+  } catch (_) {
+    return null;
+  }
+}
+async function downloadVoteReceipt() {
+  if (/\bLine\/|FBAN|FBAV|Instagram/i.test(navigator.userAgent)) {
+    alert('LINE、Facebook 等 App 內建的瀏覽器可能無法下載檔案。若沒有出現下載，請改用 Safari 或 Chrome 開啟本頁再下載。');
+  }
+  try {
+    const rec = await idbLoad('voteReceipt');
+    if (!rec || !rec.m_hex) throw new Error('這台裝置上沒有投票紀錄');
+    const file = {
+      type: 'nutc-vote-receipt', v: 1,
+      round: rec.round || null, m_hex: rec.m_hex, s_prime_hex: rec.s_prime_hex || null,
+    };
+    const url = URL.createObjectURL(new Blob([JSON.stringify(file, null, 2)], { type: 'application/json' }));
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `nutc-vote-receipt-${rec.m_hex.slice(0, 8)}.json`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 10000);
+  } catch (e) {
+    alert('無法下載驗票回執：' + e.message);
+  }
+}
+
 /* ---------- PEM / DER / Bytes ---------- */
 function pemToDer(pem) {
   const b64 = pem.replace(/-----[^-]+-----/g, '').replace(/\s/g, '');
@@ -1109,7 +1146,7 @@ _VOTE_HTML = """<!DOCTYPE html>
       <p class="alert-title">您已完成投票</p>
       <p class="small">您的選票識別碼（m_hex）：</p>
       <code id="votedMhex" class="hash"></code>
-      <p class="small"><a href="/status">查看完整回執</a></p>
+      <p class="row"><button type="button" class="btn btn-sm btn-primary" onclick="downloadVoteReceipt()">下載驗票回執</button><a class="small" href="/status">查看完整回執</a></p>
     </div>
 
     <section id="voteForm" class="card stack" aria-labelledby="candTitle">
@@ -1125,9 +1162,11 @@ _VOTE_HTML = """<!DOCTYPE html>
 
     <section id="successCard" class="alert alert-ok hidden stack-sm" role="status">
       <p class="alert-title">已收到您的選票</p>
-      <p class="small">為了保護匿名性，選票會和其他選民的票一起批次送出，所以不會立刻出現在計票中心，這是正常的。開票後，請到公告板輸入下面的識別碼（m_hex）確認您的票已被計入：</p>
+      <p><span class="badge badge-warn">已排隊，尚未確認計入</span></p>
+      <p class="small">為了保護匿名性，選票會和其他選民的票一起批次送出，所以不會立刻出現在計票中心，這是正常的。請先下載驗票回執存到手機，開票後到公告板按「匯入回執驗票」選擇這個檔案，就能確認您的票已被計入。</p>
+      <p class="row"><button type="button" class="btn btn-sm btn-primary" onclick="downloadVoteReceipt()">下載驗票回執</button><a class="small" href="/status">查看完整回執</a></p>
+      <p class="small muted">回執檔只有選票識別碼，不含學號和投票對象，存在手機裡也不會洩漏您投給誰。選票識別碼（m_hex）：</p>
       <code id="successMhex" class="hash"></code>
-      <p class="small"><a href="/status">查看完整回執</a></p>
     </section>
 
     <div id="errorCard" class="alert alert-err hidden" role="alert"></div>
@@ -1384,6 +1423,7 @@ async function doVote() {
     await idbSave({
       voteReceipt: {
         voter_id: _voterId, sn, vote: candidate, m_hex, s_prime_hex,
+        round: await fetchElectionRound(),
         voted_at: Math.floor(Date.now() / 1000),
       },
     });
@@ -1466,7 +1506,8 @@ _STATUS_HTML = """<!DOCTYPE html>
         <div><dt>投票對象</dt><dd id="recVote"></dd></div>
         <div><dt>選票識別碼（m_hex）</dt><dd><code id="recMhex" class="hash"></code></dd></div>
       </dl>
-      <div class="alert alert-info small">開票後，到公告板的「驗證選票」輸入上面的 m_hex，就能確認您的票有被計入，而且不必透露您投給誰。</div>
+      <p><button type="button" class="btn btn-primary btn-block" onclick="downloadVoteReceipt()">下載驗票回執</button></p>
+      <div class="alert alert-info small">開票後，到公告板按「匯入回執驗票」選擇下載的檔案，或在「驗證選票」輸入上面的 m_hex，就能確認您的票有被計入，而且不必透露您投給誰。回執檔不含學號、SN 和投票對象。</div>
     </section>
 
     <section id="emptyCard" class="card text-center stack hidden">
