@@ -1152,13 +1152,6 @@ _VOTE_HTML = """<!DOCTYPE html>
       <span class="strong">投票截止：</span><span id="deadlineStr" class="mono"></span>
     </div>
 
-    <div id="votedBanner" class="alert alert-ok hidden stack-sm">
-      <p class="alert-title">您已完成投票</p>
-      <p class="small">您的選票識別碼（m_hex）：</p>
-      <code id="votedMhex" class="hash"></code>
-      <p class="row"><button type="button" class="btn btn-sm btn-primary" onclick="downloadVoteReceipt()">下載驗票回執</button><a class="btn btn-sm" href="{{ bb_receipt_url }}" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">開票後前往公告板驗票</a><a class="small" href="/status">查看完整回執</a></p>
-    </div>
-
     <section id="voteForm" class="card stack" aria-labelledby="candTitle">
       <h2 id="candTitle" class="section-title">候選人</h2>
       <div id="candidateList" class="choice-list" role="radiogroup" aria-labelledby="candTitle">
@@ -1216,9 +1209,7 @@ async function init() {
   //    TPA /api/auth 的 ALREADY_VOTED 檢查，跟這個本地提示無關） <3
   const voteReceipt = await idbLoad('voteReceipt');
   if (voteReceipt) {
-    document.getElementById('votedBanner').classList.remove('hidden');
-    document.getElementById('votedMhex').textContent = voteReceipt.m_hex;
-    document.getElementById('voteForm').classList.add('hidden');
+    location.replace('/results');
     return;
   }
 
@@ -1446,6 +1437,8 @@ async function doVote() {
     document.getElementById('successMhex').textContent = m_hex;
     document.getElementById('voteForm').classList.add('is-disabled');
     document.getElementById('voteText').textContent = '已完成投票';
+    // 投完票轉到開票結果頁（尚未開票時顯示「尚未開票」，回執也能在那裡下載）
+    setTimeout(() => location.replace('/results'), 1500);
 
   } catch(e) {
     addStep(e.message, false);
@@ -1496,7 +1489,7 @@ _STATUS_HTML = """<!DOCTYPE html>
       <span class="brand-sub">投票回執</span>
     </a>
     <div class="topbar-actions">
-      <a class="btn btn-sm" href="/">返回投票頁</a>
+      <a class="btn btn-sm" href="/results">開票結果</a>
       """ + THEME_TOGGLE + """
     </div>
   </div>
@@ -1553,6 +1546,141 @@ _STATUS_HTML = """<!DOCTYPE html>
 </body>
 </html>"""
 
+# ── 開票結果頁（投完票後導向這裡）─────────────────────────────
+# 結果經 /api/proxy/bb/results 由投票網站代理取得：選民投完票的當下，公告板
+# 不會收到這支手機的連線，無從用「剛投完票」的時間點與 IP 對應身分。
+_RESULTS_HTML = """<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8">
+  <title>開票結果｜NUTC 線上投票</title>""" + _BASE_STYLE + """
+</head>
+<body>
+<header class="topbar">
+  <div class="container topbar-inner">
+    <a class="brand" href="/">
+      <span class="brand-name">NUTC 線上投票</span>
+      <span class="brand-sub">開票結果</span>
+    </a>
+    <div class="topbar-actions">
+      <a class="btn btn-sm" href="/status">我的回執</a>
+      """ + THEME_TOGGLE + """
+    </div>
+  </div>
+</header>
+
+<main>
+  <div class="container stack-lg">
+    <div class="stack-sm">
+      <h1>開票結果</h1>
+      <p class="lead">投票截止後由計票中心開票，結果經簽章後公告。</p>
+    </div>
+
+    <section id="votedCard" class="alert alert-ok hidden stack-sm" role="status">
+      <p class="alert-title">已收到您的選票</p>
+      <p><span id="votedBadge" class="badge badge-warn">已排隊，尚未確認計入</span></p>
+      <p class="small">請先下載驗票回執存到手機。開票後到公告板按「匯入回執驗票」選擇這個檔案，就能確認您的票已被計入。</p>
+      <p class="row"><button type="button" class="btn btn-sm btn-primary" onclick="downloadVoteReceipt()">下載驗票回執</button><a id="bbLink" class="btn btn-sm" href="{{ bb_receipt_url }}" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">開票後前往公告板驗票</a></p>
+      <p class="small muted">回執檔只有選票識別碼，不含學號和投票對象，存在手機裡也不會洩漏您投給誰。</p>
+    </section>
+
+    <section id="loadingCard" class="card text-center"><p class="muted">載入開票結果…</p></section>
+
+    <section id="pendingCard" class="card stack text-center hidden" aria-live="polite">
+      <p><span class="badge badge-info">尚未開票</span></p>
+      <p id="pendingText">投票截止後才會開票，開票後這裡會自動顯示結果。</p>
+      <p class="small muted">本頁每 30 秒自動更新一次。</p>
+    </section>
+
+    <section id="errorCard" class="alert alert-err hidden" role="alert"></section>
+
+    <section id="tallyCard" class="card stack hidden" aria-labelledby="tallyTitle">
+      <div class="row-between">
+        <h2 id="tallyTitle" class="section-title">各候選人得票</h2>
+        <span id="talliedAt" class="small muted"></span>
+      </div>
+      <div id="tallyList" class="stack"></div>
+      <div class="row-between" style="border-top:1px solid var(--border); padding-top:14px">
+        <span class="muted">合法選票合計</span><span id="tallyTotal" class="strong"></span>
+      </div>
+      <p class="small muted">要確認自己的票有被計入，請到公告板匯入驗票回執，在您的裝置上驗證計票中心的簽章與 Merkle Tree。</p>
+    </section>
+  </div>
+</main>
+
+<script>
+const show = (id, on) => document.getElementById(id).classList.toggle('hidden', !on);
+
+function renderTally(res) {
+  const entries = Object.entries(res.tally || {}).sort((a, b) => b[1] - a[1]);
+  const total = entries.reduce((s, [, n]) => s + n, 0);
+  const list = document.getElementById('tallyList');
+  list.innerHTML = '';
+  for (const [name, count] of entries) {
+    const pct = total > 0 ? count / total * 100 : 0;
+    const row = document.createElement('div');
+    row.className = 'stack-sm';
+    row.innerHTML = '<div class="row-between"><span class="strong"></span><span><span class="strong"></span> 票 <span class="muted small"></span></span></div>'
+                  + '<div class="bar" role="img"><span></span></div>';
+    const strongs = row.querySelectorAll('.strong');
+    strongs[0].textContent = name;
+    strongs[1].textContent = count;
+    row.querySelector('.muted.small').textContent = pct.toFixed(1) + '%';
+    row.querySelector('.bar').setAttribute('aria-label', `${name} 得票率 ${pct.toFixed(1)}%`);
+    row.querySelector('.bar > span').style.width = pct + '%';
+    list.appendChild(row);
+  }
+  document.getElementById('tallyTotal').textContent = total + ' 票';
+  document.getElementById('talliedAt').textContent = res.tallied_at_str ? '開票時間 ' + res.tallied_at_str : '';
+}
+
+let _timer = null;
+async function load() {
+  try {
+    const [res, dl] = await Promise.all([
+      fetch('/api/proxy/bb/results', { cache: 'no-store' }).then(r => r.json()),
+      fetch('/api/proxy/ta/deadline', { cache: 'no-store' }).then(r => r.json()).catch(() => ({})),
+    ]);
+    show('loadingCard', false);
+    show('errorCard', false);
+    // 公告板上可能還是上一輪的結果：本輪的開票一定發生在本輪截止之後，
+    // 開票時間早於本輪截止時間就表示不是這一輪的結果。
+    const stale = res.status === 'success' && dl.deadline > 0 && (res.tallied_at || 0) < dl.deadline;
+    if (res.status === 'success' && !stale) {
+      renderTally(res);
+      show('pendingCard', false);
+      show('tallyCard', true);
+      document.getElementById('bbLink').textContent = '前往公告板驗票';
+      const badge = document.getElementById('votedBadge');
+      badge.className = 'badge badge-info';
+      badge.textContent = '已開票，請到公告板確認是否計入';
+      clearInterval(_timer);
+      return;
+    }
+    document.getElementById('pendingText').textContent = dl.deadline_str
+      ? `投票截止時間為 ${dl.deadline_str}，截止後才會開票，開票後這裡會自動顯示結果。`
+      : '投票截止後才會開票，開票後這裡會自動顯示結果。';
+    show('tallyCard', false);
+    show('pendingCard', true);
+  } catch (e) {
+    show('loadingCard', false);
+    const err = document.getElementById('errorCard');
+    err.textContent = '無法取得開票結果：' + e.message + '。稍後會自動重試。';
+    show('errorCard', true);
+  }
+}
+
+(async function () {
+  try {
+    if (await idbLoad('voteReceipt')) show('votedCard', true);
+  } catch (_) {}
+  await load();
+  _timer = setInterval(load, 30000);
+})();
+</script>
+</body>
+</html>"""
+
 # ── 路由 ─────────────────────────────────────────────────────
 
 @app.route('/')
@@ -1566,6 +1694,10 @@ def register_page():
 @app.route('/status')
 def status():
     return render_template_string(_STATUS_HTML, bb_receipt_url=BB_PUBLIC_URL + "/receipt")
+
+@app.route('/results')
+def results_page():
+    return render_template_string(_RESULTS_HTML, bb_receipt_url=BB_PUBLIC_URL + "/receipt")
 
 make_reload_endpoint(app)
 
