@@ -143,7 +143,7 @@ logging.getLogger('werkzeug').addFilter(_StripQueryString())
 def ts_to_str(ts):
     """將 Unix timestamp 轉為 YYYY-MM-DD HH:MM:SS（僅用於 UI 顯示）"""
     try:
-        return datetime.datetime.fromtimestamp(int(ts)).strftime('%Y-%m-%d %H:%M:%S')
+        return ts_to_human(int(ts))  # 明確使用 UTC+8，不受容器／主機時區影響
     except Exception:
         return str(ts)
 
@@ -300,14 +300,15 @@ _LOCAL_VERIFY_JS = """          async function sha256Hex(bytes) {
 
 
 # ── Merkle Tree 樹狀圖（/receipt 使用）──────────────────────
-# 使用前必須先在頁面上放好 #tree-scroll-wrap、#tree-canvas、#zoom-label、
-# #node-panel，並宣告全域變數 treeData（{layers, target_index, proof_path, virtual_nodes}，
+# 使用前必須先在頁面上放好 #tree-scroll-wrap、#tree-canvas、#treeLegend、
+# #viewPath、#viewAll、#node-panel，並宣告全域變數 treeData（{layers, target_index, proof_path, virtual_nodes}，
 # 見 /receipt 的 treeDataFromLayers()），
 # 然後呼叫 initTree()。
 _TREE_VIZ_HEAD = """  <style>
     /* 樹狀圖畫布：固定高度的拖曳容器，由 JS 控制畫布位置與縮放 */
-    #tree-scroll-wrap { position: relative; width: 100%; height: 60vh; min-height: 360px; overflow: hidden;
-      background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius); cursor: grab; touch-action: none; }
+    /* touch-action: pan-y：單指上下滑動交給頁面捲動，左右滑動與雙指縮放才由樹狀圖處理 */
+    #tree-scroll-wrap { position: relative; width: 100%; height: clamp(300px, 52vh, 520px); overflow: hidden;
+      background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius); cursor: grab; touch-action: pan-y; }
     #tree-scroll-wrap:active { cursor: grabbing; }
     #tree-canvas { display: block; position: absolute; top: 0; left: 0; max-width: none; }
     #node-panel { display: none; position: fixed; z-index: 200; max-width: min(420px, calc(100vw - 24px)); pointer-events: none;
@@ -315,8 +316,6 @@ _TREE_VIZ_HEAD = """  <style>
     #node-panel .panel-title { font-weight: 700; font-size: 0.85rem; margin-bottom: 4px; }
     #node-panel .panel-hash { font-family: var(--mono); font-size: 0.8rem; color: var(--accent); word-break: break-all; }
     #node-panel .panel-meta { color: var(--muted); font-size: 0.8rem; margin-top: 4px; }
-    #zoom-controls { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
-    #zoom-label { min-width: 48px; text-align: center; font-size: 0.85rem; color: var(--muted); font-variant-numeric: tabular-nums; }
     .legend { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 0.85rem; color: var(--muted); }
     .legend span { display: inline-flex; align-items: center; gap: 6px; }
     .legend i { width: 12px; height: 12px; border-radius: 3px; border: 2px solid; display: inline-block; }
@@ -341,6 +340,7 @@ _TREE_VIZ_JS = """  // ═══════════════════
   // Canvas 內部的固定 Padding（大面積留白，確保畫面宏大不貼邊）
   const PADDING_X  = 100;
   const PADDING_Y  = 100;
+  const ROOT_LABEL_H = 26;
   // 層標籤區域寬度（左側保留給文字）
   const LABEL_W    = 80;
   const RADIUS     = 6;
@@ -358,10 +358,35 @@ _TREE_VIZ_JS = """  // ═══════════════════
                       : { bg: '#e8eef5', border: '#1f4e79', text: '#1c1b19', glow: null },
       root:    isDark ? { bg: '#8db5df', border: '#8db5df', text: '#0f2236', glow: null }
                       : { bg: '#1f4e79', border: '#1f4e79', text: '#ffffff', glow: null },
+      virtual: isDark ? { bg: '#1e1d1b', border: '#6b675e', text: '#a6a299' }
+                      : { bg: '#faf9f6', border: '#8f897c', text: '#5d5a53' },
       edgeNormal: isDark ? '#36342f' : '#d9d5cc',
       edgePath:   isDark ? '#8db5df' : '#1f4e79',
       layerText:  isDark ? '#a6a299' : '#5d5a53'
     };
+  }
+
+  // 畫布字型沿用頁面的字型 token
+  function cssFont(name) {
+    return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || 'sans-serif';
+  }
+
+  // 圖例顏色跟著主題，和畫布用同一組顏色
+  const LEGEND = [['target', '您的選票'], ['sibling', '兄弟節點'], ['path', '路徑上的節點'], ['root', '樹根'], ['virtual', '補位節點']];
+  function renderLegend(colors) {
+    const box = document.getElementById('treeLegend');
+    if (!box) return;
+    box.textContent = '';
+    for (const [role, label] of LEGEND) {
+      const c = colors[role];
+      const item = document.createElement('span');
+      const sw = document.createElement('i');
+      sw.style.background = c.bg;
+      sw.style.borderColor = c.border;
+      if (role === 'virtual') sw.style.borderStyle = 'dashed';
+      item.append(sw, document.createTextNode(label));
+      box.appendChild(item);
+    }
   }
 
   let scale = 1.0;
@@ -450,7 +475,7 @@ _TREE_VIZ_JS = """  // ═══════════════════
     }
 
     // 先設定整體高度，由總層數決定（上下各留 PADDING_Y）
-    canvasH = PADDING_Y * 2 + (totalLayers - 1) * (NODE_H + V_GAP) + NODE_H;
+    canvasH = PADDING_Y * 2 + ROOT_LABEL_H + (totalLayers - 1) * (NODE_H + V_GAP) + NODE_H;
 
     nodePositions = [];
     const nodeMap = Array.from({length: totalLayers}, () => []);
@@ -467,7 +492,7 @@ _TREE_VIZ_JS = """  // ═══════════════════
         x: nodeX,
         y: canvasH - PADDING_Y - NODE_H,
         w: NODE_W, h: NODE_H, hash, role, virtual,
-        layerName: '葉節點層', layerIdx: 0, nodeIdx: ni,
+        layerName: '選票', layerIdx: 0, nodeIdx: ni,
       };
       nodePositions.push(node);
       nodeMap[0][ni] = node;
@@ -477,7 +502,7 @@ _TREE_VIZ_JS = """  // ═══════════════════
     for (let li = 1; li < totalLayers; li++) {
       const nReal = trueChildCount[li];
       const isRoot = li === totalLayers - 1;
-      const layerName = isRoot ? 'Root_official' : `第 ${li} 層`;
+      const layerName = isRoot ? '樹根' : `第 ${li} 層`;
       const layerY = canvasH - PADDING_Y - NODE_H - li * (NODE_H + V_GAP);
 
       for (let ni = 0; ni < nReal; ni++) {
@@ -552,22 +577,6 @@ _TREE_VIZ_JS = """  // ═══════════════════
     }
   }
 
-  // ── 對焦到目標節點（將目標葉節點置中於視窗）──
-  function focusTarget() {
-    const target = nodePositions.find(n => n.role === 'target');
-    if (!target) return;
-    const wrapW = wrap.clientWidth;
-    const wrapH = wrap.clientHeight;
-    // 目標節點中心在畫布上的座標（縮放後）
-    const targetCX = (target.x + target.w / 2) * scale;
-    const targetCY = (target.y + target.h / 2) * scale;
-    // 讓目標節點中心對齊容器中心
-    canvasLeft = Math.round(wrapW / 2 - targetCX);
-    canvasTop  = Math.round(wrapH / 2 - targetCY);
-    canvas.style.left = canvasLeft + 'px';
-    canvas.style.top  = canvasTop  + 'px';
-  }
-
   function roundRect(ctx, x, y, w, h, r) {
     ctx.beginPath();
     ctx.moveTo(x + r, y);
@@ -599,6 +608,9 @@ _TREE_VIZ_JS = """  // ═══════════════════
     const layers = treeData.layers;
     const totalLayers = layers.length;
     const colors = getThemeColors();
+    const fontSans = cssFont('--font');
+    const fontMono = cssFont('--mono');
+    renderLegend(colors);
 
     // ── 繪製平滑 S 型連接線 ──
     for (let li = 0; li < totalLayers - 1; li++) {
@@ -639,23 +651,23 @@ _TREE_VIZ_JS = """  // ═══════════════════
       const { x, y, w, h } = node;
 
       if (node.virtual) {
-        // 虛擬佔位節點：虛線邊框 + 灰底 + 斜體標籤
-        const isDark = document.documentElement.classList.contains('dark');
+        // 補位節點：奇數層上提時的視覺佔位，虛線邊框
+        const v = colors.virtual;
         roundRect(ctx, x, y, w, h, RADIUS);
-        ctx.fillStyle = isDark ? '#1a1a1a' : '#f9fafb';
+        ctx.fillStyle = v.bg;
         ctx.fill();
         roundRect(ctx, x, y, w, h, RADIUS);
         ctx.save();
         ctx.setLineDash([4, 3]);
-        ctx.strokeStyle = isDark ? '#4b5563' : '#9ca3af';
+        ctx.strokeStyle = v.border;
         ctx.lineWidth = 1.5;
         ctx.stroke();
         ctx.restore();
-        ctx.fillStyle = isDark ? '#6b7280' : '#9ca3af';
-        ctx.font = 'italic 10px "Noto Sans", sans-serif';
+        ctx.fillStyle = v.text;
+        ctx.font = `12px ${fontSans}`;
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
-        ctx.fillText('虛擬佔位', x + w / 2, y + h / 2);
+        ctx.fillText('補位節點', x + w / 2, y + h / 2);
         continue;
       }
 
@@ -683,16 +695,24 @@ _TREE_VIZ_JS = """  // ═══════════════════
       ctx.stroke();
 
       ctx.fillStyle  = c.text;
-      ctx.font       = `${node.role === 'normal' ? 400 : 700} 11px 'Courier New', monospace`;
+      ctx.font       = `${node.role === 'normal' ? 400 : 700} 11px ${fontMono}`;
       ctx.textAlign  = 'center';
       ctx.textBaseline = 'middle';
       ctx.fillText(shortHash(node.hash), x + w / 2, y + h / 2);
+
+      // 樹根：標出它就是 CC 簽章的那個值（能畫出樹表示驗證已通過）
+      if (node.role === 'root') {
+        ctx.fillStyle = colors.root.border;
+        ctx.font = `700 12px ${fontSans}`;
+        ctx.textBaseline = 'bottom';
+        ctx.fillText('與 CC 簽章的 Merkle Root 相符', x + w / 2, y - 8);
+      }
     }
 
     // ── 繪製層標籤 ──
     ctx.textAlign    = 'right';
     ctx.textBaseline = 'middle';
-    ctx.font         = '11px "Noto Sans", sans-serif';
+    ctx.font         = `12px ${fontSans}`;
     ctx.fillStyle    = colors.layerText;
 
     const drawnLayers = new Set();
@@ -708,19 +728,13 @@ _TREE_VIZ_JS = """  // ═══════════════════
   // ── 拖曳狀態（用 canvas position:absolute + left/top 實現，無捲軸）──
   let canvasLeft = 0, canvasTop = 0;
 
-  // 避免縮放死循環，設立上下限（最小 0.15，最大 1.2）
-  function changeZoom(delta) {
-    scale = Math.max(0.15, Math.min(scale + delta, 1.2));
-    document.getElementById('zoom-label').textContent = Math.round(scale * 100) + '%';
-    draw();
-    _centerCanvas();
-  }
-
-  function resetZoom() {
-    scale = 1.0;
-    document.getElementById('zoom-label').textContent = '100%';
-    draw();
-    _centerCanvas();
+  const MIN_SCALE = 0.15, MAX_SCALE = 1.2;
+  let viewMode = 'path';
+  function setViewMode(mode) {
+    viewMode = mode;
+    const p = document.getElementById('viewPath'), a = document.getElementById('viewAll');
+    if (p) p.setAttribute('aria-pressed', String(mode === 'path'));
+    if (a) a.setAttribute('aria-pressed', String(mode === 'all'));
   }
 
   // 將 Canvas 用 left/top 定位到容器正中央（overflow:hidden 模式）
@@ -735,20 +749,50 @@ _TREE_VIZ_JS = """  // ═══════════════════
     canvas.style.top  = canvasTop  + 'px';
   }
 
-  // 最適化：計算最適比例，然後置中
+  // 看整棵樹：整張畫布縮放到放得進容器，然後置中
   function fitTree() {
+    setViewMode('all');
     const wrapW = wrap.clientWidth;
     const wrapH = wrap.clientHeight;
-    const sx = wrapW / canvasW;
-    const sy = wrapH / canvasH;
-    scale = Math.max(0.15, Math.min(sx, sy, 1.2));
-    document.getElementById('zoom-label').textContent = Math.round(scale * 100) + '%';
+    scale = Math.max(MIN_SCALE, Math.min(wrapW / canvasW, wrapH / canvasH, MAX_SCALE));
     draw();
     _centerCanvas();
   }
 
+  // 看我的路徑：把「您的選票 → 路徑 → 樹根（含上方標註）」這條直線整段放進容器。
+  // 兄弟節點可能遠在樹的另一側，算進去會把整棵樹縮到看不清楚（尤其手機），
+  // 所以只在放得下時才納入；放不下時它們可以左右滑動看到。
+  function fitPath() {
+    setViewMode('path');
+    const pathNodes = nodePositions.filter(n => ['target', 'path', 'root'].includes(n.role) && !n.virtual);
+    if (!pathNodes.length) return fitTree();
+    const pad = 24;
+    const wrapW = wrap.clientWidth, wrapH = wrap.clientHeight;
+    function bbox(nodes) {
+      let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+      for (const n of nodes) {
+        // 樹根標註比節點寬，左右各多留一些
+        const extra = n.role === 'root' ? 50 : 0;
+        x0 = Math.min(x0, n.x - extra); x1 = Math.max(x1, n.x + n.w + extra);
+        y0 = Math.min(y0, n.y - (n.role === 'root' ? ROOT_LABEL_H : 0)); y1 = Math.max(y1, n.y + n.h);
+      }
+      return { x0, y0, x1, y1, s: Math.min((wrapW - pad * 2) / (x1 - x0), (wrapH - pad * 2) / (y1 - y0), 1) };
+    }
+    const core = bbox(pathNodes);
+    const full = bbox(nodePositions.filter(n => n.role !== 'normal' && !n.virtual));
+    const box = full.s >= 0.75 || full.s >= core.s ? full : core;
+    const { x0, y0, x1, y1 } = box;
+    scale = Math.max(0.45, box.s);
+    draw();
+    canvasLeft = Math.round(wrapW / 2 - ((x0 + x1) / 2) * scale);
+    canvasTop  = Math.round(wrapH / 2 - ((y0 + y1) / 2) * scale);
+    canvas.style.left = canvasLeft + 'px';
+    canvas.style.top  = canvasTop  + 'px';
+  }
+
   // ── 滾輪縮放（以滑鼠位置為中心縮放）──
   wrap.addEventListener('wheel', e => {
+    if (!e.ctrlKey && !e.metaKey) return;
     e.preventDefault();
     const rect    = wrap.getBoundingClientRect();
     // 滑鼠在容器內的位置
@@ -760,10 +804,9 @@ _TREE_VIZ_JS = """  // ═══════════════════
 
     const delta   = e.deltaY < 0 ? 0.1 : -0.1;
     const oldScale = scale;
-    scale = Math.max(0.15, Math.min(scale + delta, 1.2));
+    scale = Math.max(MIN_SCALE, Math.min(scale + delta, MAX_SCALE));
 
     if (scale === oldScale) return;
-    document.getElementById('zoom-label').textContent = Math.round(scale * 100) + '%';
     draw();
 
     // 縮放後，讓滑鼠指向的邏輯座標保持在同一螢幕位置
@@ -802,19 +845,39 @@ _TREE_VIZ_JS = """  // ═══════════════════
     }
   });
 
-  let touchStartX = 0, touchStartY = 0, canvasTouchLeft = 0, canvasTouchTop = 0;
+  let touchStartX = 0, canvasTouchLeft = 0, pinch = null;
+  function touchMid(t) {
+    const r = wrap.getBoundingClientRect();
+    return { x: (t[0].clientX + t[1].clientX) / 2 - r.left, y: (t[0].clientY + t[1].clientY) / 2 - r.top,
+             d: Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY) };
+  }
   wrap.addEventListener('touchstart', e => {
-    touchStartX    = e.touches[0].clientX;
-    touchStartY    = e.touches[0].clientY;
-    canvasTouchLeft = canvasLeft;
-    canvasTouchTop  = canvasTop;
+    if (e.touches.length === 2) {
+      const m = touchMid(e.touches);
+      pinch = { d: m.d, scale, lx: (m.x - canvasLeft) / scale, ly: (m.y - canvasTop) / scale };
+    } else if (e.touches.length === 1) {
+      pinch = null;
+      touchStartX     = e.touches[0].clientX;
+      canvasTouchLeft = canvasLeft;
+    }
   }, { passive: true });
   wrap.addEventListener('touchmove', e => {
-    canvasLeft = canvasTouchLeft + (e.touches[0].clientX - touchStartX);
-    canvasTop  = canvasTouchTop  + (e.touches[0].clientY - touchStartY);
+    if (e.touches.length === 2 && pinch) {
+      e.preventDefault();
+      const m = touchMid(e.touches);
+      scale = Math.max(MIN_SCALE, Math.min(pinch.scale * m.d / pinch.d, MAX_SCALE));
+      draw();
+      canvasLeft = Math.round(m.x - pinch.lx * scale);
+      canvasTop  = Math.round(m.y - pinch.ly * scale);
+    } else if (e.touches.length === 1 && !pinch) {
+      canvasLeft = canvasTouchLeft + (e.touches[0].clientX - touchStartX);
+    } else {
+      return;
+    }
     canvas.style.left = canvasLeft + 'px';
     canvas.style.top  = canvasTop  + 'px';
-  }, { passive: true });
+  }, { passive: false });
+  wrap.addEventListener('touchend', e => { if (e.touches.length < 2) pinch = null; }, { passive: true });
 
   canvas.addEventListener('click', e => {
     const rect  = canvas.getBoundingClientRect();
@@ -832,22 +895,23 @@ _TREE_VIZ_JS = """  // ═══════════════════
 
     if (hit) {
       const roleLabels = {
-        target:  '目標葉節點（H_leaf = H(0x00 ‖ m_hex)）',
-        sibling: 'Sibling 節點（H_leaf 或 H_node）',
-        path:    'Proof 路徑節點（H_node = H(0x01 ‖ L ‖ R)）',
-        root:    'Root_official（H_node）',
-        normal:  '一般節點（Domain-Separated）',
+        target:  ['您的選票', 'H(0x00 ‖ m_hex)'],
+        sibling: ['兄弟節點：和路徑上的節點一起算出上一層', 'H(0x00 ‖ m_hex) 或 H(0x01 ‖ 左 ‖ 右)'],
+        path:    ['路徑上的節點：由下面兩個節點算出', 'H(0x01 ‖ 左 ‖ 右)'],
+        root:    ['樹根：CC 簽章的 Merkle Root', 'H(0x01 ‖ 左 ‖ 右)'],
+        normal:  ['其他選票的節點', '與您的驗證無關'],
       };
       if (hit.virtual) {
-        document.getElementById('panel-title').textContent = '虛擬佔位節點';
+        document.getElementById('panel-title').textContent = '補位節點';
         document.getElementById('panel-hash').textContent  = hit.hash;
         document.getElementById('panel-meta').textContent  =
-          `層級：${hit.layerName}　索引：${hit.nodeIdx}\n此節點為奇數層上提（promote）時的視覺補齊佔位，並非實際樹節點`;
+          `${hit.layerName}・第 ${hit.nodeIdx + 1} 個。這一層是奇數個，最後一個節點直接上提，這裡只是畫圖用的佔位，不參與計算。`;
       } else {
-        document.getElementById('panel-title').textContent = roleLabels[hit.role] || '節點';
+        const [title, formula] = roleLabels[hit.role] || ['節點', ''];
+        document.getElementById('panel-title').textContent = title;
         document.getElementById('panel-hash').textContent  = hit.hash;
         document.getElementById('panel-meta').textContent  =
-          `層級：${hit.layerName}　索引：${hit.nodeIdx}`;
+          `${hit.layerName}・第 ${hit.nodeIdx + 1} 個・${formula}`;
       }
 
       const px = Math.min(e.clientX + 16, window.innerWidth  - 440);
@@ -863,25 +927,26 @@ _TREE_VIZ_JS = """  // ═══════════════════
   document.addEventListener('click', e => {
     if (!canvas.contains(e.target)) panel.style.display = 'none';
   });
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape') panel.style.display = 'none';
+  });
 
   function initTree() {
     computeLayout();
-    // 初始以 1:1 比例繪製，然後對焦到目標節點
-    scale = 1.0;
-    document.getElementById('zoom-label').textContent = '100%';
-    draw();
-    focusTarget();
+    // 一打開就看得到整條「您的選票 → 樹根」路徑
+    fitPath();
   }
 
   
-  // 視窗寬度改變（旋轉手機、調整視窗）時重新對焦目標節點，維持目前縮放。
+  // 視窗寬度改變（旋轉手機、調整視窗）時，依目前的檢視模式重新排版。
   // 只看寬度：手機捲動時網址列收合會觸發「只有高度改變」的 resize，
   // 以前每次都 fitTree()，使用者一捲動畫面就被縮到 15%、看不清楚。
   let _lastWrapW = wrap.clientWidth;
   window.addEventListener('resize', () => {
     if (wrap.clientWidth === _lastWrapW) return;
     _lastWrapW = wrap.clientWidth;
-    focusTarget();
+    if (!treeData) return;
+    if (viewMode === 'all') fitTree(); else fitPath();
   });
 
   window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', e => {
@@ -894,12 +959,168 @@ _TREE_VIZ_JS = """  // ═══════════════════
 """
 
 
-# ── HTML 模板：主公告板 ────────────────────────────────────────
+# ── 共用：線條圖示與公告板專用樣式 ─────────────────────────────
+# 圖示為自繪 SVG（24×24、2px 線條、currentColor），不用 emoji／符號字元。
+def _icon(paths, cls="icon"):
+    return ('<svg class="' + cls + '" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" '
+            'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">' + paths + '</svg>')
+
+_ICON_CHECK   = _icon('<path d="M20 6 9 17l-5-5"/>')
+_ICON_X       = _icon('<path d="M18 6 6 18M6 6l12 12"/>')
+_ICON_EYE     = _icon('<path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/>')
+_ICON_EYE_OFF = _icon('<path d="M3 3l18 18"/><path d="M10.6 5.1A10.8 10.8 0 0 1 12 5c6.4 0 10 7 10 7a17.6 17.6 0 0 1-3.1 4.1"/>'
+                      '<path d="M6.6 6.6A17.4 17.4 0 0 0 2 12s3.6 7 10 7a10.4 10.4 0 0 0 5.4-1.6"/><path d="M9.9 9.9a3 3 0 0 0 4.2 4.2"/>')
+_ICON_ALERT   = _icon('<path d="M12 3 2 21h20L12 3z"/><path d="M12 10v4"/><path d="M12 17.5v.01"/>')
+_ICON_CLOCK   = _icon('<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>')
+
+_BB_STYLE = """  <style>
+    .icon { width: 1.15em; height: 1.15em; flex: none; vertical-align: -0.2em; }
+
+    /* ── 首頁：匿名＋可驗證說明 ─────────────────────────── */
+    .explain { display: grid; gap: 24px; padding: 28px 20px; border-radius: var(--radius);
+      background: var(--surface-2); border: 1px solid var(--border); }
+    @media (min-width: 640px) { .explain { padding: 36px 32px; } }
+    .explain-head h2 { font-size: clamp(1.35rem, 1.1rem + 1vw, 1.75rem); line-height: 1.3; margin: 0 0 8px; text-wrap: balance; }
+    .explain-head p { margin: 0; max-width: 62ch; color: var(--text); }
+    .explain-head strong { color: var(--accent); }
+    .flow { list-style: none; margin: 0; padding: 0; display: grid; gap: 0; }
+    .flow-step { position: relative; padding: 0 0 24px 28px; }
+    .flow-step:last-child { padding-bottom: 0; }
+    /* 站點之間的連線：手機直向、桌機橫向 */
+    .flow-step::before { content: ""; position: absolute; left: 6px; top: 6px; width: 12px; height: 12px;
+      border-radius: 50%; background: var(--surface); border: 3px solid var(--accent); }
+    .flow-step::after { content: ""; position: absolute; left: 11px; top: 24px; bottom: 0; width: 2px; background: var(--border-strong); }
+    .flow-step:last-child::after { display: none; }
+    @media (min-width: 860px) {
+      .flow { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 28px; }
+      .flow-step { padding: 28px 0 0; }
+      .flow-step::before { left: 0; top: 0; }
+      .flow-step::after { left: 22px; right: -22px; top: 7px; bottom: auto; width: auto; height: 2px; }
+    }
+    .flow-role { margin: 0; font-weight: 700; font-size: 1.05rem; }
+    .flow-role span { font-weight: 400; color: var(--muted); font-size: 0.9rem; margin-left: 6px; }
+    .flow-what { margin: 4px 0 12px; color: var(--muted); font-size: 0.95rem; }
+    .knows { list-style: none; margin: 0 0 12px; padding: 0; display: grid; gap: 6px; font-size: 0.95rem; }
+    .knows li { display: flex; align-items: center; gap: 8px; }
+    .knows .yes { color: var(--text); }
+    .knows .yes .icon { color: var(--accent); }
+    .knows .no { color: var(--muted); }
+    .flow-note { margin: 0; font-size: 0.85rem; color: var(--muted); max-width: 40ch; }
+    .explain-foot { margin: 0; padding-top: 16px; border-top: 1px solid var(--border); font-weight: 600; }
+
+    /* ── 首頁：其他 ───────────────────────────────────── */
+    .tally { list-style: none; margin: 0; padding: 0; display: grid; gap: 14px; }
+    .cta-card { align-self: start; }
+    .cta-card h2 { font-size: 1.15rem; }
+    details.card > summary { list-style: none; display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+    details.card > summary::-webkit-details-marker { display: none; }
+    details.card > summary::after { content: "展開"; font-weight: 400; font-size: 0.85rem; color: var(--accent); }
+    details.card[open] > summary::after { content: "收合"; }
+
+    /* ── 驗證頁：輸入 ─────────────────────────────────── */
+    label.btn:has(+ input:focus-visible) { outline: 3px solid var(--focus); outline-offset: 2px; }
+    .field-err { display: flex; gap: 8px; align-items: flex-start; margin: 0; color: var(--warn); font-size: 0.9rem; font-weight: 600; }
+    .field-err .icon { margin-top: 0.15em; }
+    .alt-entry { display: grid; gap: 10px; }
+    .alt-entry h2 { font-size: 1rem; }
+
+    /* ── 驗證頁：結果 ─────────────────────────────────── */
+    .verdict { --tone: var(--accent); --tone-soft: var(--accent-soft);
+      display: grid; gap: 18px; padding: 24px 20px; border-radius: var(--radius);
+      background: var(--tone-soft); border: 1px solid var(--tone); scroll-margin-top: 16px; }
+    @media (min-width: 640px) { .verdict { padding: 28px; } }
+    .verdict[data-tone="ok"]   { --tone: var(--ok);   --tone-soft: var(--ok-soft); }
+    .verdict[data-tone="warn"] { --tone: var(--warn); --tone-soft: var(--warn-soft); }
+    .verdict[data-tone="err"]  { --tone: var(--err);  --tone-soft: var(--err-soft); }
+    .verdict-head { display: flex; gap: 14px; align-items: center; }
+    .verdict-icon { flex: none; width: 52px; height: 52px; border-radius: 50%; display: grid; place-items: center;
+      background: var(--tone); color: var(--surface); }
+    .verdict-icon .icon { width: 28px; height: 28px; stroke-width: 2.5; }
+    .verdict-icon .spin { width: 24px; height: 24px; border-width: 3px; }
+    .verdict-title { margin: 0; font-size: clamp(1.4rem, 1.15rem + 1.2vw, 1.9rem); line-height: 1.25; color: var(--tone); }
+    .verdict-title:focus { outline: none; }
+    .verdict-title:focus-visible { outline: 3px solid var(--focus); outline-offset: 4px; }
+    .verdict-sub { margin: 2px 0 0; font-size: 1.05rem; font-weight: 600; }
+    .verdict-detail { margin: 0; max-width: 65ch; }
+    .verdict-next { margin: 0; padding: 14px 16px; border-radius: var(--radius); background: var(--surface);
+      border: 1px solid var(--border); max-width: 65ch; }
+    .verdict-next strong { display: block; margin-bottom: 2px; }
+    .checks { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; background: var(--border);
+      border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
+    .check { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 4px 12px; padding: 14px 16px; background: var(--surface); }
+    .check-mark { width: 28px; height: 28px; border-radius: 50%; display: grid; place-items: center;
+      border: 2px solid var(--border-strong); color: var(--muted); }
+    .check-mark .icon { width: 16px; height: 16px; stroke-width: 3; }
+    .check[data-state="ok"]   .check-mark { border-color: var(--ok);  background: var(--ok);  color: var(--surface); }
+    .check[data-state="fail"] .check-mark { border-color: var(--err); background: var(--err); color: var(--surface); }
+    .check[data-state="run"]  .check-mark { border-color: var(--accent); }
+    .check-title { margin: 0; font-weight: 700; align-self: center; }
+    .check[data-state="skip"] .check-title, .check[data-state="wait"] .check-title { color: var(--muted); }
+    .check-body { grid-column: 2; display: grid; gap: 6px; }
+    .check-desc { margin: 0; font-size: 0.9rem; color: var(--muted); }
+    .check-state { font-size: 0.85rem; color: var(--muted); }
+    .check details summary { font-size: 0.85rem; font-weight: 600; color: var(--accent); }
+    .check .steps { margin-top: 6px; font-size: 0.85rem; }
+    .check .steps .mark .icon { width: 14px; height: 14px; stroke-width: 3; }
+    @media (prefers-reduced-motion: no-preference) {
+      .verdict:not(.hidden) .verdict-icon { animation: verdict-pop 420ms cubic-bezier(0.16, 1, 0.3, 1); }
+      @keyframes verdict-pop { from { transform: scale(0.6); opacity: 0.4; } to { transform: scale(1); opacity: 1; } }
+    }
+
+    /* ── 驗證頁：樹狀圖工具列 ─────────────────────────── */
+    .tree-tools { display: flex; flex-wrap: wrap; gap: 8px; }
+    .tree-tools .btn { min-height: 44px; }
+    .tree-tools .btn[aria-pressed="true"] { background: var(--accent-soft); border-color: var(--accent); color: var(--text); }
+  </style>
+"""
+
+
+# ── 首頁：匿名＋可驗證說明（開票前後都顯示）──────────────────────
+_ANON_EXPLAINER = """
+    <section class="explain" aria-labelledby="explainTitle">
+      <div class="explain-head">
+        <h2 id="explainTitle">匿名，而且可以驗證</h2>
+        <p>這套系統用<strong>盲簽章</strong>把「你是誰」和「你投給誰」拆給不同單位：沒有任何一方同時知道這兩件事，但每位選民都能確認自己的票有被算進去。</p>
+      </div>
+      <ol class="flow">
+        <li class="flow-step">
+          <p class="flow-role">資格驗證中心<span>TPA</span></p>
+          <p class="flow-what">確認你有投票資格，替選票簽章</p>
+          <ul class="knows">
+            <li class="yes">""" + _ICON_EYE + """知道你是誰</li>
+            <li class="no">""" + _ICON_EYE_OFF + """看不到你投給誰</li>
+          </ul>
+          <p class="flow-note">選票先用只有你知道的亂數「蒙住」才送去簽章，TPA 簽得到、看不到內容。</p>
+        </li>
+        <li class="flow-step">
+          <p class="flow-role">計票中心<span>CC</span></p>
+          <p class="flow-what">檢查 TPA 的簽章，打開選票計票</p>
+          <ul class="knows">
+            <li class="no">""" + _ICON_EYE_OFF + """不知道是誰投的</li>
+            <li class="yes">""" + _ICON_EYE + """看得到選票內容</li>
+          </ul>
+          <p class="flow-note">選票送到時已經沒有身分，只剩 TPA 的簽章證明它是一張合法選票。</p>
+        </li>
+        <li class="flow-step">
+          <p class="flow-role">公告板<span>BB・本頁</span></p>
+          <p class="flow-what">公布 CC 簽章的結果與 Merkle Root</p>
+          <ul class="knows">
+            <li class="no">""" + _ICON_EYE_OFF + """不知道是誰在驗證</li>
+            <li class="no">""" + _ICON_EYE_OFF + """不知道你查的是哪一張</li>
+          </ul>
+          <p class="flow-note">你用投票後下載的回執，在自己的手機上算出結果，公告板只提供整份公告。</p>
+        </li>
+      </ol>
+      <p class="explain-foot">所以：投票紀錄裡沒有「誰投給誰」，但任何人都能檢查自己的票在 CC 簽章的名單裡。</p>
+    </section>
+"""
+
+
 _DASHBOARD_HTML = """<!DOCTYPE html>
 <html lang="zh-TW">
 <head>
   <meta charset="UTF-8">
-  <title>開票公告｜NUTC 線上投票</title>""" + UI_HEAD + """
+  <title>開票公告｜NUTC 線上投票</title>""" + UI_HEAD + _BB_STYLE + """
   {% if not published %}<meta http-equiv="refresh" content="20">{% endif %}
 </head>
 <body>
@@ -910,7 +1131,7 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
       <span class="brand-sub">開票公告板</span>
     </a>
     <div class="topbar-actions">
-      {% if published %}<span class="badge badge-ok">已公告</span>{% else %}<span class="badge badge-warn">等待開票</span>{% endif %}
+      {% if published %}<span class="badge badge-ok">CC 已簽章公告</span>{% else %}<span class="badge badge-warn">等待開票</span>{% endif %}
       """ + THEME_TOGGLE + """
     </div>
   </div>
@@ -921,78 +1142,80 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
   {% if published %}
     <div class="stack-sm">
       <h1>開票結果</h1>
-      <p class="lead">合法選票 {{ valid_count }} 張{% if tallied_at %}・公告時間 {{ tallied_at | ts_to_str }}{% endif %}</p>
+      <p class="lead">合法選票 {{ valid_count }} 張{% if tallied_at %}・開票時間 {{ tallied_at | ts_to_str }}（台灣時間）{% endif %}</p>
     </div>
 
     <div class="grid grid-main-side">
       <section class="card stack" aria-labelledby="tallyTitle">
         <h2 id="tallyTitle" class="section-title">各候選人得票</h2>
+        <ol class="tally">
         {% for candidate, count in tally | dictsort(by='value', reverse=true) %}
         {% set pct = (count / valid_count * 100) if valid_count > 0 else 0 %}
-        <div class="stack-sm">
-          <div class="row-between">
-            <span class="strong">{{ candidate }}</span>
-            <span><span class="strong">{{ count }}</span> 票 <span class="muted small">{{ "%.1f"|format(pct) }}%</span></span>
-          </div>
-          <div class="bar" role="img" aria-label="{{ candidate }} 得票率 {{ '%.1f'|format(pct) }}%"><span style="width: {{ pct }}%"></span></div>
-        </div>
+          <li class="stack-sm">
+            <div class="row-between">
+              <span class="strong">{{ candidate }}</span>
+              <span><span class="strong">{{ count }}</span> 票 <span class="muted small">{{ "%.1f"|format(pct) }}%</span></span>
+            </div>
+            <div class="bar" aria-hidden="true"><span style="width: {{ pct }}%"></span></div>
+          </li>
         {% endfor %}
+        </ol>
         <div class="row-between" style="border-top:1px solid var(--border); padding-top:14px">
           <span class="muted">合法選票合計</span><span class="strong">{{ valid_count }} 票</span>
         </div>
       </section>
 
-      <section class="card stack" aria-labelledby="verifyTitle">
-        <h2 id="verifyTitle" class="section-title">驗證您的選票</h2>
-        <p class="small muted">匯入投票後下載的回執檔，或輸入選票識別碼（m_hex），確認您的票已被計入。驗證在您的裝置上完成，不會把識別碼送給公告板，也不會透露您投給誰。</p>
-        <a class="btn btn-primary btn-block" href="/receipt">驗證選票</a>
+      <section class="card stack cta-card" aria-labelledby="verifyTitle">
+        <h2 id="verifyTitle">您的票有被算進去嗎？</h2>
+        <p class="small muted">匯入投票後下載的回執檔，在您自己的裝置上確認。公告板不會知道您查的是哪一張票，也不會知道您投給誰。</p>
+        <a class="btn btn-primary btn-block" href="/receipt">驗證我的選票</a>
       </section>
     </div>
-
+""" + _ANON_EXPLAINER + """
     <section class="card stack-sm" aria-labelledby="rootTitle">
       <div class="row-between">
-        <h2 id="rootTitle" class="section-title">官方 Merkle Root</h2>
+        <h2 id="rootTitle" class="section-title">CC 簽章的 Merkle Root</h2>
         <a class="small" href="/api/signed_bundle">下載 CC 簽章的結果包</a>
       </div>
       <code class="hash">{{ merkle_root }}</code>
-      <p class="small muted">由計票中心（CC）簽章公告。每一張選票的驗證路徑，都必須能算出這個值。</p>
+      <p class="small muted">所有合法選票組成一棵 Merkle Tree，這是它的樹根。驗證時，您的票沿著樹往上算，必須剛好得到這個值。</p>
     </section>
 
-    <section class="card card-flush" aria-labelledby="listTitle">
-      <div class="card-head">
-        <h2 id="listTitle" class="section-title">合法選票清單</h2>
-        <span class="small muted">共 {{ valid_count }} 張{% if valid_count > votes|length %}，顯示前 {{ votes|length }} 張{% endif %}・<a href="/api/results">下載完整清單（JSON）</a></span>
+    <details class="card" aria-labelledby="listTitle">
+      <summary><span id="listTitle">合法選票清單（{{ valid_count }} 張選票識別碼）</span></summary>
+      <div class="stack-sm" style="margin-top:16px">
+        <p class="small muted">每一列是一張選票的識別碼（m_hex），看不出是誰投的、投給誰。{% if valid_count > votes|length %}這裡顯示前 {{ votes|length }} 張，{% endif %}<a href="/api/results">下載完整清單（JSON）</a></p>
+        {% if votes %}
+        <div class="table-wrap">
+          <table class="table">
+            <thead><tr><th class="num">#</th><th>選票識別碼（m_hex）</th></tr></thead>
+            <tbody>
+              {% for v in votes %}
+              <tr>
+                <td class="num muted">{{ loop.index }}</td>
+                <td><span class="hash-inline">{{ v.m_hex }}</span></td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        {% else %}
+        <p class="muted">沒有合法選票。</p>
+        {% endif %}
       </div>
-      {% if votes %}
-      <div class="table-wrap">
-        <table class="table">
-          <thead><tr><th class="num">#</th><th>選票識別碼（m_hex）</th></tr></thead>
-          <tbody>
-            {% for v in votes %}
-            <tr>
-              <td class="num muted">{{ loop.index }}</td>
-              <td><span class="hash-inline">{{ v.m_hex }}</span></td>
-            </tr>
-            {% endfor %}
-          </tbody>
-        </table>
-      </div>
-      {% else %}
-      <div class="card-body muted">沒有合法選票。</div>
-      {% endif %}
-    </section>
+    </details>
   {% else %}
     <section class="card text-center stack" style="padding:56px 24px">
       <h1>等待開票</h1>
-      <p class="lead">投票截止並完成開票後，計票中心（CC）會在這裡公告結果。</p>
+      <p class="lead">投票截止並完成開票後，計票中心（CC）會在這裡公告簽章過的結果。</p>
       <p class="small muted">此頁每 20 秒自動重新整理。</p>
-      <p><a class="btn" href="/receipt">驗證選票</a></p>
     </section>
+""" + _ANON_EXPLAINER + """
   {% endif %}
   </div>
 </main>
 <footer class="footer">
-  <div class="container-wide">公告內容由計票中心簽章；任何人都可以下載結果包與完整選票清單，自行重算 Merkle Root 驗證。</div>
+  <div class="container-wide">驗證程式由公告板提供。想更放心，可以下載 CC 簽章的結果包與完整選票清單，用自己的工具重算 Merkle Root。</div>
 </footer>
 </body>
 </html>"""
@@ -1005,7 +1228,7 @@ _RECEIPT_HTML = """<!DOCTYPE html>
 <html lang="zh-TW">
 <head>
   <meta charset="UTF-8">
-  <title>驗證選票｜NUTC 線上投票</title>""" + UI_HEAD + _TREE_VIZ_HEAD + """
+  <title>驗證選票｜NUTC 線上投票</title>""" + UI_HEAD + _BB_STYLE + _TREE_VIZ_HEAD + """
 </head>
 <body>
 <header class="topbar">
@@ -1024,59 +1247,87 @@ _RECEIPT_HTML = """<!DOCTYPE html>
 <main>
   <div class="container stack-lg">
     <div class="stack-sm">
-      <h1>驗證選票</h1>
-      <p class="lead">匯入投票後下載的驗票回執檔，或輸入選票識別碼，在您的裝置上確認選票已納入公告。</p>
+      <h1>驗證我的選票</h1>
+      <p class="lead">在您自己的裝置上確認選票已被計入。整個過程不會上傳回執，公告板也無從得知您查的是哪一張票。</p>
     </div>
 
     <section class="card stack">
-      <h2 class="section-title">匯入回執檔（建議）</h2>
+      <h2 class="section-title">匯入驗票回執</h2>
       <label class="btn btn-primary btn-block" for="receiptFile">選擇回執檔</label>
-      <input id="receiptFile" class="sr-only" type="file" accept=".json,.txt,application/json">
-      <p class="small muted">檔案只在這台裝置上讀取，不會上傳。公告板只會被要求提供整份開票結果，無從得知您查的是哪一張票。</p>
-    </section>
+      <input id="receiptFile" class="sr-only" type="file" accept=".json,.txt,application/json" aria-describedby="fileHelp">
+      <p id="fileErr" class="field-err hidden" role="alert"></p>
+      <p id="fileHelp" class="small muted">投票完成時下載的檔案，檔名像 <span class="mono">nutc-vote-receipt-xxxxxxxx.json</span>，通常在手機的「下載」資料夾。</p>
 
-    <section id="manual" class="card stack-sm">
-      <h2 class="section-title">或輸入選票識別碼</h2>
-      <div class="row" style="align-items:stretch">
-        <label class="sr-only" for="mhexInput">選票識別碼（m_hex）</label>
-        <input id="mhexInput" class="input mono" style="flex:1 1 260px; width:auto" type="text"
-               placeholder="貼上 64 位的 m_hex" autocomplete="off" autocapitalize="off" spellcheck="false">
-        <button id="mhexBtn" type="button" class="btn btn-primary" style="flex:0 0 auto">驗證</button>
+      <div class="alt-entry" style="border-top:1px solid var(--border); padding-top:16px">
+        <h2 id="manualTitle">沒有回執檔？輸入選票識別碼</h2>
+        <div class="row" style="align-items:stretch">
+          <label class="sr-only" for="mhexInput">選票識別碼（m_hex）</label>
+          <input id="mhexInput" class="input mono" style="flex:1 1 260px; width:auto" type="text" inputmode="text"
+                 placeholder="64 位英數字，可在投票網站的「我的回執」找到" autocomplete="off" autocapitalize="off" spellcheck="false"
+                 aria-describedby="mhexHelp">
+          <button id="mhexBtn" type="button" class="btn" style="flex:0 0 auto">驗證</button>
+        </div>
+        <p id="mhexErr" class="field-err hidden" role="alert"></p>
+        <p id="mhexHelp" class="small muted">手動輸入沒有選舉場次資訊，結果會列出這次公告的截止時間，請確認是您投票的那一場。</p>
       </div>
-      <p class="small muted">同樣只在這台裝置上比對，不會送出識別碼。手動輸入沒有輪次資訊，請確認結果中顯示的選舉截止時間是您投票的那一場。</p>
     </section>
 
-    <section id="resultBanner" class="alert stack-sm hidden" aria-live="polite">
-      <p class="row"><span id="resultIcon" class="spin" aria-hidden="true"></span><span id="resultTitle" class="alert-title">驗證中…</span></p>
-      <p id="resultDetail" class="small"></p>
-      <ul id="resultSteps" class="steps"></ul>
+    <section id="verdict" class="verdict hidden" aria-labelledby="verdictTitle">
+      <div class="verdict-head" aria-live="polite">
+        <span id="verdictIcon" class="verdict-icon" aria-hidden="true"><span class="spin"></span></span>
+        <div>
+          <h2 id="verdictTitle" class="verdict-title" tabindex="-1">驗證中…</h2>
+          <p id="verdictSub" class="verdict-sub"></p>
+        </div>
+      </div>
+      <p id="verdictDetail" class="verdict-detail"></p>
+      <ol class="checks" aria-label="驗證項目">
+        <li class="check" id="chk-sign" data-state="wait">
+          <span class="check-mark" aria-hidden="true"></span>
+          <p class="check-title">結果是計票中心（CC）簽章的</p>
+          <div class="check-body">
+            <p class="check-desc">不是公告板自己說了算：用 CA 簽發的 CC 憑證，檢查開票結果上的簽章。</p>
+            <span class="check-state sr-only"></span>
+            <details><summary>技術細節</summary><ul class="steps"></ul></details>
+          </div>
+        </li>
+        <li class="check" id="chk-list" data-state="wait">
+          <span class="check-mark" aria-hidden="true"></span>
+          <p class="check-title">您的票在合法選票名單裡</p>
+          <div class="check-body">
+            <p class="check-desc">CC 簽章的名單裡，必須找得到您的選票識別碼。</p>
+            <span class="check-state sr-only"></span>
+            <details><summary>技術細節</summary><ul class="steps"></ul></details>
+          </div>
+        </li>
+        <li class="check" id="chk-root" data-state="wait">
+          <span class="check-mark" aria-hidden="true"></span>
+          <p class="check-title">名單算得出 CC 簽章的樹根</p>
+          <div class="check-body">
+            <p class="check-desc">從您的票沿著 Merkle Tree 往上算，結果必須等於 CC 簽章的 Merkle Root。</p>
+            <span class="check-state sr-only"></span>
+            <details><summary>技術細節</summary><ul class="steps"></ul></details>
+          </div>
+        </li>
+      </ol>
+      <p id="verdictNext" class="verdict-next hidden"></p>
     </section>
 
     <section id="treeSection" class="card stack hidden" aria-labelledby="treeTitle">
-      <div class="row-between">
-        <h2 id="treeTitle" class="section-title">您的票在 Merkle Tree 的位置</h2>
-        <div id="zoom-controls">
-          <button type="button" class="btn btn-sm" onclick="changeZoom(-0.15)" aria-label="縮小">－</button>
-          <span id="zoom-label">100%</span>
-          <button type="button" class="btn btn-sm" onclick="changeZoom(+0.15)" aria-label="放大">＋</button>
-          <button type="button" class="btn btn-sm" onclick="resetZoom()">1:1</button>
-          <button type="button" class="btn btn-sm" onclick="fitTree()">最適</button>
-          <button type="button" class="btn btn-sm" onclick="focusTarget()">對焦我的票</button>
-        </div>
+      <div class="stack-sm">
+        <h2 id="treeTitle" class="section-title">您的票如何連到 CC 簽章的樹根</h2>
+        <p id="treePos"></p>
       </div>
-      <p id="treePos" class="strong"></p>
       <div id="treeViz" class="stack">
-        <div class="legend" aria-hidden="true">
-          <span><i style="background:#fbf1dc;border-color:#875800"></i>您的選票</span>
-          <span><i style="background:#e7f2ea;border-color:#1d6b3a"></i>兄弟節點</span>
-          <span><i style="background:#e8eef5;border-color:#1f4e79"></i>驗證路徑</span>
-          <span><i style="background:#1f4e79;border-color:#1f4e79"></i>樹根</span>
-          <span><i style="background:transparent;border-style:dashed;border-color:#b5afa2"></i>補位節點</span>
+        <div class="tree-tools" role="group" aria-label="樹狀圖檢視">
+          <button type="button" class="btn btn-sm" id="viewPath" aria-pressed="true" onclick="fitPath()">看我的路徑</button>
+          <button type="button" class="btn btn-sm" id="viewAll" aria-pressed="false" onclick="fitTree()">看整棵樹</button>
         </div>
-        <div id="tree-scroll-wrap">
+        <div id="treeLegend" class="legend"></div>
+        <div id="tree-scroll-wrap" aria-hidden="true">
           <canvas id="tree-canvas"></canvas>
         </div>
-        <p class="small muted">點擊節點看完整雜湊・拖曳移動・滾輪縮放・手機可用手指拖曳</p>
+        <p class="small muted">點節點看完整雜湊・左右滑動移動・雙指或 Ctrl＋滾輪縮放。文字版本在下方「驗證路徑與雜湊資訊」。</p>
       </div>
       <p id="treeTooBig" class="small muted hidden"></p>
     </section>
@@ -1084,16 +1335,16 @@ _RECEIPT_HTML = """<!DOCTYPE html>
     <details id="resultInfo" class="card hidden">
       <summary>驗證路徑與雜湊資訊</summary>
       <dl class="dl" style="margin-top:16px">
-        <div><dt>m_hex（選票識別碼）</dt><dd><code id="infoMhex" class="hash"></code></dd></div>
-        <div><dt>葉節點 H_leaf(m) = H(0x00 ‖ m_hex)</dt><dd><code id="infoLeaf" class="hash"></code></dd></div>
+        <div><dt>選票識別碼（m_hex）</dt><dd><code id="infoMhex" class="hash"></code></dd></div>
+        <div><dt>您的葉節點：H(0x00 ‖ m_hex)</dt><dd><code id="infoLeaf" class="hash"></code></dd></div>
         <div><dt id="infoProofTitle">驗證路徑</dt><dd id="infoProof"></dd></div>
-        <div><dt>官方 Merkle Root（CC 簽章）</dt><dd><code id="infoRoot" class="hash"></code></dd></div>
+        <div><dt>CC 簽章的 Merkle Root</dt><dd><code id="infoRoot" class="hash"></code></dd></div>
       </dl>
     </details>
   </div>
 </main>
 
-<div id="node-panel">
+<div id="node-panel" role="status">
   <div class="panel-title" id="panel-title"></div>
   <div class="panel-hash" id="panel-hash"></div>
   <div class="panel-meta" id="panel-meta"></div>
@@ -1117,40 +1368,58 @@ function showMerkleTree(data) {
   const RECEIPT_VERSION = 1;
   const MAX_RECEIPT_BYTES = 4096;
   const VIZ_MAX_LEAVES = {{ viz_max_leaves }};
+  const ICON_CHECK = {{ icon_check | tojson }};
+  const ICON_X     = {{ icon_x | tojson }};
+  const ICON_ALERT = {{ icon_alert | tojson }};
+  const ICON_CLOCK = {{ icon_clock | tojson }};
   const $ = id => document.getElementById(id);
+  const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
-  // 四種結果：已納入公告／尚未公告／輪次不同／驗證失敗
-  const OUTCOMES = {
-    ok:        ['alert-ok',   '已納入公告'],
-    pending:   ['alert-info', '尚未公告'],
-    round:     ['alert-warn', '輪次不同'],
-    fail:      ['alert-err',  '驗證失敗'],
-  };
+  // 結果分類：每一種都有自己的標題、語氣和下一步
+  //   ok        已計入
+  //   pending   還沒開票
+  //   round     回執屬於另一場選舉
+  //   notfound  名單裡找不到（手動輸入多半是貼錯；回執檔則是嚴重問題）
+  //   mismatch  簽章或樹根對不起來（公告資料有問題）
+  //   offline   網路或伺服器暫時連不上
   class Outcome extends Error {
-    constructor(kind, detail) { super(detail); this.kind = kind; }
+    constructor(kind, detail, next) { super(detail); this.kind = kind; this.next = next || ''; }
+  }
+  // 輸入本身就不對：在輸入框旁邊提示，不顯示驗證結果
+  class InputError extends Error {
+    constructor(field, msg) { super(msg); this.field = field; }
   }
 
-  function step(text) {
+  const GROUPS = ['sign', 'list', 'root'];
+  const STATE_TEXT = { wait: '尚未檢查', run: '檢查中', ok: '通過', fail: '未通過', skip: '未檢查' };
+  let current = null;
+
+  function setCheck(group, state) {
+    const li = $('chk-' + group);
+    li.dataset.state = state;
+    li.querySelector('.check-mark').innerHTML = state === 'ok' ? ICON_CHECK : state === 'fail' ? ICON_X : '';
+    li.querySelector('.check-state').textContent = STATE_TEXT[state];
+  }
+  function begin(group) { current = group; setCheck(group, 'run'); }
+  function done(group) { setCheck(group, 'ok'); }
+  function step(text, failed) {
     const li = document.createElement('li');
-    li.className = 'step-ok';
+    li.className = failed ? 'step-err' : 'step-ok';
     const mark = document.createElement('span');
     mark.className = 'mark';
-    mark.textContent = '✓';
+    mark.innerHTML = failed ? ICON_X : ICON_CHECK;
     const t = document.createElement('span');
     t.textContent = text;
     li.append(mark, t);
-    $('resultSteps').appendChild(li);
+    $('chk-' + current).querySelector('.steps').appendChild(li);
   }
-  function finish(kind, detail) {
-    const [cls, title] = OUTCOMES[kind];
-    $('resultIcon').className = 'hidden';
-    $('resultBanner').className = 'alert stack-sm ' + cls;
-    $('resultTitle').textContent = title;
-    $('resultDetail').textContent = detail;
-  }
-  function fmtTime(ts) { return new Date(ts * 1000).toLocaleString(); }
 
-  // 比照 shared/merkle_tree.py get_proof() 的走訪：標出目標、兄弟、路徑、樹根，奇數層補一個虛擬佔位。
+  // 一律以台灣時間顯示，與公告板首頁一致
+  const TIME_FMT = new Intl.DateTimeFormat('sv-SE', { timeZone: 'Asia/Taipei', year: 'numeric', month: '2-digit',
+    day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
+  function fmtTime(ts) { return TIME_FMT.format(new Date(ts * 1000)) + '（台灣時間）'; }
+
+  // 比照 shared/merkle_tree.py get_proof() 的走訪：標出目標、兄弟、路徑、樹根，奇數層補一個補位節點。
   function treeDataFromLayers(layers, index) {
     const proofPath = [{ layer: 0, index, role: 'target' }];
     let cur = index;
@@ -1173,15 +1442,19 @@ function showMerkleTree(data) {
   function renderProofSteps(proof) {
     const box = $('infoProof');
     box.textContent = '';
+    if (!proof.length) {
+      box.textContent = '只有一張選票時，您的葉節點就是樹根，不需要兄弟節點。';
+      return;
+    }
     proof.forEach((p, i) => {
       const row = document.createElement('div');
       row.className = 'proof-step';
       const n = document.createElement('span');
       n.className = 'small muted nowrap';
-      n.textContent = `步驟 ${i + 1}`;
+      n.textContent = `第 ${i + 1} 層`;
       const side = document.createElement('span');
       side.className = 'badge ' + (p.position === 'right' ? 'badge-info' : 'badge-warn');
-      side.textContent = p.position === 'right' ? '右' : '左';
+      side.textContent = p.position === 'right' ? '兄弟在右' : '兄弟在左';
       const h = document.createElement('span');
       h.className = 'hash-inline small';
       h.textContent = p.sibling;
@@ -1192,103 +1465,208 @@ function showMerkleTree(data) {
 
   function showPosition(receipt, layers, index, proof, root) {
     const n = layers[0].length;
-    $('treePos').textContent =
-      `您的票是第 ${index + 1} 片葉節點（共 ${n} 張），往上 ${layers.length - 1} 層、經過 ${proof.length} 個兄弟節點到達樹根。`;
+    $('treePos').textContent = proof.length
+      ? `您的票是 ${n} 張中的第 ${index + 1} 張。往上 ${layers.length - 1} 層，每層和一個兄弟節點一起算出上一層，最後得到 CC 簽章的樹根。`
+      : '這次只有一張合法選票，您的票本身就是樹根。';
     $('infoMhex').textContent = receipt.m_hex;
     $('infoLeaf').textContent = layers[0][index];
-    $('infoProofTitle').textContent = `驗證路徑（由葉到根，共 ${proof.length} 步）`;
+    $('infoProofTitle').textContent = `驗證路徑（由下往上，共 ${proof.length} 層）`;
     renderProofSteps(proof);
     $('infoRoot').textContent = root;
     $('resultInfo').classList.remove('hidden');
     $('treeSection').classList.remove('hidden');
     const tooBig = n > VIZ_MAX_LEAVES;
     $('treeViz').classList.toggle('hidden', tooBig);
-    $('zoom-controls').classList.toggle('hidden', tooBig);
     $('treeTooBig').classList.toggle('hidden', !tooBig);
     if (tooBig) {
       $('treeTooBig').textContent =
-        `本次公告共 ${n} 張，超過 ${VIZ_MAX_LEAVES} 張時不繪製完整樹狀圖（手機畫不動）。下方「驗證路徑」列出您的票從葉節點到樹根經過的每一個兄弟節點。`;
+        `本次公告共 ${n} 張，超過 ${VIZ_MAX_LEAVES} 張時不繪製樹狀圖（手機畫不動）。下方「驗證路徑與雜湊資訊」列出您的票往上經過的每一個兄弟節點。`;
       $('resultInfo').open = true;
     } else {
       showMerkleTree(treeDataFromLayers(layers, index));
-      $('treeSection').scrollIntoView({ behavior: 'smooth', block: 'start' });
     }
   }
 
   function parseReceipt(text) {
+    const bad = msg => new InputError('file', msg);
     let r;
-    try { r = JSON.parse(text); } catch (_) { throw new Outcome('fail', '這不是驗票回執檔（無法解析 JSON）。'); }
-    if (!r || r.type !== RECEIPT_TYPE) throw new Outcome('fail', '這不是驗票回執檔（type 不符）。');
-    if (r.v !== RECEIPT_VERSION) throw new Outcome('fail', `不支援的回執版本 v${r.v}，請重新整理公告板後再試。`);
-    if (typeof r.m_hex !== 'string' || !/^[0-9a-f]{64}$/.test(r.m_hex)) throw new Outcome('fail', '回執檔的選票識別碼格式錯誤。');
-    if (r.round !== null && !(Number.isInteger(r.round) && r.round > 0)) throw new Outcome('fail', '回執檔的輪次欄位格式錯誤。');
+    try { r = JSON.parse(text); } catch (_) { throw bad('這個檔案不是驗票回執（無法讀取內容）。請選擇投票完成時下載的 .json 檔。'); }
+    if (!r || r.type !== RECEIPT_TYPE) throw bad('這個檔案不是驗票回執。請選擇檔名開頭為 nutc-vote-receipt 的檔案。');
+    if (r.v !== RECEIPT_VERSION) throw bad(`這份回執的版本（v${r.v}）這個頁面看不懂，請重新整理後再試一次。`);
+    if (typeof r.m_hex !== 'string' || !/^[0-9a-f]{64}$/.test(r.m_hex)) throw bad('回執裡的選票識別碼損壞了，請改用投票網站「我的回執」重新下載。');
+    if (r.round !== null && r.round !== undefined && !(Number.isInteger(r.round) && r.round > 0)) throw bad('回執裡的選舉場次資訊損壞了，請改用投票網站「我的回執」重新下載。');
     return r;
   }
 
+  function parseTyped(text) {
+    const body = text.trim().replace(/^0x/i, '');
+    if (!body) throw new InputError('mhex', '請先貼上選票識別碼。');
+    if (/[^0-9a-fA-F]/.test(body)) throw new InputError('mhex', '選票識別碼只會有 0–9 和 a–f，裡面有其他字元，請檢查是否多複製了空白或文字。');
+    if (body.length !== 64) throw new InputError('mhex', `選票識別碼是 64 位，您輸入了 ${body.length} 位，請檢查是否少複製或多複製。`);
+    return body.toLowerCase();
+  }
+
   async function verifyFile(file) {
-    if (file.size > MAX_RECEIPT_BYTES) throw new Outcome('fail', '檔案太大，這不是驗票回執檔。');
+    if (file.size > MAX_RECEIPT_BYTES) throw new InputError('file', '這個檔案太大，不是驗票回執。請選擇投票完成時下載的 .json 檔。');
     const receipt = parseReceipt(await file.text());
+    openVerdict(`回執檔：${file.name}`);
+    begin('list');
     step('回執格式與版本正確');
     return verifyReceipt(receipt, false);
   }
 
   function verifyTyped(text) {
-    const body = text.trim().replace(/^0x/i, '');
-    if (!/^[0-9a-fA-F]{64}$/.test(body)) throw new Outcome('fail', '選票識別碼必須是 64 位的十六進位字串。');
+    const m = parseTyped(text);
+    openVerdict('手動輸入的選票識別碼');
+    begin('list');
     step('選票識別碼格式正確');
-    return verifyReceipt({ m_hex: body.toLowerCase(), round: null }, true);
+    return verifyReceipt({ m_hex: m, round: null }, true);
   }
 
-  async function verifyReceipt(receipt, typed) {
-    const resp = await fetch('/api/signed_bundle', { cache: 'no-store' });
-    if (resp.status === 404) throw new Outcome('pending', '開票結果還沒公告。投票截止並完成開票後再驗證一次。');
-    const sb = await resp.json();
-    if (sb.status !== 'success') throw new Outcome('fail', sb.message || '公告板沒有提供 CC 簽章的結果包');
-    const bundle = await verifySignedBundle(sb, caCertUrl, step);
+  const REPORT = '請保留回執檔，並把這個畫面截圖交給選務人員。';
 
+  async function verifyReceipt(receipt, typed) {
+    begin('sign');
+    let resp;
+    try { resp = await fetch('/api/signed_bundle', { cache: 'no-store' }); }
+    catch (_) { throw new Outcome('offline', '連不上公告板，無法取得開票結果。', '請確認網路連線後再試一次。'); }
+    if (resp.status === 404) throw new Outcome('pending', '計票中心還沒公告這一場的結果。', '投票截止並完成開票後，再回來驗證一次。您的回執會一直有效。');
+    const sb = await resp.json();
+    if (sb.status !== 'success') throw new Outcome('offline', sb.message || '公告板暫時沒有提供 CC 簽章的結果包。', '請稍後再試一次。');
+    let bundle;
+    try {
+      bundle = await verifySignedBundle(sb, caCertUrl, t => step(t));
+    } catch (e) {
+      if (/無法從投票網站取得/.test(e.message)) throw new Outcome('offline', e.message, '請確認網路連線後再試一次。');
+      throw new Outcome('mismatch', e.message, REPORT + '這代表公告內容和計票中心的簽章對不起來，不是您操作錯誤。');
+    }
+    done('sign');
+
+    begin('list');
     if (receipt.round && bundle.deadline && receipt.round !== bundle.deadline) {
       throw new Outcome('round',
-        `這份回執屬於截止時間 ${fmtTime(receipt.round)} 的選舉，目前公告的是截止時間 ${fmtTime(bundle.deadline)} 的選舉。`);
+        `這份回執屬於截止時間 ${fmtTime(receipt.round)} 的選舉，公告板目前公告的是截止時間 ${fmtTime(bundle.deadline)} 的選舉。`,
+        '請等您投票的那一場公告後再驗證；如果您確定是同一場，請通報選務人員。');
     }
-    step(receipt.round ? '回執輪次與公告一致'
-      : typed ? `手動輸入沒有輪次資訊；本次公告的選舉截止時間：${fmtTime(bundle.deadline)}`
-      : '舊版回執沒有輪次資訊，略過輪次檢查');
+    step(receipt.round ? '回執的選舉場次與公告一致'
+      : typed ? `本次公告的選舉截止時間：${fmtTime(bundle.deadline)}`
+      : '舊版回執沒有場次資訊，略過場次檢查');
 
     const list = bundle.valid_m_hex_list || [];
     const index = list.indexOf(receipt.m_hex);
     if (index < 0) {
-      throw new Outcome('fail', typed
-        ? `本次公告（截止時間 ${fmtTime(bundle.deadline)}）的合法選票清單中找不到這個識別碼。請確認沒有貼錯；若確定無誤，請通報選務人員。`
-        : '公告的合法選票清單中找不到這張票。請保留回執檔並通報選務人員。');
+      throw typed
+        ? new Outcome('typo', `這次公告的 ${list.length} 張合法選票裡，沒有您輸入的識別碼。`,
+            '最常見的原因是貼錯或少貼了幾位，請到投票網站「我的回執」複製完整的識別碼再試一次。確定無誤仍找不到，請通報選務人員。')
+        : new Outcome('notfound', `這次公告的 ${list.length} 張合法選票裡，沒有這張回執的選票。`,
+            REPORT + '回執可以證明您投過這張票。');
     }
     step(`在 ${list.length} 張合法選票中找到您的票`);
+    done('list');
 
+    begin('root');
     const layers = await buildLayersLocal(list);
     if (layers[layers.length - 1][0] !== bundle.root_official) {
-      throw new Outcome('fail', '公告清單重算出的 Merkle Root 與 CC 簽章的不符，公告資料可能有誤。請通報選務人員。');
+      throw new Outcome('mismatch', '用公告的名單重算出的 Merkle Root，和 CC 簽章的不一樣。', REPORT + '這代表公告資料有誤，不是您操作錯誤。');
     }
     const proof = proofFromLayers(layers, index);
     if (!(await verifyProofLocally(receipt.m_hex, proof, bundle.root_official))) {
-      throw new Outcome('fail', '驗證路徑算不出 CC 簽章的 Merkle Root。請通報選務人員。');
+      throw new Outcome('mismatch', '從您的票往上算，算不出 CC 簽章的 Merkle Root。', REPORT + '這代表公告資料有誤，不是您操作錯誤。');
     }
-    step(`驗證路徑（${proof.length} 步）可算出 CC 簽章的 Merkle Root`);
+    step(`驗證路徑（${proof.length} 層）算出的樹根與 CC 簽章相符`);
+    done('root');
 
-    showPosition(receipt, layers, index, proof, bundle.root_official);
-    return `您的票已包含在 CC 簽章公告的 ${list.length} 張合法選票中。整個驗證在這台裝置上完成，沒有採用公告板伺服器的判斷。`;
+    return { index, total: list.length, show: () => showPosition(receipt, layers, index, proof, bundle.root_official) };
+  }
+
+  const VERDICTS = {
+    ok:       { tone: 'ok',   icon: () => ICON_CHECK, title: '您的票已被計入' },
+    pending:  { tone: 'info', icon: () => ICON_CLOCK, title: '還沒開票' },
+    round:    { tone: 'warn', icon: () => ICON_ALERT, title: '這份回執屬於另一場選舉' },
+    notfound: { tone: 'err',  icon: () => ICON_X,     title: '名單裡找不到這張票' },
+    typo:     { tone: 'warn', icon: () => ICON_ALERT, title: '找不到這個識別碼' },
+    mismatch: { tone: 'err',  icon: () => ICON_X,     title: '公告資料不一致' },
+    offline:  { tone: 'warn', icon: () => ICON_ALERT, title: '暫時無法完成驗證' },
+  };
+
+  function clearFieldErrors() {
+    for (const id of ['fileErr', 'mhexErr']) { $(id).classList.add('hidden'); $(id).textContent = ''; }
+    $('mhexInput').removeAttribute('aria-invalid');
+  }
+  function showFieldError(err) {
+    const box = $(err.field === 'file' ? 'fileErr' : 'mhexErr');
+    box.innerHTML = ICON_ALERT;
+    box.append(document.createTextNode(err.message));
+    box.classList.remove('hidden');
+    if (err.field === 'mhex') { $('mhexInput').setAttribute('aria-invalid', 'true'); $('mhexInput').focus(); }
+  }
+
+  function openVerdict(source) {
+    const v = $('verdict');
+    v.classList.remove('hidden');
+    v.dataset.tone = 'info';
+    $('verdictIcon').innerHTML = '<span class="spin"></span>';
+    $('verdictTitle').textContent = '驗證中…';
+    $('verdictSub').textContent = source;
+    $('verdictDetail').textContent = '';
+    $('verdictNext').classList.add('hidden');
+    for (const g of GROUPS) {
+      setCheck(g, 'wait');
+      const d = $('chk-' + g).querySelector('details');
+      d.open = false;
+      d.querySelector('.steps').textContent = '';
+    }
+  }
+
+  function closeVerdict(kind, sub, detail, next) {
+    const conf = VERDICTS[kind];
+    const v = $('verdict');
+    v.dataset.tone = conf.tone;
+    $('verdictIcon').innerHTML = conf.icon();
+    $('verdictTitle').textContent = conf.title;
+    if (sub) $('verdictSub').textContent = sub;
+    $('verdictDetail').textContent = detail;
+    const nx = $('verdictNext');
+    nx.textContent = '';
+    if (next) {
+      const s = document.createElement('strong');
+      s.textContent = '接下來';
+      nx.append(s, document.createTextNode(next));
+    }
+    nx.classList.toggle('hidden', !next);
+    v.scrollIntoView({ behavior: reduceMotion ? 'auto' : 'smooth', block: 'start' });
+    $('verdictTitle').focus({ preventScroll: true });
   }
 
   async function run(task) {
-    $('resultSteps').textContent = '';
+    clearFieldErrors();
     $('resultInfo').classList.add('hidden');
     $('treeSection').classList.add('hidden');
-    $('resultIcon').className = 'spin';
-    $('resultBanner').className = 'alert stack-sm';
-    $('resultTitle').textContent = '驗證中…';
-    $('resultDetail').textContent = '';
     try {
-      finish('ok', await task());
+      const r = await task();
+      closeVerdict('ok', `${r.total} 張合法選票中的第 ${r.index + 1} 張`,
+        '三項檢查都在您的裝置上完成，沒有採用公告板伺服器的判斷。', '');
+      r.show();
     } catch (err) {
-      finish(err instanceof Outcome ? err.kind : 'fail', err.message);
+      if (err instanceof InputError) {
+        $('verdict').classList.add('hidden');
+        showFieldError(err);
+        return;
+      }
+      const kind = err instanceof Outcome ? err.kind : 'offline';
+      if (current) {
+        step(err.message, true);
+        setCheck(current, 'fail');
+        let after = false;
+        for (const g of GROUPS) {
+          if (g === current) { after = true; continue; }
+          if (after && $('chk-' + g).dataset.state !== 'ok') setCheck(g, 'skip');
+        }
+        $('chk-' + current).querySelector('details').open = true;
+      }
+      closeVerdict(kind, '', err.message, err instanceof Outcome ? err.next : '請稍後再試一次。');
+    } finally {
+      current = null;
     }
   }
 
@@ -1297,10 +1675,10 @@ function showMerkleTree(data) {
     e.target.value = '';
     if (file) run(() => verifyFile(file));
   });
-  $('mhexBtn').addEventListener('click', () => run(() => verifyTyped($('mhexInput').value)));
-  $('mhexInput').addEventListener('keydown', e => {
-    if (e.key === 'Enter') run(() => verifyTyped($('mhexInput').value));
-  });
+  const runTyped = () => run(() => verifyTyped($('mhexInput').value));
+  $('mhexBtn').addEventListener('click', runTyped);
+  $('mhexInput').addEventListener('keydown', e => { if (e.key === 'Enter') runTyped(); });
+  $('mhexInput').addEventListener('input', () => { $('mhexErr').classList.add('hidden'); $('mhexInput').removeAttribute('aria-invalid'); });
 })();
 </script>
 </body>
@@ -1353,7 +1731,10 @@ def verify_page():
 @app.route('/receipt', methods=['GET'])
 def receipt_page():
     """驗證選票頁：回執檔或手動輸入的 m_hex 只在瀏覽器裡使用，驗證全程在本機完成。"""
-    return render_template_string(_RECEIPT_HTML, ca_cert_url=CA_CERT_URL_FOR_BROWSER, viz_max_leaves=VIZ_MAX_LEAVES)
+    return render_template_string(
+        _RECEIPT_HTML, ca_cert_url=CA_CERT_URL_FOR_BROWSER, viz_max_leaves=VIZ_MAX_LEAVES,
+        icon_check=_ICON_CHECK, icon_x=_ICON_X, icon_alert=_ICON_ALERT, icon_clock=_ICON_CLOCK,
+    )
 
 
 @app.route('/api/admin/reset', methods=['POST'])

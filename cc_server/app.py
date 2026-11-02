@@ -67,6 +67,10 @@ CC_ID       = "CC"
 CC_HOSTNAME = os.environ.get("CC_HOSTNAME", "cc")  # <3 v4.0：填入 TLS 憑證的 SAN
 CA_URL      = os.environ.get("CA_URL",  "https://localhost:5001")
 TA_URL      = os.environ.get("TA_URL",  "https://localhost:5002")
+# 截止後再收多久的信封：投票網站把選票排隊、截止後才打亂一次送出（避免
+# 送達時間洩漏身分），這段寬限讓最後一批送得進來。只有內部服務能以 mTLS
+# 連到 CC，選民無法在截止後直接送票；投票網站自己在截止時就停止收件。
+ENVELOPE_GRACE_SECONDS = int(os.environ.get("ENVELOPE_GRACE_SECONDS", "20"))
 BB_URL      = os.environ.get("BB_URL",  "https://localhost:5004")
 TPA_URL     = os.environ.get("TPA_URL", "https://localhost:5000")
 
@@ -228,10 +232,11 @@ def ts_to_str(ts):
 
 
 # ── Deadline Middleware ────────────────────────────────────────
-def _check_deadline():
+def _check_deadline(grace: int = 0):
     """
     選舉狀態 + 截止時間強制執行 Middleware。
     每次都向 TA 重新查詢，避免多 worker 或重啟後快取失效的問題。
+    grace：截止後仍放行的秒數（見 ENVELOPE_GRACE_SECONDS）。
     回傳 None 表示允許繼續；回傳 Response 表示應立即拒絕。
     """
     global _DEADLINE, _ELECTION_STATE
@@ -259,7 +264,7 @@ def _check_deadline():
         return None
 
     now = int(time.time())
-    if now > deadline:
+    if now > deadline + grace:
         remaining_over = now - deadline
         print(f"[CC] Deadline Middleware 拒絕請求：已超時 {remaining_over} 秒（Unix ts：{now} > {deadline}）")
         return jsonify({
@@ -474,7 +479,7 @@ def api_receive_envelope():
     驗證 token_hash 未重複使用，解開外層取 k，暫存至 DB。
     """
     # ── Deadline Middleware ──────────────────────────────────
-    deadline_resp = _check_deadline()
+    deadline_resp = _check_deadline(grace=ENVELOPE_GRACE_SECONDS)
     if deadline_resp is not None:
         return deadline_resp
 
@@ -790,6 +795,13 @@ def _do_tally() -> dict:
     # 檢查是否已開票
     if _get_state('done') == '1':
         return {"status": "already_done", "message": "已完成開票"}
+
+    # 寬限期間投票網站可能還在送最後一批信封，這時開票會漏掉它們。
+    deadline = _fetch_election_round()
+    wait = deadline + ENVELOPE_GRACE_SECONDS - int(time.time()) if deadline > 0 else 0
+    if wait > 0:
+        return {"status": "error", "code": "GRACE_PERIOD", "retry_after": wait,
+                "message": f"截止後要再等 {ENVELOPE_GRACE_SECONDS} 秒收進最後一批選票，請 {wait} 秒後再開票"}
 
     # 步驟 1：向 TA 請求 SK_TA
     # v2.0 修正：改用規格書 §18.3.3 定義的 release_key 專用格式（頂層

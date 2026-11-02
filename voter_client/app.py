@@ -21,7 +21,7 @@ IndexedDB（跟私鑰放在一起），伺服器端不保存、也查詢不到�
 
 批次混合（v3.0 新增）：
   信封不再收到就立刻轉送給 CC，而是先進本地佇列（pending_envelope
-  表），等湊到 ENVELOPE_BATCH_SIZE 封或快到截止時間才打亂順序一次
+  表），等湊到 ENVELOPE_BATCH_SIZE 封或投票截止後才打亂順序一次
   送出，降低「送出時間點」洩漏投票行為的風險。這張表本身仍會短暫
   存放 AAD（其中的 voter_id 只是 Base64，不是加密），是這個設計已
   知、且經過討論後接受的取捨，不對外提供任何讀取這張表的 API。
@@ -105,9 +105,8 @@ except Exception as ex:
 # http_requests.get/post(...)。
 _VOTER_MTLS = mtls_client_kwargs(_TLS_CERT_PATH, _TLS_KEY_PATH, os.path.join(KEYS_DIR, "ca_cert.pem"))
 
-# 批次混合參數：湊滿 K 封就送；否則距截止只剩安全緩衝時間就強制全送。
+# 批次混合參數：湊滿 K 封就送；否則等投票截止後一次全送（CC 有寬限收件）。
 ENVELOPE_BATCH_SIZE            = int(os.environ.get("ENVELOPE_BATCH_SIZE", "10"))
-ENVELOPE_FLUSH_SAFETY_MARGIN_S = int(os.environ.get("ENVELOPE_FLUSH_SAFETY_MARGIN_SECONDS", "30"))
 ENVELOPE_FLUSH_POLL_S          = int(os.environ.get("ENVELOPE_FLUSH_POLL_SECONDS", "3"))
 
 def _get_candidates():
@@ -209,54 +208,64 @@ def _flush_pending(rows):
     """
     rows = list(rows)
     random.SystemRandom().shuffle(rows)
-    for row in rows:
-        envelope = {k: row[k] for k in ('c_data', 'iv', 'tag', 'aad', 'c_key', 'token_hash')}
-        try:
-            r = http_requests.post(f"{CC_URL}/api/receive_envelope", json=envelope, timeout=10, **_VOTER_MTLS)
-        except Exception as e:
-            print(f"[Voter] 批次送出信封失敗（連線錯誤，保留於佇列待重試）：{e}")  # <3
-            continue  # <3 不刪除，留待下一輪重試
-
-        if r.status_code == 200:
-            if VERIFY_CC_RECEIPT:
-                try:
-                    resp_json = r.json()
-                except Exception:
-                    resp_json = {}
-                if not _verify_cc_receipt(resp_json, envelope):
-                    print(
-                        f"[Voter] 警告：CC 回應的收據驗證失敗，可能遭偽造或竄改，"
-                        f"保留於佇列待重試（token_hash={row['token_hash'][:16]}...）"
-                    )
-                    continue  # 不刪除，留待下一輪重試
-            print(f"[Voter] 批次送出信封成功（token_hash={row['token_hash'][:16]}...）")
-            db.execute("DELETE FROM pending_envelope WHERE id = ?", (row['id'],))
-        elif r.status_code == 403:
-            # CC 明確拒絕（token_hash 重複、選舉已截止等），重試也不會
-            # 成功，才允許移除。 <3
-            print(f"[Voter] 批次送出信封被 CC 明確拒絕（403，從佇列移除）：{r.text[:200]}")  # <3
-            db.execute("DELETE FROM pending_envelope WHERE id = ?", (row['id'],))
-        else:
-            # 非預期狀態碼（例如 CC 內部錯誤 500），保留待重試。 <3
-            print(f"[Voter] 批次送出信封收到非預期狀態碼 {r.status_code}（保留於佇列待重試）：{r.text[:200]}")  # <3
+    with _flush_lock:
+        for row in rows:
+            envelope = {k: row[k] for k in ENVELOPE_FIELDS}
+            outcome, _ = _send_to_cc(envelope)
+            if outcome in ("ok", "rejected"):
+                db.execute("DELETE FROM pending_envelope WHERE id = ?", (row['id'],))
 
 
-def _remaining_seconds():
-    """查詢投票剩餘秒數；選舉尚未開始、查詢失敗、或投票時間不限制
-    （TA 的 deadline<=0）皆回傳 None。只用於「距截止還有多久、是否該
-    提早強制 flush」這種需要具體秒數的場景——deadline 不限制時本來就
-    沒有「快到期」這回事，回傳 None 讓呼叫端跳過強制 flush 判斷是正確
-    的；但這不代表選舉沒有在進行中，判斷「現在能不能投票」請改用
-    _voting_open()，不要直接把這裡的 None 當成「已截止」。 <3
+ENVELOPE_FIELDS = ('c_data', 'iv', 'tag', 'aad', 'c_key', 'token_hash')
+
+# 背景排程與「截止前直接送出」共用，避免同一封信封被兩邊同時送出。
+_flush_lock = threading.Lock()
+
+
+def _send_to_cc(envelope):
+    """把一封信封送給 CC，回傳 (結果, CC 回應 JSON)。
+
+    結果只有三種：
+      "ok"       CC 收下（且收據驗證通過）
+      "rejected" CC 明確拒絕（403：token_hash 重複、已截止等），重試也不會成功
+      "retry"    連線錯誤、收據驗證失敗或非預期狀態碼，應保留稍後重試
     """
+    tag = envelope['token_hash'][:16]
+    try:
+        r = http_requests.post(f"{CC_URL}/api/receive_envelope", json=envelope, timeout=10, **_VOTER_MTLS)
+    except Exception as e:
+        print(f"[Voter] 送出信封失敗（連線錯誤，保留於佇列待重試）：{e}")  # <3
+        return "retry", {}
+    try:
+        resp_json = r.json()
+    except Exception:
+        resp_json = {}
+
+    if r.status_code == 200:
+        if VERIFY_CC_RECEIPT and not _verify_cc_receipt(resp_json, envelope):
+            print(f"[Voter] 警告：CC 回應的收據驗證失敗，可能遭偽造或竄改，保留於佇列待重試（token_hash={tag}...）")
+            return "retry", resp_json
+        print(f"[Voter] 送出信封成功（token_hash={tag}...）")
+        return "ok", resp_json
+    if r.status_code == 403:
+        # CC 明確拒絕（token_hash 重複、選舉已截止等），重試也不會成功。 <3
+        print(f"[Voter] 送出信封被 CC 明確拒絕（403）：{r.text[:200]}")  # <3
+        return "rejected", resp_json
+    # 非預期狀態碼（例如 CC 內部錯誤 500），保留待重試。 <3
+    print(f"[Voter] 送出信封收到非預期狀態碼 {r.status_code}（保留於佇列待重試）：{r.text[:200]}")  # <3
+    return "retry", resp_json
+
+
+def _voting_expired():
+    """選舉在進行中而且已過截止時間時回傳 True（該送出最後一批了）。
+    查詢失敗、尚未開始、或投票時間不限制（TA 的 is_expired 永遠 False）
+    都回傳 False，佇列留到下一輪再判斷。"""
     try:
         r = http_requests.get(f"{TA_URL}/api/deadline", timeout=5, **_VOTER_MTLS)
         d = r.json()
-        if d.get("election_state") != "running":
-            return None
-        return d.get("remaining_seconds")
     except Exception:
-        return None
+        return False
+    return d.get("election_state") == "running" and bool(d.get("is_expired"))
 
 
 def _voting_open():
@@ -282,7 +291,14 @@ def _voting_open():
 
 
 def _batch_scheduler_loop():
-    """背景排程：湊滿 K 封就送；否則距截止進入安全緩衝時間就強制全送。"""
+    """背景排程：湊滿 K 封就送；投票截止後把池內剩下的打亂一次送出。
+
+    以前是「距截止剩 30 秒就每一輪全送」，有兩個問題：截止前最後幾秒才
+    收下的票要等下一輪才送，到 CC 時已過截止而被拒收（選民卻已看到「已
+    收到」）；最後 30 秒的票幾乎一張一批，送達時間等於投票時間，TPA 與
+    CC 聯手就能用時間對出身分。現在截止後才送出最後一批，所有尾段的票
+    混在同一批；CC 對內部轉送多給 ENVELOPE_GRACE_SECONDS 秒寬限收件。
+    """
     while True:
         try:
             count = db.count("pending_envelope")
@@ -290,12 +306,10 @@ def _batch_scheduler_loop():
                 rows = db.fetchall("SELECT * FROM pending_envelope ORDER BY id")
                 print(f"[Voter] 批次池達到 {count} 封（門檻 {ENVELOPE_BATCH_SIZE}），送出")
                 _flush_pending(rows)
-            elif count > 0:
-                remaining = _remaining_seconds()
-                if remaining is not None and remaining <= ENVELOPE_FLUSH_SAFETY_MARGIN_S:
-                    rows = db.fetchall("SELECT * FROM pending_envelope ORDER BY id")
-                    print(f"[Voter] 距截止僅剩 {remaining} 秒，強制送出池內剩餘 {count} 封")
-                    _flush_pending(rows)
+            elif count > 0 and _voting_expired():
+                rows = db.fetchall("SELECT * FROM pending_envelope ORDER BY id")
+                print(f"[Voter] 投票已截止，打亂後送出池內剩餘 {count} 封")
+                _flush_pending(rows)
         except Exception as e:
             print(f"[Voter] 批次排程例外：{e}")
         time.sleep(ENVELOPE_FLUSH_POLL_S)
@@ -489,12 +503,11 @@ def submit_envelope():
     """
     [POST] 選民提交數位信封（v3.0 改為批次混合，不再即時轉送給 CC）。
     收下後先進本地佇列，由背景排程（見 _batch_scheduler_loop）湊滿
-    ENVELOPE_BATCH_SIZE 封、或距投票截止進入安全緩衝時間時，才打亂
+    ENVELOPE_BATCH_SIZE 封、或投票截止後，才打亂
     順序一次送出，降低「提交時間點」洩漏投票行為的風險。
     """
     data = request.get_json()
-    required = ('c_data', 'iv', 'tag', 'aad', 'c_key', 'token_hash')
-    if not data or not all(k in data for k in required):
+    if not data or not all(k in data for k in ENVELOPE_FIELDS):
         return jsonify({"status": "error", "message": "缺少信封欄位"}), 400
 
     # 先確認選舉確實還在進行中，避免快截止前收進佇列的信封，稍後送給 CC

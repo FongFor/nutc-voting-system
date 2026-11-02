@@ -299,6 +299,12 @@ def trigger_tally(verbose: bool = False) -> Optional[dict]:
     # v2.0 修正：CC /api/tally 現在需要 Admin Bearer Token（規格書 §18.4.4）。 <3
     headers = {"Authorization": f"Bearer {get_admin_api_token()}"}
     r = requests.post(f"{CC_URL}/api/tally", json={}, headers=headers, timeout=120)
+    # 截止後 CC 還有一段寬限時間收投票網站的最後一批信封，寬限結束才能開票
+    while r.status_code == 400 and r.json().get('code') == 'GRACE_PERIOD':
+        wait = int(r.json().get('retry_after', 1)) + 1
+        print(f"\n  ⏳ CC 寬限收件中，{wait} 秒後開票...")
+        time.sleep(wait)
+        r = requests.post(f"{CC_URL}/api/tally", json={}, headers=headers, timeout=120)
     if r.status_code == 200:
         result = r.json()
         if result.get('status') == 'success':
