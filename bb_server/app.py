@@ -42,7 +42,7 @@ from shared.key_manager import load_or_fetch_ca_cert, verify_cert_chain_and_cn  
 from shared.admin_auth import check_admin_token, admin_auth_error  # <3 v4.0：保護 /api/admin/reset
 from shared.tls_utils import load_or_request_tls_certificate, build_mtls_server_context  # <3 v4.0：mTLS
 from cryptography import x509
-from shared.ui_ballot import (BALLOT_HEAD, THEME_TOGGLE, ZHENG_JS, tally_marks, register_ballot_assets,
+from shared.ui_ballot import (BALLOT_HEAD, THEME_TOGGLE, ZHENG_JS, register_ballot_assets,
                               MARK_OK, MARK_FAIL, MARK_SKIP, MARK_WAIT)
 
 # 驗證頁在瀏覽器驗 CC 簽章時所用的 CA 根憑證來源：投票網站（voter_client），
@@ -983,7 +983,6 @@ _BB_STYLE = """  <style>
     .results-head { display: grid; gap: 6px; }
     .tally-sheet > li { grid-template-columns: minmax(0, 1fr) auto; min-height: 64px; }
     .tally-name { font-weight: 800; font-size: 1.05rem; }
-    .tally-sheet .tally { margin-top: 6px; }
     .tally-count { text-align: right; line-height: 1.1; }
     .tally-count b { display: block; font-family: var(--heading); font-size: 2.2rem; font-weight: 900; font-variant-numeric: tabular-nums; }
     .tally-count span { font-size: 0.85rem; color: var(--muted); font-variant-numeric: tabular-nums; }
@@ -1163,10 +1162,7 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
         {% for candidate, count in tally | dictsort(by='value', reverse=true) %}
         {% set pct = (count / valid_count * 100) if valid_count > 0 else 0 %}
           <li>
-            <div>
-              <div class="tally-name">{{ candidate }}</div>
-              {{ tally_marks(count) | safe }}
-            </div>
+            <div class="tally-name">{{ candidate }}</div>
             <div class="tally-count"><b>{{ count }}</b><span>{{ "%.1f"|format(pct) }}%</span></div>
           </li>
         {% endfor %}
@@ -1793,7 +1789,6 @@ def dashboard():
         votes=votes,
         valid_count=valid_count,
         tallied_at=tallied_at,
-        tally_marks=tally_marks,
     )
 
 
