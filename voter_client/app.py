@@ -45,7 +45,7 @@ from shared.db_utils import Database
 from shared.config_loader import get_candidates as cfg_get_candidates, make_reload_endpoint, get_service_registration_token
 from shared.key_manager import load_or_fetch_ca_cert, verify_cert_chain_and_cn, get_public_key_from_cert  # <3 v4.0
 from shared.crypto_utils import verify_signature
-from shared.ui_style import UI_HEAD, THEME_TOGGLE
+from shared.ui_ballot import BALLOT_HEAD, THEME_TOGGLE, ZHENG_JS, MARK_OK, MARK_FAIL, MARK_WAIT, register_ballot_assets
 from shared.tls_utils import load_or_request_tls_certificate, build_mtls_server_context, mtls_client_kwargs  # <3 v4.0：mTLS
 from shared.admin_auth import check_admin_token, admin_auth_error  # <3 v4.0：保護 /api/admin/reset
 
@@ -321,6 +321,7 @@ threading.Thread(target=_batch_scheduler_loop, daemon=True).start()
 # Flask App
 # ============================================================
 app = Flask(__name__)
+register_ballot_assets(app)  # 標題字型（自家提供，不連外）
 app.secret_key = os.environ.get("SECRET_KEY", os.urandom(32))
 
 # v3.0 新增：voter_client 現在是唯一對外開放的服務（見 Caddyfile），前面
@@ -619,7 +620,7 @@ async function idbHasCert() {
   return !!(await idbLoad('certPem'));
 }
 
-/* ---------- 驗票回執檔（公告板「匯入回執驗票」讀取） ----------
+/* ---------- 驗票回執檔（公告板「驗證我的選票」讀取） ----------
    只匯出 m_hex、s_prime_hex 與輪次（TA 截止時間）。學號、SN、投票對象
    刻意不放：三者湊齊就能重算 m 再對照公告板，回執檔就成了可以轉交給
    別人的「我投給誰」證明（買票、脅迫投票）。s_prime_hex 是 TPA 對 m 的
@@ -973,7 +974,24 @@ def serve_crypto_js():
 
 # ── HTML 模板 ──────────────────────────────────────────────────
 
-_BASE_STYLE = UI_HEAD + """<script src="/voter-crypto.js"></script>
+_BASE_STYLE = BALLOT_HEAD + """<script src="/voter-crypto.js"></script>
+  <style>
+    /* 投票進度：五列計票紙，每完成一步正字多一筆 */
+    .vote-flow { display: grid; gap: 12px; }
+    .vote-flow-head { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 14px; align-items: center; }
+    .vote-zheng { width: 64px; height: 64px; display: grid; place-items: center; background: var(--surface);
+      border: 2px solid var(--text); color: var(--text); }
+    .vote-flow-title { margin: 0; font-family: var(--heading); font-weight: 900; font-size: 1.2rem; }
+    .vote-sheet > li[data-state="wait"] .vote-label { color: var(--muted); }
+    .vote-sheet > li[data-state="run"] { box-shadow: 0 6px 16px rgba(19, 37, 59, 0.14); background: var(--surface); }
+    .vote-sheet > li[data-state="fail"] .vote-label { color: var(--err); }
+    .vote-label { font-weight: 700; }
+    .vote-tech summary { font-size: 0.85rem; font-weight: 600; color: var(--link); }
+    .vote-tech .steps { margin-top: 6px; font-size: 0.85rem; color: var(--muted); }
+    /* 投完票只淡化候選人與按鈕，進度與正字保持清楚 */
+    #voteForm.is-disabled { opacity: 1; pointer-events: auto; }
+    #voteForm.is-disabled #candidateList, #voteForm.is-disabled #voteBtn { opacity: 0.55; pointer-events: none; }
+  </style>
 """
 
 # ─────────────────────────────────────────
@@ -1001,9 +1019,8 @@ _REGISTER_HTML = """<!DOCTYPE html>
 <main>
   <div class="container stack-lg">
     <div class="stack-sm">
-      <p class="eyebrow">步驟 1／2</p>
       <h1>身分綁定</h1>
-      <p class="lead">請輸入學號與教務處寄給您的一次性密碼（OTP）。投票用的金鑰會在這台裝置上產生，私鑰不會離開您的瀏覽器。</p>
+      <p class="lead">第 1 步，共 2 步。請輸入學號與教務處寄給您的一次性密碼（OTP）。投票用的金鑰會在這台裝置上產生，私鑰不會離開您的瀏覽器。</p>
     </div>
 
     <div class="card stack">
@@ -1168,9 +1185,8 @@ _VOTE_HTML = """<!DOCTYPE html>
 <main>
   <div class="container stack-lg">
     <div class="stack-sm">
-      <p class="eyebrow">步驟 2／2</p>
       <h1>投下您的一票</h1>
-      <p class="lead">選擇一位候選人後按「確認投票」。選票會在您的裝置上加密，送出後無法更改。</p>
+      <p class="lead">第 2 步，共 2 步。選擇一位候選人後按「確認投票」。選票會在您的裝置上加密，送出後無法更改。</p>
     </div>
 
     <div id="deadlineCard" class="alert alert-info hidden">
@@ -1185,13 +1201,26 @@ _VOTE_HTML = """<!DOCTYPE html>
       <button id="voteBtn" class="btn btn-primary btn-block" type="button" onclick="doVote()" disabled>
         <span id="voteIcon" aria-hidden="true"></span><span id="voteText">確認投票</span>
       </button>
-      <ol id="voteProgress" class="steps hidden" aria-live="polite"></ol>
+      <div id="voteFlow" class="vote-flow hidden">
+        <div class="vote-flow-head" aria-live="polite">
+          <span id="voteZheng" class="vote-zheng" aria-hidden="true"></span>
+          <p id="voteFlowTitle" class="vote-flow-title">投票中，請不要關閉這個頁面</p>
+        </div>
+        <ol id="voteSheet" class="sheet vote-sheet" aria-label="投票進度">
+          <li data-state="wait"><span class="no">一</span><span class="vote-label">確認您有投票資格</span><span class="check-mark"></span></li>
+          <li data-state="wait"><span class="no">二</span><span class="vote-label">在您的手機上算出選票識別碼</span><span class="check-mark"></span></li>
+          <li data-state="wait"><span class="no">三</span><span class="vote-label">選票蒙住後取得簽章</span><span class="check-mark"></span></li>
+          <li data-state="wait"><span class="no">四</span><span class="vote-label">把選票封進數位信封</span><span class="check-mark"></span></li>
+          <li data-state="wait"><span class="no">五</span><span class="vote-label">送出選票</span><span class="check-mark"></span></li>
+        </ol>
+        <details class="vote-tech"><summary>技術細節</summary><ol id="voteProgress" class="steps"></ol></details>
+      </div>
     </section>
 
     <section id="successCard" class="alert alert-ok hidden stack-sm" role="status">
       <p class="alert-title">已收到您的選票</p>
       <p><span class="badge badge-warn">已排隊，尚未確認計入</span></p>
-      <p class="small">為了保護匿名性，選票會和其他選民的票一起批次送出，所以不會立刻出現在計票中心，這是正常的。請先下載驗票回執存到手機，開票後到公告板按「匯入回執驗票」選擇這個檔案，就能確認您的票已被計入。</p>
+      <p class="small">為了保護匿名性，選票會和其他選民的票一起批次送出，所以不會立刻出現在計票中心，這是正常的。請先下載驗票回執存到手機，開票後到公告板「驗證我的選票」按「選擇回執檔」選這個檔案，就能確認您的票已被計入。</p>
       <p class="row"><button type="button" class="btn btn-sm btn-primary" onclick="downloadVoteReceipt()">下載驗票回執</button><a class="btn btn-sm" href="{{ bb_receipt_url }}" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">開票後前往公告板驗票</a><a class="small" href="/status">查看完整回執</a></p>
       <p class="small muted">回執檔只有選票識別碼，不含學號和投票對象，存在手機裡也不會洩漏您投給誰。選票識別碼（m_hex）：</p>
       <code id="successMhex" class="hash"></code>
@@ -1202,6 +1231,29 @@ _VOTE_HTML = """<!DOCTYPE html>
 </main>
 
 <script>
+""" + ZHENG_JS + """
+const VOTE_MARK = { ok: """ + repr(MARK_OK) + """, fail: """ + repr(MARK_FAIL) + """, wait: """ + repr(MARK_WAIT) + """, run: """ + repr(MARK_WAIT) + """ };
+let _phase = 0;
+// 投票進度第 n 步完成（1–5）：該列畫一筆、正字多一筆，下一列變成進行中
+function votePhase(n) {
+  _phase = n;
+  const rows = document.querySelectorAll('#voteSheet > li');
+  rows.forEach((li, i) => {
+    const st = i < n ? 'ok' : i === n ? 'run' : 'wait';
+    const mark = li.querySelector('.check-mark');
+    if (st === 'ok' && li.dataset.state !== 'ok') { mark.textContent = ''; mark.appendChild(zhengStrokeSvg(i, true)); }
+    else if (st !== 'ok') mark.innerHTML = VOTE_MARK[st];
+    li.dataset.state = st;
+  });
+  const box = document.getElementById('voteZheng');
+  box.textContent = '';
+  box.appendChild(zhengSvg(n, 52, n > 0));
+}
+function voteFail() {
+  const li = document.querySelectorAll('#voteSheet > li')[_phase];
+  if (li) { li.dataset.state = 'fail'; li.querySelector('.check-mark').innerHTML = VOTE_MARK.fail; }
+  document.getElementById('voteFlowTitle').textContent = '這一步沒有完成';
+}
 let _selectedCandidate = null;
 let _privateKey = null, _certPem = null, _voterId = null;
 
@@ -1292,12 +1344,12 @@ function selectCandidate(c) {
 
 function addStep(msg, ok) {
   const list = document.getElementById('voteProgress');
-  list.classList.remove('hidden');
+  document.getElementById('voteFlow').classList.remove('hidden');
   const li = document.createElement('li');
   li.className = ok === true ? 'step-ok' : ok === false ? 'step-err' : 'step-run';
   const mark = document.createElement('span');
   mark.className = 'mark';
-  mark.textContent = ok === true ? '✓' : ok === false ? '✗' : '…';
+  mark.textContent = ok === true ? '完成' : ok === false ? '失敗' : '進行';
   const text = document.createElement('span');
   text.textContent = msg;
   li.append(mark, text);
@@ -1318,6 +1370,7 @@ async function doVote() {
     const candidate = _selectedCandidate;
 
     // Step 1: 取得公鑰 + 憑證
+    votePhase(0);
     addStep('取得 TPA / CC / TA 公鑰與憑證...');
     const [tpaR, ccR, taR] = await Promise.all([
       fetch('/api/proxy/tpa/public_key').then(r=>r.json()),
@@ -1369,6 +1422,7 @@ async function doVote() {
     const votingToken = authData.voting_token;
     if (!votingToken) throw new Error('TPA 未核發 Voting Token，無法繼續投票流程');  // <3
     addStep('TPA 認證成功', true);
+    votePhase(1);
 
     // Step 3: 計算選票雜湊 m（FDH 預處理）
     addStep('計算選票雜湊值...');
@@ -1384,6 +1438,7 @@ async function doVote() {
     const m_hex      = outerHash;                   // 64-char hex，不含 0x
     const m_bytes    = hexToBytes(m_hex);            // 32 bytes
     addStep(`m = ${m_hex.slice(0,16)}...`, true);
+    votePhase(2);
 
     // Step 4: FDH + 盲化
     addStep('FDH 擴展 + 盲化選票...');
@@ -1412,6 +1467,7 @@ async function doVote() {
     if (modpow(S_prime, tpa_e, tpa_n) !== mu_check) throw new Error('盲簽章本地驗證失敗');
     const s_prime_hex = '0x' + S_prime.toString(16);
     addStep('盲簽章驗證通過', true);
+    votePhase(3);
 
     // Step 7: 封裝數位信封
     addStep('封裝 AES-GCM + RSA-OAEP 數位信封...');
@@ -1434,6 +1490,7 @@ async function doVote() {
     const token_hash = await sha256Hex(votingToken.payload.token_id);  // <3
     const envelope = { c_data, iv, tag, aad, c_key, token_hash };
     addStep('信封封裝完成', true);
+    votePhase(4);
 
     // Step 8: 提交信封（v3.0 修正：不再直接送到 CC，而是先進選民端本地
     // 佇列，由背景排程湊滿批次或接近截止時間才打亂順序一次送出，避免
@@ -1446,6 +1503,8 @@ async function doVote() {
     const submitData = await submitResp.json();
     if (submitData.status !== 'queued') throw new Error('信封提交失敗：' + (submitData.message || submitData.code || ''));
     addStep('已收到，將於稍後批次送出', true);
+    votePhase(5);
+    document.getElementById('voteFlowTitle').textContent = '五步都完成了，選票已收到';
 
     // Step 9: 儲存回執（v3.0 修正：只存本機 IndexedDB，伺服器端完全不接觸
     // 「voter_id ↔ vote」的對應關係，避免留下一份能直接匯出全體選民投票
@@ -1467,6 +1526,7 @@ async function doVote() {
 
   } catch(e) {
     addStep(e.message, false);
+    voteFail();
     const errCard = document.getElementById('errorCard');
     errCard.textContent = e.message;
     errCard.classList.remove('hidden');
@@ -1540,7 +1600,7 @@ _STATUS_HTML = """<!DOCTYPE html>
       </dl>
       <p><button type="button" class="btn btn-primary btn-block" onclick="downloadVoteReceipt()">下載驗票回執</button></p>
       <p><a class="btn btn-block" href="{{ bb_receipt_url }}" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">開票後前往公告板驗票</a></p>
-      <div class="alert alert-info small">開票後，到公告板按「匯入回執驗票」選擇下載的檔案，或在「驗證選票」輸入上面的 m_hex，就能確認您的票有被計入，而且不必透露您投給誰。回執檔不含學號、SN 和投票對象。</div>
+      <p class="small muted" style="border-top:1px solid var(--rule); padding-top:12px">開票後，到公告板「驗證我的選票」按「選擇回執檔」選擇下載的檔案，或輸入上面的選票識別碼，就能確認您的票有被計入，而且不必透露您投給誰。回執檔不含學號、SN 和投票對象。</p>
     </section>
 
     <section id="emptyCard" class="card text-center stack hidden">
@@ -1557,7 +1617,8 @@ _STATUS_HTML = """<!DOCTYPE html>
   const rec = await idbLoad('voteReceipt');
   if (rec) {
     document.getElementById('recVotedAt').textContent = rec.voted_at
-      ? new Date(rec.voted_at * 1000).toLocaleString() : '';
+      ? new Intl.DateTimeFormat('sv-SE', { timeZone: 'Asia/Taipei', year: 'numeric', month: '2-digit', day: '2-digit',
+          hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }).format(new Date(rec.voted_at * 1000)) + '（台灣時間）' : '';
     document.getElementById('recVoterId').textContent = rec.voter_id || '';
     document.getElementById('recSn').textContent = rec.sn || '';
     document.getElementById('recVote').textContent = rec.vote || '';
@@ -1599,7 +1660,7 @@ _RESULTS_HTML = """<!DOCTYPE html>
   <div class="container stack-lg">
     <div class="stack-sm">
       <h1>開票狀態</h1>
-      <p class="lead">開票結果只在公告板公布。那裡的結果由計票中心簽章，您也可以匯入回執，確認自己的票已被計入。</p>
+      <p class="lead">開票結果只在公告板公布，由計票中心簽章。開票後也可以在公告板「驗證我的選票」選擇回執檔，確認自己的票已被計入。</p>
     </div>
 
     <section id="votedCard" class="alert alert-ok hidden stack-sm" role="status">

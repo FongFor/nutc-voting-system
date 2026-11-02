@@ -1,0 +1,398 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-11-02T17:16:37+00:00",
+  "title": "Design System: NUTC 線上投票",
+  "extensions": {
+    "colorMeta": {
+      "navy-ink": {
+        "role": "primary",
+        "displayName": "海軍藍墨水 Navy Ink",
+        "canonical": "#13253b",
+        "tonalRamp": [
+          "#060c14",
+          "#0a1626",
+          "#13253b",
+          "#25405f",
+          "#3f5d82",
+          "#6f88a8",
+          "#a9b9cd",
+          "#e2e7ee"
+        ]
+      },
+      "navy-ink-deep": {
+        "role": "primary",
+        "displayName": "深墨 Navy Ink Deep",
+        "canonical": "#0a1626"
+      },
+      "vermilion": {
+        "role": "secondary",
+        "displayName": "朱紅 Vermilion",
+        "canonical": "#c8361f",
+        "tonalRamp": [
+          "#3a120b",
+          "#6a1d11",
+          "#9a2817",
+          "#c8361f",
+          "#e0573f",
+          "#ff7a5c",
+          "#f5b3a5",
+          "#fbe9e5"
+        ]
+      },
+      "rule-line": {
+        "role": "secondary",
+        "displayName": "朱紅列線 Rule Line",
+        "canonical": "rgba(200, 54, 31, 0.32)"
+      },
+      "ok-green": {
+        "role": "tertiary",
+        "displayName": "墨綠 Ok Green",
+        "canonical": "#1f6b45",
+        "tonalRamp": [
+          "#0b2618",
+          "#15301f",
+          "#1f6b45",
+          "#2f8a5b",
+          "#4fae7d",
+          "#76d39d",
+          "#b5e6c8",
+          "#e4f0e8"
+        ]
+      },
+      "err-red": {
+        "role": "tertiary",
+        "displayName": "錯誤紅 Err Red",
+        "canonical": "#b3261e",
+        "tonalRamp": [
+          "#2a0f0d",
+          "#3a1c1a",
+          "#7d1a14",
+          "#b3261e",
+          "#d9554c",
+          "#ff8e84",
+          "#f6c2bc",
+          "#f8e6e3"
+        ]
+      },
+      "warn-ochre": {
+        "role": "tertiary",
+        "displayName": "黃褐 Warn Ochre",
+        "canonical": "#8a5a00",
+        "tonalRamp": [
+          "#241900",
+          "#33270f",
+          "#5e3e00",
+          "#8a5a00",
+          "#b9800f",
+          "#f0bd5a",
+          "#f5d9a0",
+          "#f7ecd6"
+        ]
+      },
+      "ballot-paper": {
+        "role": "neutral",
+        "displayName": "暖白紙 Ballot Paper",
+        "canonical": "#f6f5f1",
+        "tonalRamp": [
+          "#2b2a26",
+          "#4a4842",
+          "#6c6a62",
+          "#8a8578",
+          "#b5afa2",
+          "#d5d1c6",
+          "#eceae3",
+          "#f6f5f1"
+        ]
+      },
+      "surface-white": {
+        "role": "neutral",
+        "displayName": "白紙面 Surface White",
+        "canonical": "#ffffff"
+      },
+      "surface-sunk": {
+        "role": "neutral",
+        "displayName": "凹紙面 Surface Sunk",
+        "canonical": "#eceae3"
+      },
+      "border-hairline": {
+        "role": "neutral",
+        "displayName": "淡線 Border Hairline",
+        "canonical": "#d5d1c6"
+      },
+      "border-ink": {
+        "role": "neutral",
+        "displayName": "墨線 Border Ink",
+        "canonical": "#8a8578"
+      },
+      "muted-ink": {
+        "role": "neutral",
+        "displayName": "淡墨 Muted Ink",
+        "canonical": "#4c5866"
+      },
+      "accent-soft": {
+        "role": "neutral",
+        "displayName": "淡藍底 Accent Soft",
+        "canonical": "#e2e7ee"
+      },
+      "link-blue": {
+        "role": "neutral",
+        "displayName": "連結藍 Link Blue",
+        "canonical": "#1d4f91",
+        "tonalRamp": [
+          "#0b1d36",
+          "#123160",
+          "#1d4f91",
+          "#336bb5",
+          "#5a8bd0",
+          "#9cc3f5",
+          "#c9ddf8",
+          "#eaf2fd"
+        ]
+      },
+      "night-bg": {
+        "role": "neutral",
+        "displayName": "夜色底 Night",
+        "canonical": "#0d1724"
+      },
+      "night-shell": {
+        "role": "neutral",
+        "displayName": "夜色頂欄 Night Shell",
+        "canonical": "#091220"
+      },
+      "night-vermilion": {
+        "role": "secondary",
+        "displayName": "亮朱紅 Night Vermilion",
+        "canonical": "#ff7a5c"
+      },
+      "night-rule-line": {
+        "role": "secondary",
+        "displayName": "夜色列線 Night Rule Line",
+        "canonical": "rgba(255, 122, 92, 0.30)"
+      }
+    },
+    "typographyMeta": {
+      "verdict": {
+        "displayName": "Verdict",
+        "purpose": "驗證結論標題，顏色跟隨結論語氣。Ballot Heading 子集。"
+      },
+      "headline": {
+        "displayName": "Headline",
+        "purpose": "每頁 h1 與頂欄品名。Ballot Heading 子集；新字需重新產生子集。"
+      },
+      "tally-numeral": {
+        "displayName": "Tally Numeral",
+        "purpose": "開票結果的得票數。"
+      },
+      "title": {
+        "displayName": "Title",
+        "purpose": "h2、區塊標題、候選人名；系統字型 800。"
+      },
+      "body": {
+        "displayName": "Body",
+        "purpose": "內文，說明段落 62–65ch。"
+      },
+      "label": {
+        "displayName": "Label",
+        "purpose": "欄位名稱。"
+      },
+      "mono": {
+        "displayName": "Mono",
+        "purpose": "學號、OTP、雜湊值、選票識別碼。"
+      }
+    },
+    "shadows": [
+      {
+        "name": "run-row-lift",
+        "value": "0 6px 16px rgba(19, 37, 59, 0.14)",
+        "purpose": "只給計票紙上正在執行的那一列；同時最多一列。"
+      }
+    ],
+    "motion": [
+      {
+        "name": "zheng-stroke",
+        "value": "260ms cubic-bezier(0.16, 1, 0.3, 1)",
+        "purpose": "正字逐筆畫出（stroke-dashoffset 100→0），僅在 prefers-reduced-motion: no-preference 時播放。"
+      },
+      {
+        "name": "sheet-row-state",
+        "value": "180ms ease",
+        "purpose": "計票紙列的底色與浮起轉換。"
+      },
+      {
+        "name": "scroll-to-verdict",
+        "value": "smooth; auto when prefers-reduced-motion: reduce",
+        "purpose": "捲動到結論或樹狀圖。"
+      }
+    ],
+    "breakpoints": [
+      {
+        "name": "sm",
+        "value": "640px"
+      },
+      {
+        "name": "flow",
+        "value": "860px"
+      },
+      {
+        "name": "tree-wide",
+        "value": "900px"
+      }
+    ],
+    "focus": {
+      "value": "outline: 3px solid var(--focus); outline-offset: 2px",
+      "token": "--focus = vermilion（淺 #c8361f／深 #ff7a5c）"
+    },
+    "inkLine": {
+      "token": "--ink-line",
+      "value": "1.5px"
+    },
+    "headingFont": {
+      "family": "Ballot Heading",
+      "src": "/assets/ballot-heading-900.woff2",
+      "weight": 900,
+      "display": "swap",
+      "origin": "Noto Sans TC 2.04，fontTools instancer wght=900 + glyph subset，SIL OFL 1.1",
+      "rule": "只含目前標題用字；改動標題文字必須重新產生子集。"
+    },
+    "scope": "只涵蓋投票網站（voter_client）與公告板（bb_server）；Admin 與各服務儀表板只用 shared/ui_style.py，不在範圍內。",
+    "externalResources": "none"
+  },
+  "components": [
+    {
+      "name": "主要按鈕",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "主要動作；海軍藍底、暖白字，最小高 48px。",
+      "html": "<button class=\"ds-btn-primary\">看您的票怎麼連到樹根</button>",
+      "css": ".ds-btn-primary{display:inline-flex;align-items:center;justify-content:center;min-height:48px;padding:10px 18px;border-radius:2px;border:1.5px solid #13253b;background:#13253b;color:#f6f5f1;font-weight:700;font-size:.95rem;cursor:pointer}.ds-btn-primary:hover{background:#0a1626;border-color:#0a1626}.ds-btn-primary:focus-visible{outline:3px solid #c8361f;outline-offset:2px}"
+    },
+    {
+      "name": "次要按鈕",
+      "kind": "button",
+      "refersTo": "button-secondary",
+      "description": "白紙面、墨水色框的次要動作。",
+      "html": "<button class=\"ds-btn\">驗證另一張選票</button>",
+      "css": ".ds-btn{display:inline-flex;align-items:center;justify-content:center;min-height:48px;padding:10px 18px;border-radius:2px;border:1.5px solid #13253b;background:#fff;color:#13253b;font-weight:700;font-size:.95rem;cursor:pointer}.ds-btn:hover{background:#eceae3}.ds-btn:focus-visible{outline:3px solid #c8361f;outline-offset:2px}"
+    },
+    {
+      "name": "輸入框",
+      "kind": "input",
+      "refersTo": "input",
+      "description": "1.5px 墨線、2px 圓角、16px 字；聚焦時墨框加朱紅外框。",
+      "html": "<label class=\"ds-label\" for=\"ds-otp\">一次性密碼（OTP）</label><input id=\"ds-otp\" class=\"ds-input\" placeholder=\"請輸入信件中的 OTP\">",
+      "css": ".ds-label{display:block;font-weight:600;font-size:.92rem;margin-bottom:6px;color:#13253b}.ds-input{display:block;width:100%;min-height:48px;padding:10px 12px;font-size:16px;background:#fff;color:#13253b;border:1.5px solid #8a8578;border-radius:2px;font-family:ui-monospace,Consolas,monospace}.ds-input:focus{outline:3px solid #c8361f;outline-offset:0;border-color:#13253b}"
+    },
+    {
+      "name": "頂欄",
+      "kind": "nav",
+      "refersTo": "topbar",
+      "description": "海軍藍頂欄，下緣 3px 朱紅列線；品名用 900 標題字。",
+      "html": "<header class=\"ds-topbar\"><span class=\"ds-brand\"><b>NUTC 線上投票</b><small>驗證選票</small></span><button class=\"ds-topbtn\">深色</button></header>",
+      "css": ".ds-topbar{display:flex;align-items:center;gap:12px;min-height:60px;padding:8px 16px;background:#13253b;color:#f6f5f1;border-bottom:3px solid #c8361f}.ds-brand{display:flex;flex-direction:column;margin-right:auto}.ds-brand b{font-weight:900;letter-spacing:.02em}.ds-brand small{font-size:.8rem;color:rgba(246,245,241,.78)}.ds-topbtn{min-height:40px;padding:6px 12px;border-radius:2px;background:transparent;color:#f6f5f1;border:1.5px solid rgba(246,245,241,.55);font-weight:700;cursor:pointer}.ds-topbtn:hover{background:rgba(246,245,241,.12)}.ds-topbtn:focus-visible{outline:3px solid #c8361f;outline-offset:2px}"
+    },
+    {
+      "name": "標籤",
+      "kind": "chip",
+      "refersTo": "badge",
+      "description": "方角標籤，前綴 6px 小方塊。",
+      "html": "<span class=\"ds-badge ds-badge-ok\">CC 已簽章公告</span>",
+      "css": ".ds-badge{display:inline-flex;align-items:center;gap:6px;padding:2px 10px;border-radius:2px;font-size:.8rem;font-weight:600;border:1.5px solid #8a8578;color:#4c5866;background:#fff}.ds-badge::before{content:\"\";width:6px;height:6px;border-radius:1px;background:currentColor}.ds-badge-ok{color:#1f6b45;border-color:currentColor;background:#e4f0e8}"
+    },
+    {
+      "name": "卡片",
+      "kind": "card",
+      "refersTo": "card",
+      "description": "白紙面、1.5px 墨線、2px 圓角、無陰影。",
+      "html": "<div class=\"ds-card\"><h2>您的票有被算進去嗎？</h2><p>匯入投票後下載的回執檔，在您自己的手機上確認。</p></div>",
+      "css": ".ds-card{background:#fff;border:1.5px solid #8a8578;border-radius:2px;padding:20px;color:#13253b}.ds-card h2{margin:0 0 6px;font-size:1.2rem;font-weight:800}.ds-card p{margin:0;color:#4c5866;line-height:1.6}"
+    },
+    {
+      "name": "選票方格",
+      "kind": "custom",
+      "refersTo": "choice",
+      "description": "候選人選項；選中時方格填墨。",
+      "html": "<button class=\"ds-choice\">候選人甲</button><button class=\"ds-choice is-selected\">候選人乙</button>",
+      "css": ".ds-choice{display:flex;align-items:center;gap:14px;width:100%;min-height:60px;padding:14px 16px;margin-top:10px;font-size:1.05rem;font-weight:600;background:#fff;color:#13253b;border:1.5px solid #8a8578;border-radius:2px;cursor:pointer;text-align:left}.ds-choice::before{content:\"\";width:22px;height:22px;flex:none;border-radius:2px;border:2px solid #13253b;background:#fff}.ds-choice:hover{border-color:#13253b}.ds-choice:focus-visible{outline:3px solid #c8361f;outline-offset:2px}.ds-choice.is-selected{border:2px solid #13253b;background:#e2e7ee}.ds-choice.is-selected::before{background:#13253b;box-shadow:inset 0 0 0 4px #fff}"
+    },
+    {
+      "name": "計票紙與筆跡記號",
+      "kind": "custom",
+      "refersTo": "sheet-row",
+      "description": "每列落在一條朱紅列線上；狀態為一筆、紅叉、斜線、空格；進行中的列浮起。",
+      "html": "<ol class=\"ds-sheet\"><li><span class=\"ds-no\">一</span><span>從投票網站取得 CA 根憑證</span><svg class=\"ds-mark\" viewBox=\"0 0 26 26\"><path d=\"M3 14 L23 12\"/></svg></li><li class=\"run\"><span class=\"ds-no\">二</span><span>計票中心的憑證是 CA 簽發的</span><span class=\"ds-wait\"></span></li><li><span class=\"ds-no\">三</span><span>開票結果上的 CC 簽章有效</span><svg class=\"ds-mark fail\" viewBox=\"0 0 26 26\"><path d=\"M5 5 L21 21 M21 5 L5 21\"/></svg></li><li><span class=\"ds-no\">四</span><span>名單裡有您的票</span><svg class=\"ds-mark skip\" viewBox=\"0 0 26 26\"><path d=\"M4 22 L22 4\"/></svg></li></ol>",
+      "css": ".ds-sheet{list-style:none;margin:0;padding:0;border-top:2px solid #13253b;color:#13253b;background:#f6f5f1}.ds-sheet>li{display:grid;grid-template-columns:2em minmax(0,1fr) auto;align-items:center;gap:4px 10px;min-height:56px;padding:8px 10px;border-bottom:1px solid rgba(200,54,31,.32);font-weight:700;transition:background-color 180ms ease,box-shadow 180ms ease}.ds-sheet>li.run{background:#fff;box-shadow:0 6px 16px rgba(19,37,59,.14);position:relative}.ds-no{font-size:.85rem;color:#4c5866}.ds-mark{width:26px;height:26px;margin:2px;fill:none;stroke:#13253b;stroke-width:3.5;stroke-linecap:round}.ds-mark.fail{stroke:#b3261e}.ds-mark.skip{stroke:#8a8578}.ds-wait{width:22px;height:22px;margin:4px;border:1.5px dashed #8a8578}"
+    },
+    {
+      "name": "正字",
+      "kind": "custom",
+      "refersTo": "verdict-zheng-box",
+      "description": "五筆正字，第五筆朱紅，逐筆畫出；尊重減少動態設定。",
+      "html": "<span class=\"ds-zbox\"><svg class=\"ds-zheng\" viewBox=\"0 0 100 100\" width=\"76\" height=\"76\"><path pathLength=\"100\" d=\"M18 18 L82 17\"/><path pathLength=\"100\" d=\"M50 18 L50 84\"/><path pathLength=\"100\" d=\"M50 50 L78 50\"/><path pathLength=\"100\" d=\"M25 50 L25 84\"/><path class=\"s5\" pathLength=\"100\" d=\"M12 85 L88 84\"/></svg></span>",
+      "css": ".ds-zbox{width:96px;height:96px;display:grid;place-items:center;background:#fff;border:2px solid #13253b;color:#13253b}.ds-zheng path{fill:none;stroke:currentColor;stroke-width:10;stroke-linecap:round}.ds-zheng path.s5{stroke:#c8361f}@media (prefers-reduced-motion:no-preference){.ds-zheng path{stroke-dasharray:100;stroke-dashoffset:100;animation:ds-zs 260ms cubic-bezier(.16,1,.3,1) forwards}.ds-zheng path:nth-child(2){animation-delay:.26s}.ds-zheng path:nth-child(3){animation-delay:.52s}.ds-zheng path:nth-child(4){animation-delay:.78s}.ds-zheng path:nth-child(5){animation-delay:1.04s}@keyframes ds-zs{to{stroke-dashoffset:0}}}"
+    }
+  ],
+  "narrative": {
+    "northStar": "開票所的計票紙",
+    "overview": "這套視覺借每個台灣選民都看過的開票所計票紙：暖白紙底、海軍藍墨水、朱紅列線，每完成一步就多畫一筆正字。選民不用讀說明，只要看正字畫到第幾筆，就知道自己完成到哪、票有沒有被收下、開票後有沒有被算進去。狀態全是手寫筆跡，不是圖示；版面是紙上的列，不是浮起的卡片堆。\n\n範圍只有對外兩站：**投票網站（voter_client）與公告板（bb_server）**。這兩站載入 `shared/ui_style.py` 的基礎層，再疊上 `shared/ui_ballot.py` 的計票紙層（`BALLOT_HEAD`）。Admin 後台與各服務儀表板只用 `ui_style.py`，不屬於這個世界，也不要把計票紙的元件或配色帶過去。\n\n密度適中、單手為先：內容欄寬 720px，按鈕最小高 48px，每一列計票紙最小高 56px。拒絕的方向（使用者確認）：白底藍按鈕、盾牌與打勾圖示的「公民科技」頁面，以及深色霓虹的加密貨幣風。",
+    "keyCharacteristics": [
+      "暖白紙底 `ballot-paper` 與海軍藍墨水 `navy-ink` 是使用者指定色，兩站必用。",
+      "朱紅是筆，不是底色：正字最後一筆、計票紙列線、頂欄下緣、焦點框、「您的票」標記。",
+      "1.5px 墨線框、2px 極小圓角、字重 900 的標題。",
+      "正字逐筆：一步一筆，五步成一個「正」。",
+      "狀態用筆跡記號：空格、一筆、紅叉、斜線。",
+      "不載入任何外部資源，標題字型自帶。"
+    ],
+    "rules": [
+      {
+        "name": "The Pinned Pair Rule",
+        "body": "`#13253b` 與 `#f6f5f1` 是使用者指定色，兩站在兩種主題中都必須出現（淺色：墨與紙；深色：頂欄字與筆跡）。不得替換成相近色。",
+        "section": "colors"
+      },
+      {
+        "name": "The Vermilion Is a Pen Rule",
+        "body": "朱紅只畫線：筆畫、列線、外框、底線、焦點框。不拿來填大面積底色，也不拿來當按鈕底色。",
+        "section": "colors"
+      },
+      {
+        "name": "The Status Has Its Own Inks Rule",
+        "body": "通過、錯誤、警示各用自己的 `ok`、`err`、`warn` 色組；錯誤紅與朱紅是兩個 token，不要互相替代。",
+        "section": "colors"
+      },
+      {
+        "name": "The Subset Glyph Rule",
+        "body": "`ballot-heading-900.woff2` 只含兩站目前標題用到的字（約 19 KB）。只有 h1、品名、結論標題、得票數、投票進度標題使用 `--heading`。新增或改寫這些位置的文字時，必須用 fontTools 從 NotoSansTC-VF 重新產生子集（instancer wght=900 + subset，見 `shared/static/ballot-heading-900.LICENSE.txt`）；否則缺字會退回系統字型，同一行出現兩種字形。h2 以下不用標題字型。",
+        "section": "typography"
+      },
+      {
+        "name": "The No External Font Rule",
+        "body": "字型一律由各站自己的 `/assets/` 路徑提供，不向任何字型服務請求。",
+        "section": "typography"
+      },
+      {
+        "name": "The Flat Paper Rule",
+        "body": "靜止時一切平貼紙面；陰影只表示「這一列正在進行」，同一時間最多一列。",
+        "section": "elevation"
+      }
+    ],
+    "dos": [
+      "**Do** 讓兩站在兩種主題都出現 `#13253b` 與 `#f6f5f1`（The Pinned Pair Rule）。",
+      "**Do** 用正字表示進度與票數：一步一筆、5 票一字，旁邊附上數字。",
+      "**Do** 狀態用筆跡記號（空格、一筆、紅叉、斜線），並以文字或 `aria-label` 說出狀態。",
+      "**Do** 讓計票紙每一列對齊一條朱紅列線（`rule-line`）；列線就是分隔線。",
+      "**Do** 框線用 1.5px 墨線、圓角 2px、主要動作最小高 48px。",
+      "**Do** 焦點一律 3px 朱紅外框（`--focus`），淺深兩色都清楚可見。",
+      "**Do** 新增標題文字時重新產生 Ballot Heading 子集（The Subset Glyph Rule）。",
+      "**Do** 所有動態都有 `prefers-reduced-motion` 對應。",
+      "**Do** 字型、圖示、腳本全部自帶；圖示一律內嵌 SVG。"
+    ],
+    "donts": [
+      "**Don't** 載入任何外部字型、CDN、腳本或圖片；選民投票時第三方不該收到連線。",
+      "**Don't** 把計票紙層（`BALLOT_HEAD`、正字、筆跡記號、海軍藍頂欄）用到 Admin 或各服務儀表板。",
+      "**Don't** 用盾牌、勾勾徽章或白底藍按鈕的「公民科技」樣式，也不要深色霓虹的加密貨幣風。",
+      "**Don't** 用朱紅填大面積底色或當按鈕底色（The Vermilion Is a Pen Rule）。",
+      "**Don't** 給卡片加陰影；陰影只屬於正在進行的那一列（The Flat Paper Rule）。",
+      "**Don't** 用粗左邊框的提示框、圓點標籤或圓形選票方格。",
+      "**Don't** 在標題位置使用子集外的字而不重新產生字型。"
+    ]
+  }
+}
