@@ -603,8 +603,8 @@ async function idbSave(entries) {
     const tx = db.transaction('kv', 'readwrite');
     const s  = tx.objectStore('kv');
     for (const [k, v] of Object.entries(entries)) s.put(v, k);
-    tx.oncomplete = res;
-    tx.onerror    = () => rej(tx.error);
+    tx.oncomplete = () => { db.close(); res(); };
+    tx.onerror    = () => { db.close(); rej(tx.error); };
   });
 }
 async function idbLoad(key) {
@@ -612,12 +612,35 @@ async function idbLoad(key) {
   return new Promise((res, rej) => {
     const tx = db.transaction('kv', 'readonly');
     const r  = tx.objectStore('kv').get(key);
+    // 每次用完就關閉連線：開著的連線會擋住新一輪重置時的 deleteDatabase
+    tx.oncomplete = () => db.close();
     r.onsuccess = () => res(r.result ?? null);
-    r.onerror   = () => rej(r.error);
+    r.onerror   = () => { db.close(); rej(r.error); };
   });
 }
 async function idbHasCert() {
   return !!(await idbLoad('certPem'));
+}
+
+/* ---------- 新一輪重置偵測 ----------
+   Admin 按「結束本輪並重置」會清空 CA 名冊；這台裝置上的金鑰、憑證與回執都屬於
+   上一輪。偵測到時清除本機資料並導向重新綁定。回傳 true 表示已導向，呼叫端應停止。
+   查不到（網路錯誤）時不做任何事，避免誤刪。 */
+async function redirectIfNewRound() {
+  let voterId = null;
+  try { voterId = await idbLoad('voterId'); } catch (_) { return false; }
+  if (!voterId) return false;
+  try {
+    const r = await fetch(`/api/proxy/ca/voter_status?voter_id=${encodeURIComponent(voterId)}`, { cache: 'no-store' });
+    const d = await r.json();
+    if (d.registered !== false) return false;
+  } catch (_) { return false; }
+  await new Promise(res => {
+    const req = indexedDB.deleteDatabase('voter-crypto');
+    req.onsuccess = res; req.onerror = res; req.onblocked = res;
+  });
+  location.replace('/register?reason=new_round');
+  return true;
 }
 
 /* ---------- 驗票回執檔（公告板「驗證我的選票」讀取） ----------
@@ -1268,18 +1291,7 @@ async function init() {
   document.getElementById('voterIdDisplay').textContent = _voterId || '—';
 
   // 1.5 自動偵測新一輪重置（CA 名冊已清除 → 自動清除舊憑證並導向重新綁定）
-  try {
-    const caResp = await fetch(`/api/proxy/ca/voter_status?voter_id=${encodeURIComponent(_voterId)}`);
-    const caData = await caResp.json();
-    if (caData.registered === false) {
-      await new Promise(res => {
-        const req = indexedDB.deleteDatabase('voter-crypto');
-        req.onsuccess = res; req.onerror = res;
-      });
-      location.href = '/register?reason=new_round';
-      return;
-    }
-  } catch(_) {}
+  if (await redirectIfNewRound()) return;
 
   // 2. 確認未重複投票（v3.0 修正：回執只存在本機 IndexedDB，不再問伺服器；
   //    這裡查得到的只是「這台裝置」是否投過票，真正防重複投票的關卡在
@@ -1614,6 +1626,7 @@ _STATUS_HTML = """<!DOCTYPE html>
 // v3.0 修正：回執只存在本機 IndexedDB，這裡直接讀本機資料渲染，
 // 伺服器端完全不參與、也看不到任何一筆「身分 ↔ 投票內容」的對應。 <3
 (async function () {
+  if (await redirectIfNewRound()) return;
   const rec = await idbLoad('voteReceipt');
   if (rec) {
     document.getElementById('recVotedAt').textContent = rec.voted_at
@@ -1696,6 +1709,7 @@ let _timer = null;
 let _voted = false;
 
 async function load() {
+  if (await redirectIfNewRound()) { clearInterval(_timer); return; }
   try {
     const [res, dl] = await Promise.all([
       fetch('/api/tally_status', { cache: 'no-store' }).then(r => r.json()),
@@ -1719,7 +1733,6 @@ async function load() {
         badge.className = 'badge badge-info';
         badge.textContent = '已開票，請到公告板確認是否計入';
       }
-      clearInterval(_timer);
       return;
     }
     document.getElementById('pendingText').textContent = dl.deadline_str
