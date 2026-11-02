@@ -1221,7 +1221,7 @@ _VOTE_HTML = """<!DOCTYPE html>
       <p class="alert-title">已收到您的選票</p>
       <p><span class="badge badge-warn">已排隊，尚未確認計入</span></p>
       <p class="small">為了保護匿名性，選票會和其他選民的票一起批次送出，所以不會立刻出現在計票中心，這是正常的。請先下載驗票回執存到手機，開票後到公告板「驗證我的選票」按「選擇回執檔」選這個檔案，就能確認您的票已被計入。</p>
-      <p class="row"><button type="button" class="btn btn-sm btn-primary" onclick="downloadVoteReceipt()">下載驗票回執</button><a class="btn btn-sm" href="{{ bb_receipt_url }}" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">開票後前往公告板驗票</a><a class="small" href="/status">查看完整回執</a></p>
+      <p class="row"><button type="button" class="btn btn-sm btn-primary" onclick="downloadVoteReceipt()">下載驗票回執</button><a class="btn btn-sm" href="/results">查看開票狀態</a><a class="btn btn-sm" href="{{ bb_receipt_url }}" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">開票後前往公告板驗票</a><a class="small" href="/status">查看完整回執</a></p>
       <p class="small muted">回執檔只有選票識別碼，不含學號和投票對象，存在手機裡也不會洩漏您投給誰。選票識別碼（m_hex）：</p>
       <code id="successMhex" class="hash"></code>
     </section>
@@ -1521,8 +1521,8 @@ async function doVote() {
     document.getElementById('successMhex').textContent = m_hex;
     document.getElementById('voteForm').classList.add('is-disabled');
     document.getElementById('voteText').textContent = '已完成投票';
-    // 投完票轉到開票狀態頁（尚未開票時顯示「尚未開票」，回執也能在那裡下載）
-    setTimeout(() => location.replace('/results'), 1500);
+    // 投完票停留在這個畫面，讓選民看清楚五步與回執；要看開票狀態再自己按按鈕前往
+    document.getElementById('successCard').scrollIntoView({ behavior: 'smooth', block: 'start' });
 
   } catch(e) {
     addStep(e.message, false);
